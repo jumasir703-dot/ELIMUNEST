@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: elimunest
+    runtime: node
+    plan: starter # persistent disks require a paid plan
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22
+      - key: DATA_DIR
+        value: /var/data
+      - key: GEMINI_API_KEY
+        sync: false # set this in the Render dashboard
+      - key: APP_URL
+        sync: false # set to your Render URL after first deploy
+    disk:
+      name: elimunest-data
+      mountPath: /var/data
+      sizeGB: 1

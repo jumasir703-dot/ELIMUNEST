@@ -59,7 +59,10 @@ import {
   type DatabaseState,
 } from './seed.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+// Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'elimunest-db.json');
 const LEGACY_DB_FILE = path.join(DATA_DIR, 'scholara-db.json');
 
