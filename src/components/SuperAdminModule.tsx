@@ -3,9 +3,12 @@ import {
   Building2,
   Check,
   ExternalLink,
+  Eye,
+  History,
   ImagePlus,
   Palette,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   ShieldCheck,
@@ -19,6 +22,7 @@ import {
   getTenantInitials,
   hexToRgba,
   isLightColor,
+  mixHex,
   normalizeHex,
   processLogoUploadFile,
 } from '../lib/theme';
@@ -27,20 +31,41 @@ import {
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
   TENANT_THEME_PRESETS,
+  type AdminAuditAction,
+  type AdminAuditEntry,
   type SuperAdminTenantSummary,
   type Tenant,
+  type TenantBranding,
   type TenantStatus,
   type TenantWorkspaceData,
+  type UserRole,
 } from '../shared/types';
 
 interface SuperAdminModuleProps {
   workspace: TenantWorkspaceData;
+  currentRole?: UserRole;
   onRefresh: () => Promise<void>;
+  onPreviewBrandingChange?: (branding: TenantBranding | null) => void;
   onSwitchTenant: (tenantId: string, targetModule?: string) => void;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
 
-type SuperAdminTab = 'directory' | 'branding' | 'provision';
+type SuperAdminTab = 'directory' | 'branding' | 'provision' | 'audit';
+
+const AUDIT_ACTION_BADGES: Record<AdminAuditAction, string> = {
+  PROVISION_TENANT:
+    'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300',
+  UPDATE_METADATA:
+    'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300',
+  CHANGE_STATUS:
+    'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300',
+  UPDATE_BRANDING:
+    'border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300',
+  UPDATE_RESOURCES:
+    'border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200',
+  DEPROVISION_TENANT:
+    'border-red-200 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300',
+};
 
 const STATUS_BADGE_STYLES: Record<TenantStatus, string> = {
   Active:
@@ -53,13 +78,18 @@ const STATUS_BADGE_STYLES: Record<TenantStatus, string> = {
 
 export function SuperAdminModule({
   workspace,
+  currentRole = 'Super Admin',
   onRefresh,
+  onPreviewBrandingChange,
   onSwitchTenant,
   onNotify,
 }: SuperAdminModuleProps) {
   const [activeTab, setActiveTab] = useState<SuperAdminTab>('directory');
   const [summaries, setSummaries] = useState<SuperAdminTenantSummary[]>([]);
   const [loadingDirectory, setLoadingDirectory] = useState(true);
+  const [auditLogs, setAuditLogs] = useState<AdminAuditEntry[]>([]);
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
+  const [previewFullScreen, setPreviewFullScreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [planFilter, setPlanFilter] = useState<'All' | 'Enterprise' | 'Growth'>('All');
   const [statusFilter, setStatusFilter] = useState<'All' | TenantStatus>('All');
@@ -128,9 +158,53 @@ export function SuperAdminModule({
     }
   }, [onNotify]);
 
+  const loadAuditLogs = useCallback(async () => {
+    setLoadingAuditLogs(true);
+    try {
+      const { logs } = await saasApi.getAdminAuditLogs(60);
+      setAuditLogs(logs);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to load admin audit trail',
+        'error'
+      );
+    } finally {
+      setLoadingAuditLogs(false);
+    }
+  }, [onNotify]);
+
   useEffect(() => {
     loadDirectory();
-  }, [loadDirectory, workspace.tenants.length]);
+  }, [loadDirectory, workspace.tenants.length, currentRole]);
+
+  useEffect(() => {
+    if (activeTab === 'audit') {
+      loadAuditLogs();
+    }
+  }, [activeTab, loadAuditLogs]);
+
+  useEffect(() => {
+    if (!onPreviewBrandingChange) return;
+    if (activeTab === 'branding' && previewFullScreen) {
+      onPreviewBrandingChange({
+        primaryColor: normalizeHex(editBranding.primaryColor, '#2563EB'),
+        accentColor: normalizeHex(editBranding.accentColor, '#0F766E'),
+        sidebarColor: editBranding.sidebarColor.trim()
+          ? normalizeHex(editBranding.sidebarColor, '#0F172A')
+          : '',
+        logoDataUrl: editBranding.logoDataUrl,
+        tagline: editBranding.tagline.trim(),
+      });
+    } else {
+      onPreviewBrandingChange(null);
+    }
+  }, [activeTab, previewFullScreen, editBranding, onPreviewBrandingChange]);
+
+  useEffect(() => {
+    return () => {
+      onPreviewBrandingChange?.(null);
+    };
+  }, [onPreviewBrandingChange]);
 
   const populateEditorFromTenant = useCallback((target: Tenant) => {
     setEditProfile({
@@ -373,8 +447,10 @@ export function SuperAdminModule({
   const previewPrimaryFg = getContrastForeground(previewPrimary);
   const previewSidebarBg = editBranding.sidebarColor.trim()
     ? normalizeHex(editBranding.sidebarColor, '#0F172A')
-    : '#FFFFFF';
+    : mixHex(previewPrimary, '#FFFFFF', 0.88);
   const previewSidebarLight = isLightColor(previewSidebarBg);
+  const previewCanvasBg = mixHex(previewPrimary, '#FFFFFF', 0.88);
+  const previewCardBg = mixHex(previewPrimary, '#FFFFFF', 0.96);
 
   return (
     <div className="space-y-6">
@@ -395,7 +471,7 @@ export function SuperAdminModule({
           </p>
         </div>
 
-        <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+        <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
           <button
             type="button"
             onClick={() => setActiveTab('directory')}
@@ -430,6 +506,18 @@ export function SuperAdminModule({
           >
             <Plus className="h-3.5 w-3.5" />
             Add Tenant
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('audit')}
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              activeTab === 'audit'
+                ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <History className="h-3.5 w-3.5" />
+            Service Audit Log
           </button>
         </div>
       </div>
@@ -1233,22 +1321,37 @@ export function SuperAdminModule({
           {/* Right Column: Live Tenant Portal Preview */}
           <div className="lg:col-span-5">
             <div className="sticky top-24 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                     Live Tenant Portal Preview
                   </h2>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Real-time preview of navigation, logo, and theme colours
+                    Full-screen theme across sidebar, header, canvas, and cards
                   </p>
                 </div>
-                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-                  {previewPrimary}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setPreviewFullScreen((v) => !v)}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                    previewFullScreen
+                      ? 'border-blue-600 bg-blue-600 text-white'
+                      : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
+                  }`}
+                >
+                  <Eye className="h-3 w-3" />
+                  {previewFullScreen ? 'Full-Screen Preview On' : 'Preview Full Screen'}
+                </button>
               </div>
 
               {/* Mini Mock Shell */}
-              <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
+              <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
+                <div
+                  className="h-1 w-full"
+                  style={{
+                    background: `linear-gradient(90deg, ${previewPrimary}, ${previewAccent})`,
+                  }}
+                />
                 <div className="grid grid-cols-12">
                   {/* Mini Sidebar */}
                   <div
@@ -1335,28 +1438,40 @@ export function SuperAdminModule({
                   </div>
 
                   {/* Mini Content Canvas */}
-                  <div className="col-span-7 bg-slate-50 p-3 dark:bg-slate-950">
-                    <div className="flex items-center justify-between border-b border-slate-200 pb-2 dark:border-slate-800">
-                      <span className="truncate text-[11px] font-semibold text-slate-900 dark:text-slate-100">
+                  <div
+                    className="col-span-7 p-3"
+                    style={{ backgroundColor: previewCanvasBg }}
+                  >
+                    <div
+                      className="flex items-center justify-between border-b pb-2"
+                      style={{ borderColor: hexToRgba(previewPrimary, 0.2) }}
+                    >
+                      <span className="truncate text-[11px] font-semibold text-slate-900">
                         {editProfile.name}
                       </span>
-                      <span className="text-[10px] font-medium text-slate-500">
+                      <span className="text-[10px] font-medium text-slate-600">
                         {editProfile.currentTerm}
                       </span>
                     </div>
 
                     <div className="mt-3 space-y-2.5">
-                      <div className="rounded-lg border border-slate-200 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-900">
-                        <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                      <div
+                        className="rounded-lg border p-2.5"
+                        style={{
+                          backgroundColor: previewCardBg,
+                          borderColor: hexToRgba(previewPrimary, 0.2),
+                        }}
+                      >
+                        <p className="text-[10px] text-slate-600">
                           Attendance Benchmark
                         </p>
-                        <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-100">
                           <div
                             className="h-full rounded-full"
                             style={{ width: '82%', backgroundColor: previewPrimary }}
                           />
                         </div>
-                        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
                           <div
                             className="h-full rounded-full"
                             style={{ width: '68%', backgroundColor: previewAccent }}
@@ -1406,14 +1521,14 @@ export function SuperAdminModule({
                 <div className="flex items-center justify-between">
                   <span>Sidebar Surface</span>
                   <span className="font-mono text-slate-800 dark:text-slate-200">
-                    {editBranding.sidebarColor ? previewSidebarBg : 'Default Neutral'}
+                    {editBranding.sidebarColor ? previewSidebarBg : `${previewSidebarBg} (Auto)`}
                   </span>
                 </div>
               </div>
             </div>
           </div>
         </div>
-      ) : (
+      ) : activeTab === 'provision' ? (
         <form
           onSubmit={handleProvisionNewTenant}
           className="grid grid-cols-1 gap-6 lg:grid-cols-12"
@@ -1847,6 +1962,94 @@ export function SuperAdminModule({
             </button>
           </div>
         </form>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                Backend Admin Service Audit Trail
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                All tenant provisioning, metadata updates, branding changes, and deprovisioning events executed through the authenticated backend service layer.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={loadAuditLogs}
+              disabled={loadingAuditLogs}
+              className="inline-flex items-center gap-1.5 self-start rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${loadingAuditLogs ? 'animate-spin' : ''}`} />
+              Refresh Log
+            </button>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-slate-200 bg-slate-50/70 text-[11px] font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
+                  <tr>
+                    <th className="px-4 py-3">Timestamp</th>
+                    <th className="px-4 py-3">Operation</th>
+                    <th className="px-4 py-3">Authenticated Actor</th>
+                    <th className="px-4 py-3">Target Tenant</th>
+                    <th className="px-4 py-3">Service Summary</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {loadingAuditLogs ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-4 py-10 text-center text-slate-500 dark:text-slate-400"
+                      >
+                        Loading admin service audit records...
+                      </td>
+                    </tr>
+                  ) : auditLogs.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-4 py-10 text-center text-slate-500 dark:text-slate-400"
+                      >
+                        No administrative provisioning or metadata operations recorded yet. Create, update, or customize a tenant to generate verified service logs.
+                      </td>
+                    </tr>
+                  ) : (
+                    auditLogs.map((entry) => (
+                      <tr key={entry.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
+                        <td className="whitespace-nowrap px-4 py-3 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                          {new Date(entry.timestamp).toLocaleString()}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-block rounded border px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                              AUDIT_ACTION_BADGES[entry.action]
+                            }`}
+                          >
+                            {entry.action}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300">
+                          <div className="font-semibold">{entry.actorRole}</div>
+                          <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                            {entry.actorEmail}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-medium text-slate-900 dark:text-slate-100">
+                          {entry.tenantName}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                          {entry.summary}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

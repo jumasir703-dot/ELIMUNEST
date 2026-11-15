@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
   BarChart3,
   Bell,
@@ -31,13 +31,13 @@ import {
   getContrastForeground,
   getTenantBrandingCssVars,
   getTenantInitials,
-  hexToRgba,
-  isLightColor,
+  resolveTenantSidebarTheme,
   normalizeHex,
 } from './lib/theme';
 import {
   DEFAULT_TENANT_BRANDING,
   type NotificationItem,
+  type TenantBranding,
   type TenantWorkspaceData,
   type UserRole,
   type WsServerEvent,
@@ -85,12 +85,23 @@ export default function App() {
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [previewBrandingOverride, setPreviewBrandingOverride] = useState<TenantBranding | null>(null);
 
   useEffect(() => {
     const root = document.documentElement;
     if (darkMode) root.classList.add('dark');
     else root.classList.remove('dark');
   }, [darkMode]);
+
+  useEffect(() => {
+    saasApi.syncRoleSession(currentRole).catch(() => {
+      // ignore initial sync error if server restarting
+    });
+  }, [currentRole]);
+
+  useEffect(() => {
+    setPreviewBrandingOverride(null);
+  }, [tenantId, activeModule]);
 
   const pushToast = useCallback((title: string, tone: 'success' | 'error' | 'info' = 'success') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -161,20 +172,30 @@ export default function App() {
   const activeNavLabel =
     NAV_ITEMS.find((n) => n.id === activeModule)?.label || 'Analytics';
 
-  const activeBranding = workspace?.tenant.branding;
+  const activeBranding =
+    activeModule === 'super-admin' && previewBrandingOverride
+      ? previewBrandingOverride
+      : workspace?.tenant.branding;
   const brandVars = useMemo(
     () => getTenantBrandingCssVars(activeBranding, darkMode),
     [activeBranding, darkMode]
   );
-  const customSidebarHex = activeBranding?.sidebarColor?.trim()
-    ? normalizeHex(activeBranding.sidebarColor, '#0F172A')
-    : '';
-  const hasCustomSidebar = Boolean(customSidebarHex);
-  const customSidebarIsLight = customSidebarHex ? isLightColor(customSidebarHex) : !darkMode;
+  const sidebarTheme = useMemo(
+    () => resolveTenantSidebarTheme(activeBranding, darkMode),
+    [activeBranding, darkMode]
+  );
   const activePrimaryHex = normalizeHex(
     activeBranding?.primaryColor,
     DEFAULT_TENANT_BRANDING.primaryColor
   );
+
+  useEffect(() => {
+    const rootStyle = document.documentElement.style;
+    const entries = Object.entries(brandVars);
+    entries.forEach(([key, value]) => {
+      rootStyle.setProperty(key, value);
+    });
+  }, [brandVars]);
 
   const handleNavigate = (mod: string) => {
     const valid = NAV_ITEMS.find((n) => n.id === mod);
@@ -193,8 +214,8 @@ export default function App() {
 
   return (
     <div
-      style={brandVars}
-      className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100"
+      style={brandVars as CSSProperties}
+      className="tenant-themed-app min-h-screen text-slate-900 dark:text-slate-100"
     >
       {/* Mobile Sidebar Backdrop */}
       {mobileMenuOpen && (
@@ -206,37 +227,20 @@ export default function App() {
 
       {/* Left Sidebar Navigation (256px) */}
       <aside
-        style={
-          hasCustomSidebar
-            ? {
-                backgroundColor: customSidebarHex,
-                borderColor: customSidebarIsLight
-                  ? 'rgba(15, 23, 42, 0.12)'
-                  : 'rgba(255, 255, 255, 0.12)',
-                color: customSidebarIsLight ? '#0F172A' : '#F8FAFC',
-              }
-            : undefined
-        }
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r transition-transform duration-200 lg:translate-x-0 no-print ${
-          hasCustomSidebar
-            ? ''
-            : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900'
-        } ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        style={{
+          backgroundColor: sidebarTheme.backgroundColor,
+          borderColor: sidebarTheme.borderColor,
+          color: sidebarTheme.textColor,
+        }}
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r transition-all duration-200 lg:translate-x-0 no-print ${
+          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
       >
+        <div className="tenant-brand-stripe h-1 w-full shrink-0" />
         {/* Brand Lockup (Active Tenant Logo + Wordmark) */}
         <div
-          style={
-            hasCustomSidebar
-              ? {
-                  borderColor: customSidebarIsLight
-                    ? 'rgba(15, 23, 42, 0.1)'
-                    : 'rgba(255, 255, 255, 0.12)',
-                }
-              : undefined
-          }
-          className={`flex h-16 items-center justify-between gap-2 border-b px-4 ${
-            hasCustomSidebar ? '' : 'border-slate-200 dark:border-slate-800'
-          }`}
+          style={{ borderColor: sidebarTheme.borderColor }}
+          className="flex h-16 items-center justify-between gap-2 border-b px-4"
         >
           <div className="flex min-w-0 items-center gap-2.5">
             {activeBranding?.logoDataUrl ? (
@@ -244,7 +248,7 @@ export default function App() {
                 src={activeBranding.logoDataUrl}
                 alt={`${workspace?.tenant.name || 'School'} logo`}
                 referrerPolicy="no-referrer"
-                className="h-9 w-9 shrink-0 rounded-lg border border-black/10 bg-white object-contain p-0.5"
+                className="tenant-pure-white h-9 w-9 shrink-0 rounded-lg border border-black/10 bg-white object-contain p-0.5"
               />
             ) : (
               <div
@@ -258,26 +262,12 @@ export default function App() {
               </div>
             )}
             <div className="min-w-0">
-              <span
-                className={`block truncate font-display text-sm font-bold tracking-tight ${
-                  hasCustomSidebar ? '' : 'text-slate-900 dark:text-slate-100'
-                }`}
-              >
+              <span className="block truncate font-display text-sm font-bold tracking-tight">
                 {workspace?.tenant.name || 'elimuNest'}
               </span>
               <span
-                style={
-                  hasCustomSidebar
-                    ? {
-                        color: customSidebarIsLight
-                          ? '#475569'
-                          : 'rgba(248, 250, 252, 0.72)',
-                      }
-                    : undefined
-                }
-                className={`block truncate text-[11px] ${
-                  hasCustomSidebar ? '' : 'text-slate-500 dark:text-slate-400'
-                }`}
+                style={{ color: sidebarTheme.mutedColor }}
+                className="block truncate text-[11px]"
               >
                 {activeBranding?.tagline || 'elimuNest Platform'}
               </span>
@@ -285,7 +275,7 @@ export default function App() {
           </div>
           <button
             onClick={() => setMobileMenuOpen(false)}
-            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 lg:hidden dark:hover:bg-slate-800"
+            className="rounded-lg p-1 opacity-75 hover:opacity-100 lg:hidden"
             aria-label="Close navigation"
           >
             <X className="h-4 w-4" />
@@ -294,34 +284,14 @@ export default function App() {
 
         {/* Tenant Switcher & Role Context */}
         <div
-          style={
-            hasCustomSidebar
-              ? {
-                  borderColor: customSidebarIsLight
-                    ? 'rgba(15, 23, 42, 0.1)'
-                    : 'rgba(255, 255, 255, 0.12)',
-                }
-              : undefined
-          }
-          className={`space-y-3 border-b p-4 ${
-            hasCustomSidebar ? '' : 'border-slate-200 dark:border-slate-800'
-          }`}
+          style={{ borderColor: sidebarTheme.borderColor }}
+          className="space-y-3 border-b p-4"
         >
           <div>
             <label
               htmlFor="tenant-select"
-              style={
-                hasCustomSidebar
-                  ? {
-                      color: customSidebarIsLight
-                        ? '#475569'
-                        : 'rgba(248, 250, 252, 0.72)',
-                    }
-                  : undefined
-              }
-              className={`flex items-center gap-1.5 text-xs font-medium ${
-                hasCustomSidebar ? '' : 'text-slate-500 dark:text-slate-400'
-              }`}
+              style={{ color: sidebarTheme.mutedColor }}
+              className="flex items-center gap-1.5 text-xs font-medium"
             >
               <Building2 className="h-3.5 w-3.5" />
               Active School Tenant
@@ -330,20 +300,12 @@ export default function App() {
               id="tenant-select"
               value={tenantId}
               onChange={(e) => setTenantId(e.target.value)}
-              style={
-                hasCustomSidebar && !customSidebarIsLight
-                  ? {
-                      backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                      borderColor: 'rgba(255, 255, 255, 0.18)',
-                      color: '#F8FAFC',
-                    }
-                  : undefined
-              }
-              className={`mt-1.5 w-full rounded-lg border px-2.5 py-2 text-xs font-semibold focus:outline-none ${
-                hasCustomSidebar && !customSidebarIsLight
-                  ? ''
-                  : 'border-slate-200 bg-slate-50 text-slate-900 focus:border-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100'
-              }`}
+              style={{
+                backgroundColor: sidebarTheme.inputBg,
+                borderColor: sidebarTheme.inputBorder,
+                color: sidebarTheme.textColor,
+              }}
+              className="mt-1.5 w-full rounded-lg border px-2.5 py-2 text-xs font-semibold focus:outline-none"
             >
               {(workspace?.tenants || []).map((t) => (
                 <option key={t.id} value={t.id} className="text-slate-900">
@@ -354,18 +316,8 @@ export default function App() {
             </select>
             {workspace && (
               <p
-                style={
-                  hasCustomSidebar
-                    ? {
-                        color: customSidebarIsLight
-                          ? '#475569'
-                          : 'rgba(248, 250, 252, 0.7)',
-                      }
-                    : undefined
-                }
-                className={`mt-1.5 truncate text-[11px] ${
-                  hasCustomSidebar ? '' : 'text-slate-500 dark:text-slate-400'
-                }`}
+                style={{ color: sidebarTheme.mutedColor }}
+                className="mt-1.5 truncate text-[11px]"
               >
                 {workspace.tenant.location} · {workspace.tenant.plan}
               </p>
@@ -375,18 +327,8 @@ export default function App() {
           <div>
             <label
               htmlFor="role-select"
-              style={
-                hasCustomSidebar
-                  ? {
-                      color: customSidebarIsLight
-                        ? '#475569'
-                        : 'rgba(248, 250, 252, 0.72)',
-                    }
-                  : undefined
-              }
-              className={`block text-xs font-medium ${
-                hasCustomSidebar ? '' : 'text-slate-500 dark:text-slate-400'
-              }`}
+              style={{ color: sidebarTheme.mutedColor }}
+              className="block text-xs font-medium"
             >
               Operator Role
             </label>
@@ -395,25 +337,18 @@ export default function App() {
               value={currentRole}
               onChange={(e) => {
                 const nextRole = e.target.value as UserRole;
+                saasApi.syncRoleSession(nextRole).catch(() => {});
                 setCurrentRole(nextRole);
                 if (nextRole === 'Super Admin') {
                   setActiveModule('super-admin');
                 }
               }}
-              style={
-                hasCustomSidebar && !customSidebarIsLight
-                  ? {
-                      backgroundColor: 'rgba(255, 255, 255, 0.1)',
-                      borderColor: 'rgba(255, 255, 255, 0.18)',
-                      color: '#F8FAFC',
-                    }
-                  : undefined
-              }
-              className={`mt-1 w-full rounded-lg border px-2.5 py-1.5 text-xs font-medium focus:outline-none ${
-                hasCustomSidebar && !customSidebarIsLight
-                  ? ''
-                  : 'border-slate-200 bg-white text-slate-800 focus:border-blue-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
-              }`}
+              style={{
+                backgroundColor: sidebarTheme.inputBg,
+                borderColor: sidebarTheme.inputBorder,
+                color: sidebarTheme.textColor,
+              }}
+              className="mt-1 w-full rounded-lg border px-2.5 py-1.5 text-xs font-medium focus:outline-none"
             >
               {ROLES.map((role) => (
                 <option key={role} value={role} className="text-slate-900">
@@ -429,32 +364,26 @@ export default function App() {
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
             const active = activeModule === item.id;
-            const activeStyle =
-              hasCustomSidebar && !customSidebarIsLight
-                ? {
-                    backgroundColor: hexToRgba('#FFFFFF', 0.16),
-                    color: '#FFFFFF',
-                  }
-                : undefined;
-            const inactiveStyle =
-              hasCustomSidebar && !customSidebarIsLight
-                ? { color: 'rgba(248, 250, 252, 0.78)' }
-                : hasCustomSidebar && customSidebarIsLight
-                ? { color: '#334155' }
-                : undefined;
             return (
               <button
                 key={item.id}
                 onClick={() => handleNavigate(item.id)}
-                style={active ? activeStyle : inactiveStyle}
-                className={`flex w-full items-center gap-3 whitespace-nowrap rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors ${
+                style={
                   active
-                    ? hasCustomSidebar && !customSidebarIsLight
-                      ? ''
-                      : 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
-                    : hasCustomSidebar && !customSidebarIsLight
-                    ? 'hover:bg-white/10 hover:text-white'
-                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:hover:text-slate-100'
+                    ? {
+                        backgroundColor: sidebarTheme.activeBg,
+                        color: sidebarTheme.activeFg,
+                      }
+                    : {
+                        color: sidebarTheme.mutedColor,
+                      }
+                }
+                className={`flex w-full items-center gap-3 whitespace-nowrap rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${
+                  active
+                    ? 'font-semibold'
+                    : sidebarTheme.isLight
+                    ? 'font-medium hover:bg-black/5'
+                    : 'font-medium hover:bg-white/10'
                 }`}
               >
                 <Icon className="h-4 w-4 shrink-0" />
@@ -466,46 +395,31 @@ export default function App() {
 
         {/* Footer Provision Link */}
         <div
-          style={
-            hasCustomSidebar
-              ? {
-                  borderColor: customSidebarIsLight
-                    ? 'rgba(15, 23, 42, 0.1)'
-                    : 'rgba(255, 255, 255, 0.12)',
-                }
-              : undefined
-          }
-          className={`border-t p-4 ${
-            hasCustomSidebar ? '' : 'border-slate-200 dark:border-slate-800'
-          }`}
+          style={{ borderColor: sidebarTheme.borderColor }}
+          className="border-t p-4"
         >
           <button
             onClick={() =>
               handleNavigate(canAccessSuperAdmin ? 'super-admin' : 'settings')
             }
-            style={
-              hasCustomSidebar && !customSidebarIsLight
-                ? {
-                    borderColor: 'rgba(255, 255, 255, 0.22)',
-                    color: '#F8FAFC',
-                  }
-                : undefined
-            }
+            style={{
+              borderColor: sidebarTheme.inputBorder,
+              color: sidebarTheme.textColor,
+            }}
             className={`w-full rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
-              hasCustomSidebar && !customSidebarIsLight
-                ? 'hover:bg-white/10'
-                : 'border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800'
+              sidebarTheme.isLight ? 'hover:bg-black/5' : 'hover:bg-white/10'
             }`}
           >
-            {canAccessSuperAdmin ? 'Open Super Admin Panel' : '+ Provision New School'}
+            {canAccessSuperAdmin ? 'Open Super Admin Panel' : 'School Settings'}
           </button>
         </div>
       </aside>
 
       {/* Main Content Area */}
       <div className="flex min-h-screen flex-col lg:pl-64">
+        <div className="tenant-brand-stripe h-1 w-full shrink-0 no-print" />
         {/* Top Header Contract */}
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-4 backdrop-blur sm:px-8 dark:border-slate-800 dark:bg-slate-900/95 no-print">
+        <header className="tenant-header-bar sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b px-4 backdrop-blur sm:px-8 no-print">
           <div className="flex min-w-0 items-center gap-3">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -521,7 +435,7 @@ export default function App() {
                   src={activeBranding.logoDataUrl}
                   alt={`${workspace?.tenant.name || 'School'} logo`}
                   referrerPolicy="no-referrer"
-                  className="h-6 w-6 shrink-0 rounded border border-slate-200 bg-white object-contain p-0.5 dark:border-slate-700"
+                  className="tenant-pure-white h-6 w-6 shrink-0 rounded border border-slate-200 bg-white object-contain p-0.5 dark:border-slate-700"
                 />
               )}
               <span className="hidden text-slate-400 sm:inline">elimuNest</span>
@@ -642,6 +556,7 @@ export default function App() {
               {activeModule === 'settings' && (
                 <SettingsModule
                   workspace={workspace}
+                  currentRole={currentRole}
                   onRefresh={() => loadWorkspace(tenantId, true)}
                   onSwitchTenant={(newId) => {
                     setTenantId(newId);
@@ -653,7 +568,9 @@ export default function App() {
               {activeModule === 'super-admin' && canAccessSuperAdmin && (
                 <SuperAdminModule
                   workspace={workspace}
+                  currentRole={currentRole}
                   onRefresh={() => loadWorkspace(tenantId, true)}
+                  onPreviewBrandingChange={setPreviewBrandingOverride}
                   onSwitchTenant={(newId, targetModule) => {
                     setTenantId(newId);
                     if (targetModule) {

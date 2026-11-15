@@ -470,6 +470,36 @@ export interface SuperAdminTenantSummary {
   attendanceCount: number;
 }
 
+export type AdminAuditAction =
+  | 'PROVISION_TENANT'
+  | 'UPDATE_METADATA'
+  | 'CHANGE_STATUS'
+  | 'UPDATE_BRANDING'
+  | 'UPDATE_RESOURCES'
+  | 'DEPROVISION_TENANT';
+
+export interface AdminAuditEntry {
+  id: string;
+  timestamp: string;
+  actorRole: UserRole;
+  actorEmail: string;
+  action: AdminAuditAction;
+  tenantId: string;
+  tenantName: string;
+  summary: string;
+}
+
+export interface AdminSessionInfo {
+  token: string;
+  expiresAt: string;
+  actor: {
+    id: string;
+    role: UserRole;
+    email: string;
+    name: string;
+  };
+}
+
 export function getSubjectsForLevel(
   tenant: Pick<Tenant, 'subjects' | 'levelSubjects'>,
   clusterId: CbcClusterId

@@ -8,6 +8,12 @@
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   }
 
+  html,
+  body {
+    background: var(--tenant-canvas-bg, #f8fafc);
+    transition: background-color 180ms ease, color 180ms ease;
+  }
+
   body {
     font-family: var(--font-sans);
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
@@ -20,6 +26,27 @@
   .font-mono {
     font-family: var(--font-mono);
   }
+}
+
+.tenant-themed-app {
+  background: var(--tenant-canvas-bg, #f8fafc);
+}
+
+.tenant-header-bar {
+  background-color: var(--tenant-header-bg, rgba(255, 255, 255, 0.94));
+  border-color: var(--tenant-border, #e2e8f0);
+}
+
+.tenant-brand-stripe {
+  background: linear-gradient(90deg, var(--brand-primary, #2563EB), var(--brand-accent, #0284C7));
+}
+
+:root:not(.dark) .tenant-themed-app .bg-white:not(.tenant-pure-white) {
+  background-color: var(--tenant-surface, #ffffff);
+}
+
+:root:not(.dark) .tenant-themed-app .bg-white\/95 {
+  background-color: var(--tenant-header-bg, rgba(255, 255, 255, 0.95));
 }
 
 .tabular-nums {

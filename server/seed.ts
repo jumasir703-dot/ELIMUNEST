@@ -6,6 +6,7 @@ import {
   KENYAN_BELL_SCHEDULE,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
+  type AdminAuditEntry,
   type AdmissionApplication,
   type Announcement,
   type AttendanceRecord,
@@ -95,6 +96,7 @@ export interface DatabaseState {
   announcements: Announcement[];
   messages: DirectMessage[];
   notifications: NotificationItem[];
+  adminAuditLogs: AdminAuditEntry[];
 }
 
 export function computeLetterGrade(
@@ -1597,5 +1599,6 @@ export function createSeedDatabase(): DatabaseState {
     announcements,
     messages,
     notifications,
+    adminAuditLogs: [],
   };
 }

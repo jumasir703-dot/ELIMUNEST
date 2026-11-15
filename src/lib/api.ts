@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
+  AdminAuditEntry,
+  AdminSessionInfo,
   AdmissionApplication,
   AdmissionStage,
   Announcement,
@@ -31,6 +33,66 @@ import type {
   WsServerEvent,
 } from '../shared/types';
 
+const ADMIN_SESSION_STORAGE_KEY = 'elimunest_admin_session_v1';
+let memoryAdminSession: AdminSessionInfo | null = null;
+let activeAdminRole: UserRole = 'Admin';
+
+function isPrivilegedRole(role: UserRole): boolean {
+  return role === 'Super Admin' || role === 'Admin';
+}
+
+function readStoredAdminSession(): AdminSessionInfo | null {
+  if (memoryAdminSession) return memoryAdminSession;
+  try {
+    const raw = window.sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AdminSessionInfo;
+    if (parsed && typeof parsed.token === 'string' && parsed.expiresAt) {
+      memoryAdminSession = parsed;
+      return parsed;
+    }
+  } catch {
+    // ignore storage failures
+  }
+  return null;
+}
+
+function writeStoredAdminSession(session: AdminSessionInfo | null) {
+  memoryAdminSession = session;
+  try {
+    if (session) {
+      window.sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
+    } else {
+      window.sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage failures
+  }
+}
+
+async function ensureAdminSession(role: UserRole = activeAdminRole): Promise<string> {
+  if (!isPrivilegedRole(role)) {
+    writeStoredAdminSession(null);
+    throw new Error(`Role "${role}" is not authorized for Platform Admin API access.`);
+  }
+
+  const existing = readStoredAdminSession();
+  if (
+    existing &&
+    existing.actor.role === role &&
+    Date.parse(existing.expiresAt) > Date.now() + 30_000
+  ) {
+    return existing.token;
+  }
+
+  const session = await apiRequest<AdminSessionInfo>('/api/admin/session', {
+    method: 'POST',
+    body: JSON.stringify({ role }),
+  });
+  writeStoredAdminSession(session);
+  return session.token;
+}
+
 async function apiRequest<T>(
   url: string,
   options: RequestInit & { tenantId?: string } = {}
@@ -61,13 +123,56 @@ async function apiRequest<T>(
   return (await response.json()) as T;
 }
 
+async function adminApiRequest<T>(
+  url: string,
+  options: RequestInit & { tenantId?: string } = {}
+): Promise<T> {
+  const token = await ensureAdminSession(activeAdminRole);
+  try {
+    return await apiRequest<T>(url, {
+      ...options,
+      headers: {
+        ...(options.headers as Record<string, string> | undefined),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (err) {
+    if (err instanceof Error && /unauthorized|expired/i.test(err.message)) {
+      writeStoredAdminSession(null);
+      const refreshedToken = await ensureAdminSession(activeAdminRole);
+      return apiRequest<T>(url, {
+        ...options,
+        headers: {
+          ...(options.headers as Record<string, string> | undefined),
+          Authorization: `Bearer ${refreshedToken}`,
+        },
+      });
+    }
+    throw err;
+  }
+}
+
 export const saasApi = {
+  async syncRoleSession(role: UserRole): Promise<AdminSessionInfo | null> {
+    activeAdminRole = role;
+    if (!isPrivilegedRole(role)) {
+      writeStoredAdminSession(null);
+      return null;
+    }
+    await ensureAdminSession(role);
+    return readStoredAdminSession();
+  },
+
   getWorkspace(tenantId: string) {
     return apiRequest<TenantWorkspaceData>('/api/workspace', { tenantId });
   },
 
   getSuperAdminTenants() {
-    return apiRequest<{ summaries: SuperAdminTenantSummary[] }>('/api/super-admin/tenants');
+    return adminApiRequest<{ summaries: SuperAdminTenantSummary[] }>('/api/admin/tenants');
+  },
+
+  getAdminAuditLogs(limit = 50) {
+    return adminApiRequest<{ logs: AdminAuditEntry[] }>(`/api/admin/audit-logs?limit=${limit}`);
   },
 
   createTenant(payload: {
@@ -86,7 +191,7 @@ export const saasApi = {
     leadTeacherName: string;
     leadTeacherEmail: string;
   }) {
-    return apiRequest<{ tenant: Tenant }>('/api/tenants', {
+    return adminApiRequest<{ tenant: Tenant; auditEntry: AdminAuditEntry }>('/api/admin/tenants', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -113,11 +218,14 @@ export const saasApi = {
       addSubject?: string;
     }
   ) {
-    return apiRequest<{ tenant: Tenant }>(`/api/tenants/${tenantId}`, {
-      method: 'PATCH',
-      tenantId,
-      body: JSON.stringify(patch),
-    });
+    return adminApiRequest<{ tenant: Tenant; auditEntry: AdminAuditEntry }>(
+      `/api/admin/tenants/${tenantId}/metadata`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify(patch),
+      }
+    );
   },
 
   updateTenantBranding(
@@ -134,21 +242,25 @@ export const saasApi = {
       branding?: Partial<TenantBranding>;
     }
   ) {
-    return apiRequest<{ tenant: Tenant }>(`/api/tenants/${tenantId}/branding`, {
-      method: 'PATCH',
-      tenantId,
-      body: JSON.stringify(payload),
-    });
+    return adminApiRequest<{ tenant: Tenant; auditEntry: AdminAuditEntry }>(
+      `/api/admin/tenants/${tenantId}/branding`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
   },
 
   deleteTenant(tenantId: string) {
-    return apiRequest<{ deleted: boolean; remainingTenants: Tenant[] }>(
-      `/api/tenants/${tenantId}`,
-      {
-        method: 'DELETE',
-        tenantId,
-      }
-    );
+    return adminApiRequest<{
+      deleted: boolean;
+      remainingTenants: Tenant[];
+      auditEntry: AdminAuditEntry;
+    }>(`/api/admin/tenants/${tenantId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
   },
 
   updateStreams(

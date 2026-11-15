@@ -4,6 +4,12 @@ import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ConflictError, TenantStore } from './server/store.ts';
+import {
+  issueAdminSession,
+  requireAdminAuth,
+  type AdminAuthenticatedRequest,
+} from './server/middleware/adminAuth.ts';
+import { PlatformAdminService } from './server/services/adminService.ts';
 import type { WsServerEvent } from './src/shared/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -24,6 +30,7 @@ const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
 const store = new TenantStore();
+const adminService = new PlatformAdminService(store);
 
 function broadcastToTenant(tenantId: string, eventType: WsServerEvent['type'], payload: unknown) {
   const envelope: WsServerEvent = { type: eventType, tenantId, payload };
@@ -88,44 +95,127 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', tenants: store.listTenants().length });
 });
 
-app.get('/api/super-admin/tenants', (_req, res) => {
-  res.json({ summaries: store.getSuperAdminOverview() });
-});
+// Admin Auth & Service Layer Endpoints
+const adminGuard = requireAdminAuth(['Super Admin', 'Admin']);
 
-app.get('/api/tenants', (_req, res) => {
-  res.json({ tenants: store.listTenants() });
-});
+app.post('/api/admin/session', issueAdminSession);
 
-app.post('/api/tenants', (req, res, next) => {
+app.get('/api/admin/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
   try {
-    const tenant = store.createTenant(req.body);
-    res.status(201).json({ tenant });
+    const summaries = adminService.listTenantSummaries(req.adminActor!);
+    res.json({ summaries });
   } catch (err) {
     next(err);
   }
 });
 
-app.patch('/api/tenants/:id', (req, res, next) => {
+app.get('/api/admin/tenants/:id/metadata', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
   try {
-    const tenant = store.updateTenant(req.params.id, req.body);
+    const tenant = adminService.getTenantMetadata(req.adminActor!, String(req.params.id));
     res.json({ tenant });
   } catch (err) {
     next(err);
   }
 });
 
-app.patch('/api/tenants/:id/branding', (req, res, next) => {
+app.post('/api/admin/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
   try {
-    const tenant = store.updateTenantBranding(req.params.id, req.body);
-    res.json({ tenant });
+    const result = adminService.provisionTenant(req.adminActor!, req.body);
+    res.status(201).json(result);
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/tenants/:id', (req, res, next) => {
+app.patch('/api/admin/tenants/:id/metadata', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
   try {
-    const result = store.deleteTenant(req.params.id);
+    const result = adminService.updateTenantMetadata(req.adminActor!, String(req.params.id), req.body);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/admin/tenants/:id/branding', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const result = adminService.updateTenantBranding(req.adminActor!, String(req.params.id), req.body);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/admin/tenants/:id', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const result = adminService.deprovisionTenant(req.adminActor!, String(req.params.id));
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/admin/audit-logs', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 50;
+    const logs = adminService.listAuditLogs(
+      req.adminActor!,
+      Number.isFinite(limit) ? limit : 50
+    );
+    res.json({ logs });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Compatibility aliases gated by the exact same Admin Auth & Service Layer
+app.get('/api/super-admin/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const summaries = adminService.listTenantSummaries(req.adminActor!);
+    res.json({ summaries });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const tenants = adminService.listTenants(req.adminActor!);
+    res.json({ tenants });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const result = adminService.provisionTenant(req.adminActor!, req.body);
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/tenants/:id', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const result = adminService.updateTenantMetadata(req.adminActor!, String(req.params.id), req.body);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/tenants/:id/branding', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const result = adminService.updateTenantBranding(req.adminActor!, String(req.params.id), req.body);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/tenants/:id', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+  try {
+    const result = adminService.deprovisionTenant(req.adminActor!, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);

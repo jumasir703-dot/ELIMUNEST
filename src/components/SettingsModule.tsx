@@ -1,10 +1,16 @@
 import { useState } from 'react';
-import { Building2, Plus } from 'lucide-react';
+import { Building2, Lock, Plus } from 'lucide-react';
 import { saasApi } from '../lib/api';
-import { KENYAN_CBC_GRADES, KENYAN_CBC_SUBJECTS, type TenantWorkspaceData } from '../shared/types';
+import {
+  KENYAN_CBC_GRADES,
+  KENYAN_CBC_SUBJECTS,
+  type TenantWorkspaceData,
+  type UserRole,
+} from '../shared/types';
 
 interface SettingsModuleProps {
   workspace: TenantWorkspaceData;
+  currentRole: UserRole;
   onRefresh: () => Promise<void>;
   onSwitchTenant: (tenantId: string) => void;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
@@ -12,11 +18,13 @@ interface SettingsModuleProps {
 
 export function SettingsModule({
   workspace,
+  currentRole,
   onRefresh,
   onSwitchTenant,
   onNotify,
 }: SettingsModuleProps) {
   const { tenant } = workspace;
+  const canMutateTenant = currentRole === 'Admin' || currentRole === 'Super Admin';
 
   const [tenantForm, setTenantForm] = useState({
     name: tenant.name,
@@ -127,6 +135,15 @@ export function SettingsModule({
         </p>
       </div>
 
+      {!canMutateTenant && (
+        <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+          <Lock className="h-4 w-4 shrink-0" />
+          <span>
+            Tenant provisioning and metadata updates are protected by the backend Admin Service Layer. Switch Operator Role to <strong>Admin</strong> or <strong>Super Admin</strong> to save changes.
+          </span>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Current Tenant Settings */}
         <form
@@ -219,7 +236,7 @@ export function SettingsModule({
 
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || !canMutateTenant}
             className="mt-5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
             {saving ? 'Saving...' : 'Save Tenant Configuration'}
@@ -255,10 +272,11 @@ export function SettingsModule({
               />
               <button
                 type="button"
+                disabled={!canMutateTenant}
                 onClick={() => {
                   if (newTeacher.name.trim()) handleAddResource({ addTeacher: newTeacher });
                 }}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
               >
                 + Add Faculty
               </button>
@@ -275,10 +293,11 @@ export function SettingsModule({
                 />
                 <button
                   type="button"
+                  disabled={!canMutateTenant}
                   onClick={() => {
                     if (newRoom.trim()) handleAddResource({ addRoom: newRoom });
                   }}
-                  className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
                   + Room
                 </button>
@@ -293,10 +312,11 @@ export function SettingsModule({
                 />
                 <button
                   type="button"
+                  disabled={!canMutateTenant}
                   onClick={() => {
                     if (newSubject.trim()) handleAddResource({ addSubject: newSubject });
                   }}
-                  className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
                   + Subject
                 </button>
@@ -445,7 +465,7 @@ export function SettingsModule({
 
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || !canMutateTenant}
             className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
           >
             <Plus className="h-4 w-4" />

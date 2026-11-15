@@ -20,6 +20,7 @@ import {
   KENYAN_CBC_CLUSTERS,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
+  type AdminAuditEntry,
   type AdmissionApplication,
   type AdmissionStage,
   type Announcement,
@@ -417,6 +418,11 @@ export class TenantStore {
             }
           });
 
+          if (!Array.isArray(parsed.adminAuditLogs)) {
+            parsed.adminAuditLogs = [];
+            dirty = true;
+          }
+
           if (dirty) {
             this.persist(parsed);
           }
@@ -485,8 +491,29 @@ export class TenantStore {
     return tenant;
   }
 
+  getTenantById(tenantId: string): Tenant {
+    return this.requireTenant(tenantId);
+  }
+
   listTenants(): Tenant[] {
     return this.state.tenants;
+  }
+
+  listAdminAuditLogs(limit = 50): AdminAuditEntry[] {
+    const safeLimit = Math.max(1, Math.min(200, Math.round(limit)));
+    return (this.state.adminAuditLogs || []).slice(0, safeLimit);
+  }
+
+  appendAdminAuditLog(entry: AdminAuditEntry): AdminAuditEntry {
+    if (!Array.isArray(this.state.adminAuditLogs)) {
+      this.state.adminAuditLogs = [];
+    }
+    this.state.adminAuditLogs.unshift(entry);
+    if (this.state.adminAuditLogs.length > 250) {
+      this.state.adminAuditLogs = this.state.adminAuditLogs.slice(0, 250);
+    }
+    this.persist();
+    return entry;
   }
 
   getSuperAdminOverview(): SuperAdminTenantSummary[] {
