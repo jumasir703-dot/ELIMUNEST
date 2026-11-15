@@ -60,8 +60,12 @@ import {
 } from './seed.ts';
 
 // Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
+// On Vercel the filesystem is read-only except /tmp, which is per-instance and
+// temporary: fine for a demo, not for real data.
 const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
+  : process.env.VERCEL
+  ? '/tmp/elimunest-data'
   : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'elimunest-db.json');
 const LEGACY_DB_FILE = path.join(DATA_DIR, 'scholara-db.json');

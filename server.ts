@@ -8,6 +8,9 @@ import type { WsServerEvent } from './src/shared/types.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === 'production';
+// On Vercel the app runs as a serverless function: no listen(), no WebSockets,
+// and static files are served by Vercel itself.
+const IS_VERCEL = Boolean(process.env.VERCEL);
 
 interface TenantWebSocket extends WebSocket {
   tenantId?: string;
@@ -58,19 +61,21 @@ wss.on('connection', (ws: TenantWebSocket) => {
   });
 });
 
-const heartbeatInterval = setInterval(() => {
-  wss.clients.forEach((client) => {
-    const wsClient = client as TenantWebSocket;
-    if (wsClient.isAlive === false) {
-      wsClient.terminate();
-      return;
-    }
-    wsClient.isAlive = false;
-    wsClient.ping();
-  });
-}, 30000);
+if (!IS_VERCEL) {
+  const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((client) => {
+      const wsClient = client as TenantWebSocket;
+      if (wsClient.isAlive === false) {
+        wsClient.terminate();
+        return;
+      }
+      wsClient.isAlive = false;
+      wsClient.ping();
+    });
+  }, 30000);
 
-wss.on('close', () => clearInterval(heartbeatInterval));
+  wss.on('close', () => clearInterval(heartbeatInterval));
+}
 
 function getTenantId(req: Request): string {
   const headerTenant = req.header('x-tenant-id');
@@ -445,4 +450,9 @@ async function attachFrontend() {
   });
 }
 
-attachFrontend();
+if (!IS_VERCEL) {
+  attachFrontend();
+}
+
+// Used by the Vercel serverless function entry.
+export default app;
