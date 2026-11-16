@@ -1,7 +1,25 @@
 import { useMemo, useState } from 'react';
-import { Award, CheckCircle2, FileSpreadsheet, FileText, Plus, Printer, Trophy, X } from 'lucide-react';
+import {
+  Award,
+  CheckCircle2,
+  Copy,
+  FileSpreadsheet,
+  FileText,
+  MessageCircle,
+  Phone,
+  Plus,
+  Printer,
+  Search,
+  Trophy,
+  X,
+} from 'lucide-react';
 import { saasApi } from '../lib/api';
-import { computeClientGrade } from '../lib/format';
+import { computeClientGrade, formatDateShort } from '../lib/format';
+import {
+  buildReportCardWhatsAppMessage,
+  buildWhatsAppUrl,
+  resolveStudentGuardianContact,
+} from '../lib/whatsapp';
 import {
   ALL_REGISTERED_SUBJECTS_OPTION,
   CBE_GRADING_SCALE,
@@ -66,7 +84,8 @@ export function ExamsModule({
   onRefresh,
   onNotify,
 }: ExamsModuleProps) {
-  const { tenant, students, examCycles, examResults } = workspace;
+  const { tenant, students, admissions, examCycles, examResults } = workspace;
+  const whatsappDispatches = workspace.whatsappDispatches || [];
   const defaultGrade = tenant.grades.includes('Grade 9') ? 'Grade 9' : tenant.grades[0] || 'Grade 9';
 
   const orderedCycles = useMemo(() => {
@@ -88,6 +107,12 @@ export function ExamsModule({
   const [draftScores, setDraftScores] = useState<Record<string, string>>({});
   const [savingStudentId, setSavingStudentId] = useState<string | null>(null);
   const [reportCardStudentId, setReportCardStudentId] = useState<string | null>(null);
+  const [reportCardWhatsAppOpen, setReportCardWhatsAppOpen] = useState(false);
+  const [whatsAppPhoneOverride, setWhatsAppPhoneOverride] = useState('');
+  const [whatsAppCustomNote, setWhatsAppCustomNote] = useState('');
+  const [showWhatsAppQueueModal, setShowWhatsAppQueueModal] = useState(false);
+  const [queueSearch, setQueueSearch] = useState('');
+  const [queueSelectedStudentId, setQueueSelectedStudentId] = useState<string | null>(null);
   const [showCycleModal, setShowCycleModal] = useState(false);
 
   const levelSubjects = useMemo(
@@ -337,6 +362,145 @@ export function ExamsModule({
     }
   }
 
+  const reportCardDispatchesByStudent = useMemo(() => {
+    const map = new Map<string, { sentAt: string; guardianPhone: string }>();
+    if (!activeCycle) return map;
+    for (const rec of whatsappDispatches) {
+      if (
+        rec.category === 'Report Card' &&
+        rec.referenceLabel === activeCycle.title &&
+        !map.has(rec.studentId)
+      ) {
+        map.set(rec.studentId, { sentAt: rec.sentAt, guardianPhone: rec.guardianPhone });
+      }
+    }
+    return map;
+  }, [whatsappDispatches, activeCycle]);
+
+  function openReportCardModal(studentId: string, openWhatsAppPanel = false) {
+    const stu = students.find((s) => s.id === studentId);
+    const contact = resolveStudentGuardianContact(stu, admissions);
+    setReportCardStudentId(studentId);
+    setReportCardWhatsAppOpen(openWhatsAppPanel);
+    setWhatsAppPhoneOverride(contact.guardianPhone);
+    setWhatsAppCustomNote('');
+  }
+
+  async function recordReportCardDispatch(params: {
+    studentId: string;
+    studentName: string;
+    guardianName: string;
+    guardianPhone: string;
+    messagePreview: string;
+  }) {
+    if (!activeCycle) return;
+    try {
+      await saasApi.logWhatsAppDispatch(tenant.id, {
+        category: 'Report Card',
+        studentId: params.studentId,
+        studentName: params.studentName,
+        guardianName: params.guardianName,
+        guardianPhone: params.guardianPhone,
+        referenceLabel: activeCycle.title,
+        messagePreview: params.messagePreview,
+        sentBy: `${currentRole} Desk`,
+      });
+      await onRefresh();
+      onNotify(
+        `WhatsApp report card prepared for ${params.guardianName} (${params.guardianPhone}).`
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to log WhatsApp dispatch',
+        'error'
+      );
+    }
+  }
+
+  async function handleCopyText(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      onNotify(`${label} copied to clipboard.`);
+    } catch {
+      onNotify('Unable to access clipboard. Select and copy the message preview directly.', 'error');
+    }
+  }
+
+  const classWhatsAppQueue = useMemo(() => {
+    if (!activeCycle) return [];
+    const q = queueSearch.trim().toLowerCase();
+    return allSubjectsRankedRows
+      .map((row) => {
+        const stu = row.student;
+        const contact = resolveStudentGuardianContact(stu, admissions);
+        const results = examResults
+          .filter((r) => r.examCycleId === activeCycle.id && r.studentId === stu.id)
+          .map((r) => {
+            const graded = computeClientGrade(r.score, stu.grade);
+            return {
+              subject: r.subject,
+              score: r.score,
+              maxScore: r.maxScore || 100,
+              letterGrade: graded.letterGrade,
+              remarks: r.remarks,
+            };
+          });
+        const stuIs844 = is844FormFourGrade(stu.grade);
+        const stuMaxPts = stuIs844 ? 12 : 8;
+        const totalRanked = allSubjectsRankedRows.filter((r) => r.rank !== null).length;
+        const message = buildReportCardWhatsAppMessage({
+          tenant,
+          cycle: activeCycle,
+          student: stu,
+          guardianName: contact.guardianName,
+          subjects: results,
+          totalMarks: row.totalScore,
+          maxPossible: row.maxPossible,
+          avgScore: row.meanScore ?? 0,
+          meanGrade: row.overallGrade,
+          meanPoints: row.overallPoints !== null ? String(row.overallPoints) : '0',
+          maxPoints: stuMaxPts,
+          overallRank: row.rank,
+          totalRanked,
+        });
+        const waUrl = buildWhatsAppUrl(contact.guardianPhone, message);
+        const dispatch = reportCardDispatchesByStudent.get(stu.id) || null;
+        return {
+          row,
+          contact,
+          resultsCount: results.length,
+          message,
+          waUrl,
+          dispatch,
+        };
+      })
+      .filter((item) => {
+        if (!q) return true;
+        return (
+          item.row.student.fullName.toLowerCase().includes(q) ||
+          item.row.student.studentCode.toLowerCase().includes(q) ||
+          item.contact.guardianName.toLowerCase().includes(q) ||
+          item.contact.guardianPhone.toLowerCase().includes(q)
+        );
+      });
+  }, [
+    activeCycle,
+    allSubjectsRankedRows,
+    admissions,
+    examResults,
+    tenant,
+    reportCardDispatchesByStudent,
+    queueSearch,
+  ]);
+
+  const activeQueueItem = useMemo(() => {
+    if (classWhatsAppQueue.length === 0) return null;
+    return (
+      classWhatsAppQueue.find((item) => item.row.student.id === queueSelectedStudentId) ||
+      classWhatsAppQueue[0]
+    );
+  }, [classWhatsAppQueue, queueSelectedStudentId]);
+
   const reportCardData = useMemo(() => {
     if (!reportCardStudentId || !activeCycle) return null;
     const student = students.find((s) => s.id === reportCardStudentId);
@@ -361,6 +525,32 @@ export function ExamsModule({
       results.length > 0 ? computeClientGrade(avgScore, student.grade) : null;
     const rankRow = allSubjectsRankedRows.find((r) => r.student.id === student.id);
     const totalRanked = allSubjectsRankedRows.filter((r) => r.rank !== null).length;
+    const guardianContact = resolveStudentGuardianContact(student, admissions);
+    const effectivePhone = whatsAppPhoneOverride.trim() || guardianContact.guardianPhone;
+    const whatsappMessage = buildReportCardWhatsAppMessage({
+      tenant,
+      cycle: activeCycle,
+      student,
+      guardianName: guardianContact.guardianName,
+      subjects: results.map((r) => ({
+        subject: r.subject,
+        score: r.score,
+        maxScore: r.maxScore || 100,
+        letterGrade: r.letterGrade,
+        remarks: r.remarks,
+      })),
+      totalMarks,
+      maxPossible,
+      avgScore,
+      meanGrade: overallGradeInfo?.letterGrade || '—',
+      meanPoints: overallGradeInfo ? String(overallGradeInfo.gpaPoints) : '0',
+      maxPoints: studentMaxPts,
+      overallRank: rankRow?.rank || null,
+      totalRanked,
+      customNote: whatsAppCustomNote,
+    });
+    const whatsappUrl = buildWhatsAppUrl(effectivePhone, whatsappMessage);
+    const lastDispatch = reportCardDispatchesByStudent.get(student.id) || null;
     return {
       student,
       results,
@@ -373,8 +563,24 @@ export function ExamsModule({
       studentSystemLabel: studentIs844 ? '8-4-4 KCSE (Form 4)' : 'Current CBE',
       overallRank: rankRow?.rank || null,
       totalRanked,
+      guardianContact,
+      effectivePhone,
+      whatsappMessage,
+      whatsappUrl,
+      lastDispatch,
     };
-  }, [reportCardStudentId, activeCycle, students, examResults, allSubjectsRankedRows]);
+  }, [
+    reportCardStudentId,
+    activeCycle,
+    students,
+    admissions,
+    examResults,
+    allSubjectsRankedRows,
+    tenant,
+    whatsAppPhoneOverride,
+    whatsAppCustomNote,
+    reportCardDispatchesByStudent,
+  ]);
 
   return (
     <div className="space-y-6">
@@ -414,6 +620,17 @@ export function ExamsModule({
               Exam Results Entry
             </button>
           </div>
+          <button
+            onClick={() => {
+              setQueueSelectedStudentId(gradeStudents[0]?.id || null);
+              setShowWhatsAppQueueModal(true);
+            }}
+            disabled={!activeCycle || gradeStudents.length === 0}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
+          >
+            <MessageCircle className="h-3.5 w-3.5" />
+            WhatsApp Report Cards
+          </button>
           <button
             onClick={() => setShowCycleModal(true)}
             className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
@@ -613,13 +830,25 @@ export function ExamsModule({
                         {row.overallPoints !== null ? `${row.overallPoints} / ${maxPoints}` : '—'}
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={() => setReportCardStudentId(row.student.id)}
-                          className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                        >
-                          <FileText className="h-3.5 w-3.5" />
-                          Report Card
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-3">
+                          <button
+                            type="button"
+                            onClick={() => openReportCardModal(row.student.id, false)}
+                            className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                            Report Card
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openReportCardModal(row.student.id, true)}
+                            title={`Send report card via WhatsApp to guardian (${row.student.guardianPhone || 'admissions contact'})`}
+                            className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" />
+                            {reportCardDispatchesByStudent.has(row.student.id) ? 'Sent ✓' : 'WhatsApp'}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -714,13 +943,25 @@ export function ExamsModule({
                           {row.rank ? `#${row.rank}` : '—'}
                         </td>
                         <td className="px-4 py-2.5 text-right">
-                          <button
-                            onClick={() => setReportCardStudentId(row.student.id)}
-                            className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            <FileText className="h-3.5 w-3.5" />
-                            Report Card
-                          </button>
+                          <div className="inline-flex items-center justify-end gap-3">
+                            <button
+                              type="button"
+                              onClick={() => openReportCardModal(row.student.id, false)}
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              <FileText className="h-3.5 w-3.5" />
+                              Report Card
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openReportCardModal(row.student.id, true)}
+                              title={`Send report card via WhatsApp to guardian (${row.student.guardianPhone || 'admissions contact'})`}
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+                            >
+                              <MessageCircle className="h-3.5 w-3.5" />
+                              {reportCardDispatchesByStudent.has(row.student.id) ? 'Sent ✓' : 'WhatsApp'}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -736,9 +977,9 @@ export function ExamsModule({
 
       {/* Report Card Modal */}
       {reportCardData && activeCycle && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex items-start justify-between border-b border-slate-200 pb-4 dark:border-slate-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4">
+          <div className="my-8 max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 pb-4 dark:border-slate-800">
               <div>
                 <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
                   {tenant.name} · {activeCycle.title} · {reportCardData.studentSystemLabel}
@@ -748,11 +989,25 @@ export function ExamsModule({
                 </h2>
                 <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
                   {reportCardData.student.studentCode} · {reportCardData.student.grade} Stream{' '}
-                  {reportCardData.student.section}
+                  {reportCardData.student.section} · Guardian: {reportCardData.guardianContact.guardianName} (
+                  {reportCardData.guardianContact.guardianPhone || 'No number on file'})
                 </p>
               </div>
-              <div className="flex items-center gap-2 no-print">
+              <div className="flex flex-wrap items-center gap-2 no-print">
                 <button
+                  type="button"
+                  onClick={() => setReportCardWhatsAppOpen((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${
+                    reportCardWhatsAppOpen
+                      ? 'border-emerald-600 bg-emerald-600 text-white'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300'
+                  }`}
+                >
+                  <MessageCircle className="h-3.5 w-3.5" />
+                  Send via WhatsApp
+                </button>
+                <button
+                  type="button"
                   onClick={() => window.print()}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
@@ -760,13 +1015,104 @@ export function ExamsModule({
                   Print
                 </button>
                 <button
-                  onClick={() => setReportCardStudentId(null)}
+                  type="button"
+                  onClick={() => {
+                    setReportCardStudentId(null);
+                    setReportCardWhatsAppOpen(false);
+                  }}
                   className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
                 >
                   <X className="h-4 w-4" />
                 </button>
               </div>
             </div>
+
+            {/* Expandable WhatsApp Dispatch Panel using Admissions Guardian Phone */}
+            {reportCardWhatsAppOpen && (
+              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 no-print dark:border-emerald-900/60 dark:bg-emerald-950/20">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="flex items-center gap-1.5 text-xs font-bold text-emerald-900 dark:text-emerald-200">
+                      <Phone className="h-3.5 w-3.5" />
+                      WhatsApp Guardian Delivery (Admissions Contact)
+                    </h3>
+                    <p className="mt-0.5 text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+                      Recipient: <span className="font-semibold">{reportCardData.guardianContact.guardianName}</span>
+                      {reportCardData.lastDispatch
+                        ? ` · Last sent ${formatDateShort(reportCardData.lastDispatch.sentAt)}`
+                        : ''}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCopyText(reportCardData.whatsappMessage, 'Report card summary')
+                      }
+                      className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-300"
+                    >
+                      <Copy className="h-3 w-3" />
+                      Copy Text
+                    </button>
+                    {reportCardData.whatsappUrl ? (
+                      <a
+                        href={reportCardData.whatsappUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => {
+                          void recordReportCardDispatch({
+                            studentId: reportCardData.student.id,
+                            studentName: reportCardData.student.fullName,
+                            guardianName: reportCardData.guardianContact.guardianName,
+                            guardianPhone: reportCardData.effectivePhone,
+                            messagePreview: reportCardData.whatsappMessage,
+                          });
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                      >
+                        <MessageCircle className="h-3.5 w-3.5" />
+                        Open WhatsApp &amp; Send
+                      </a>
+                    ) : (
+                      <span className="text-[11px] font-medium text-rose-600 dark:text-rose-400">
+                        Enter a valid guardian phone number below
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Guardian WhatsApp Number (from Admissions)
+                    </label>
+                    <input
+                      type="text"
+                      value={whatsAppPhoneOverride}
+                      onChange={(e) => setWhatsAppPhoneOverride(e.target.value)}
+                      placeholder="+254 712 345 678"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Optional Principal / Teacher Remark
+                    </label>
+                    <input
+                      type="text"
+                      value={whatsAppCustomNote}
+                      onChange={(e) => setWhatsAppCustomNote(e.target.value)}
+                      placeholder="e.g. Commendable improvement in Mathematics."
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <pre className="mt-3 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-emerald-200/80 bg-white p-3 font-sans text-[11px] leading-relaxed text-slate-700 dark:border-emerald-900/60 dark:bg-slate-900 dark:text-slate-300">
+                  {reportCardData.whatsappMessage}
+                </pre>
+              </div>
+            )}
 
             <div className="mt-4 grid grid-cols-2 gap-4 border-b border-slate-100 pb-4 text-xs sm:grid-cols-4 dark:border-slate-800">
               <div>
@@ -839,6 +1185,202 @@ export function ExamsModule({
                   )}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Class WhatsApp Report Card Dispatch Queue Modal */}
+      {showWhatsAppQueueModal && activeCycle && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4">
+          <div className="my-6 w-full max-w-5xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+              <div>
+                <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-slate-100">
+                  <MessageCircle className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+                  Send Class Report Cards via WhatsApp
+                </h2>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  {selectedGrade} · {activeCycle.title} · Guardian phone numbers pulled directly from Admissions records
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowWhatsAppQueueModal(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 divide-y divide-slate-200 lg:grid-cols-12 lg:divide-x lg:divide-y-0 dark:divide-slate-800">
+              {/* Left: Class Roster & Admissions Phone Numbers */}
+              <div className="flex max-h-[540px] flex-col lg:col-span-7">
+                <div className="border-b border-slate-200 p-3.5 dark:border-slate-800">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={queueSearch}
+                      onChange={(e) => setQueueSearch(e.target.value)}
+                      placeholder="Filter by student, code, guardian name, or phone..."
+                      className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pr-3 pl-8 text-xs text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex-1 divide-y divide-slate-100 overflow-y-auto dark:divide-slate-800">
+                  {classWhatsAppQueue.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+                      No students in {selectedGrade} match the current filter.
+                    </div>
+                  ) : (
+                    classWhatsAppQueue.map((item) => {
+                      const stu = item.row.student;
+                      const isSelected = activeQueueItem?.row.student.id === stu.id;
+                      return (
+                        <div
+                          key={stu.id}
+                          onClick={() => setQueueSelectedStudentId(stu.id)}
+                          className={`flex cursor-pointer items-center justify-between gap-3 px-4 py-3 text-xs transition-colors ${
+                            isSelected
+                              ? 'bg-emerald-50/70 dark:bg-emerald-950/25'
+                              : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                {stu.fullName}
+                              </span>
+                              <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                {stu.studentCode}
+                              </span>
+                            </div>
+                            <p className="mt-0.5 truncate text-[11px] text-slate-600 dark:text-slate-400">
+                              Guardian: {item.contact.guardianName} ·{' '}
+                              <span className="font-mono">
+                                {item.contact.guardianPhone || 'Missing phone'}
+                              </span>
+                            </p>
+                            <p className="mt-0.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                              Mean: {item.row.meanScore !== null ? `${item.row.meanScore}%` : '—'} · Grade:{' '}
+                              {item.row.overallGrade}
+                              {item.row.rank ? ` · Rank #${item.row.rank}` : ''}
+                            </p>
+                          </div>
+
+                          <div className="flex shrink-0 items-center gap-2">
+                            {item.dispatch && (
+                              <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300">
+                                Sent {formatDateShort(item.dispatch.sentAt)}
+                              </span>
+                            )}
+                            {item.waUrl ? (
+                              <a
+                                href={item.waUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void recordReportCardDispatch({
+                                    studentId: stu.id,
+                                    studentName: stu.fullName,
+                                    guardianName: item.contact.guardianName,
+                                    guardianPhone: item.contact.guardianPhone,
+                                    messagePreview: item.message,
+                                  });
+                                }}
+                                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white whitespace-nowrap hover:bg-emerald-700"
+                              >
+                                <MessageCircle className="h-3 w-3" />
+                                Send
+                              </a>
+                            ) : (
+                              <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                                No Phone
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* Right: Live Report Card WhatsApp Message Preview */}
+              <div className="flex flex-col justify-between bg-slate-50/70 p-5 lg:col-span-5 dark:bg-slate-950/40">
+                {activeQueueItem ? (
+                  <div className="flex h-full flex-col justify-between gap-4">
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                          WhatsApp Message Preview
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openReportCardModal(activeQueueItem.row.student.id, true)
+                          }
+                          className="text-[11px] font-semibold text-blue-600 hover:underline dark:text-blue-400"
+                        >
+                          Edit Phone / Remark
+                        </button>
+                      </div>
+                      <p className="mt-1 text-xs font-semibold text-slate-900 dark:text-slate-100">
+                        To: {activeQueueItem.contact.guardianName} (
+                        <span className="font-mono">
+                          {activeQueueItem.contact.guardianPhone || '—'}
+                        </span>
+                        )
+                      </p>
+                      <pre className="mt-3 max-h-[340px] overflow-y-auto whitespace-pre-wrap rounded-xl border border-slate-200 bg-white p-3.5 font-sans text-[11px] leading-relaxed text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+                        {activeQueueItem.message}
+                      </pre>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyText(
+                            activeQueueItem.message,
+                            `${activeQueueItem.row.student.fullName} report card`
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy Text
+                      </button>
+
+                      {activeQueueItem.waUrl && (
+                        <a
+                          href={activeQueueItem.waUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => {
+                            void recordReportCardDispatch({
+                              studentId: activeQueueItem.row.student.id,
+                              studentName: activeQueueItem.row.student.fullName,
+                              guardianName: activeQueueItem.contact.guardianName,
+                              guardianPhone: activeQueueItem.contact.guardianPhone,
+                              messagePreview: activeQueueItem.message,
+                            });
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5" />
+                          Send on WhatsApp
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">Select a student to preview their report card message.</p>
+                )}
+              </div>
             </div>
           </div>
         </div>

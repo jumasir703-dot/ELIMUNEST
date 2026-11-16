@@ -4,6 +4,7 @@ import { saasApi } from '../lib/api';
 import {
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
+  type CurrencyCode,
   type TenantWorkspaceData,
   type UserRole,
 } from '../shared/types';
@@ -45,7 +46,7 @@ export function SettingsModule({
     curriculum: 'Kenyan CBC (Playgroup – Grade 12)',
     academicYear: '2026–2027',
     currentTerm: 'Term 1',
-    currency: 'USD' as 'USD' | 'GBP' | 'EUR',
+    currency: 'KES' as CurrencyCode,
     plan: 'Enterprise' as 'Enterprise' | 'Growth',
     location: '',
     gradesText: KENYAN_CBC_GRADES.join(', '),
@@ -222,14 +223,13 @@ export function SettingsModule({
                 onChange={(e) =>
                   setTenantForm({
                     ...tenantForm,
-                    currency: e.target.value as 'USD' | 'GBP' | 'EUR',
+                    currency: e.target.value as CurrencyCode,
                   })
                 }
                 className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
               >
-                <option value="USD">USD ($)</option>
-                <option value="GBP">GBP (£)</option>
-                <option value="EUR">EUR (€)</option>
+                <option value="KES">KES (Kenya Shilling)</option>
+                <option value="USD">USD (US Dollar)</option>
               </select>
             </div>
           </div>
@@ -408,14 +408,13 @@ export function SettingsModule({
                 onChange={(e) =>
                   setProvisionForm({
                     ...provisionForm,
-                    currency: e.target.value as 'USD' | 'GBP' | 'EUR',
+                    currency: e.target.value as CurrencyCode,
                   })
                 }
                 className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
               >
-                <option value="USD">USD</option>
-                <option value="GBP">GBP</option>
-                <option value="EUR">EUR</option>
+                <option value="KES">KES (Kenya Shilling)</option>
+                <option value="USD">USD (US Dollar)</option>
               </select>
             </div>
 

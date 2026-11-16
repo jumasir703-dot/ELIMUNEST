@@ -12,7 +12,21 @@ import {
 import { PlatformAdminService } from './server/services/adminService.ts';
 import type { WsServerEvent } from './src/shared/types.ts';
 
-const PORT = Number(process.env.PORT || 3000);
+function resolveServerPort(): number {
+  const portFlagIdx = process.argv.indexOf('--port');
+  if (portFlagIdx !== -1 && process.argv[portFlagIdx + 1]) {
+    const parsed = Number(process.argv[portFlagIdx + 1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const eqArg = process.argv.find((arg) => arg.startsWith('--port='));
+  if (eqArg) {
+    const parsed = Number(eqArg.split('=')[1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return Number(process.env.PORT || 3000);
+}
+
+const PORT = resolveServerPort();
 const IS_PROD = process.env.NODE_ENV === 'production';
 // On Vercel the app runs as a serverless function: no listen(), no WebSockets,
 // and static files are served by Vercel itself.
@@ -24,7 +38,7 @@ interface TenantWebSocket extends WebSocket {
 }
 
 const app = express();
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '12mb' }));
 
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -471,6 +485,217 @@ app.post('/api/fees/invoices/:id/payments', (req, res, next) => {
   }
 });
 
+app.post('/api/fees/payments/batch', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.recordPaymentsBatch(tenantId, req.body);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finance & Accounting: Expensing
+app.post('/api/finance/expenses', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const expense = store.createExpense(tenantId, req.body);
+    res.status(201).json({ expense });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/finance/expenses/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const expense = store.updateExpenseStatus(tenantId, req.params.id, req.body?.status);
+    res.json({ expense });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/finance/expenses/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.deleteExpense(tenantId, req.params.id);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/finance/expenses/:id/attachments', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const expense = store.addExpenseAttachment(tenantId, req.params.id, req.body);
+    res.status(201).json({ expense });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/finance/expenses/:id/attachments/:attachmentId', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const expense = store.deleteExpenseAttachment(
+      tenantId,
+      req.params.id,
+      req.params.attachmentId
+    );
+    res.json({ expense });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finance Controls: eTIMS Receipt Check
+app.post('/api/finance/etims/verify', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const record = store.verifyEtimsReceipt(tenantId, req.body);
+    res.status(201).json({ record });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/finance/etims/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.deleteEtimsCheck(tenantId, req.params.id);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finance Controls: M-Pesa & Bank Statement Reconciliation
+app.post('/api/finance/reconciliation/import', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const lines = Array.isArray(req.body?.lines) ? req.body.lines : req.body;
+    const result = store.importReconciliationLines(tenantId, lines);
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/finance/reconciliation/auto-match', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.autoMatchReconciliation(tenantId);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/finance/reconciliation/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const line = store.updateReconciliationLine(tenantId, req.params.id, req.body);
+    res.json({ line });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/finance/reconciliation/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.deleteReconciliationLine(tenantId, req.params.id);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finance Controls: Payroll & Statutory Deductions
+app.post('/api/finance/payroll/generate', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const entries = store.generatePayrollRun(tenantId, req.body?.payPeriod);
+    res.status(201).json({ entries });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/finance/payroll', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const entry = store.upsertPayrollEntry(tenantId, req.body);
+    res.status(201).json({ entry });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/finance/payroll/:id/status', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const entry = store.updatePayrollStatus(tenantId, req.params.id, req.body?.status);
+    res.json({ entry });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/finance/payroll/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.deletePayrollEntry(tenantId, req.params.id);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finance Controls: Departmental Budget Allocations
+app.post('/api/finance/budgets', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const budget = store.upsertBudgetAllocation(tenantId, req.body);
+    res.json({ budget });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finance Controls: Board & Procurement Approvals Sign-Off
+app.post('/api/finance/approvals', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const record = store.createApprovalRecord(tenantId, req.body);
+    res.status(201).json({ record });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/finance/approvals/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const record = store.updateApprovalDecision(tenantId, req.params.id, req.body);
+    res.json({ record });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/finance/approvals/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.deleteApprovalRecord(tenantId, req.params.id);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Communications & Notifications
 app.post('/api/communications/announcements', (req, res, next) => {
   try {
@@ -487,6 +712,16 @@ app.post('/api/communications/messages', (req, res, next) => {
     const tenantId = getTenantId(req);
     const message = store.createMessage(tenantId, req.body);
     res.status(201).json({ message });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/communications/whatsapp-log', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const record = store.logWhatsAppDispatch(tenantId, req.body);
+    res.status(201).json({ record });
   } catch (err) {
     next(err);
   }

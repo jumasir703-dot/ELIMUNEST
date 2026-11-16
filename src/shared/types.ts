@@ -434,6 +434,8 @@ export type NotificationCategory =
   | 'message'
   | 'timetable';
 
+export type CurrencyCode = 'KES' | 'USD';
+
 export interface Tenant {
   id: string;
   name: string;
@@ -441,7 +443,7 @@ export interface Tenant {
   curriculum: string;
   academicYear: string;
   currentTerm: string;
-  currency: 'USD' | 'GBP' | 'EUR';
+  currency: CurrencyCode;
   plan: 'Enterprise' | 'Growth';
   status?: TenantStatus;
   location: string;
@@ -858,11 +860,20 @@ export interface ExamResult {
   updatedAt: string;
 }
 
+export const MAX_FEE_VOTELINES = 8;
+
+export interface FeeVoteline {
+  id: string;
+  name: string;
+  amount: number;
+}
+
 export interface FeeStructure {
   id: string;
   tenantId: string;
   grade: string;
   term: string;
+  votelines: FeeVoteline[];
   tuitionFee: number;
   labFee: number;
   technologyFee: number;
@@ -895,6 +906,170 @@ export interface FeeInvoice {
   balance: number;
   status: InvoiceStatus;
   payments: PaymentRecord[];
+  createdAt: string;
+}
+
+export const EXPENSE_CATEGORIES = [
+  'Payroll & Allowances',
+  'Utilities & Water',
+  'Catering & Boarding',
+  'Teaching & Lab Supplies',
+  'Maintenance & Repairs',
+  'Transport & Fuel',
+  'ICT & Software',
+  'Administration & Statutory',
+] as const;
+
+export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
+
+export type ExpenseStatus = 'Pending Approval' | 'Approved' | 'Paid';
+
+export const EXPENSE_ATTACHMENT_TYPES = [
+  'Official Receipt',
+  'Signed Payment Voucher',
+  'Supplier Invoice / LPO',
+  'Bank / M-Pesa Slip',
+  'Other Supporting Document',
+] as const;
+
+export type ExpenseAttachmentType = (typeof EXPENSE_ATTACHMENT_TYPES)[number];
+
+export interface ExpenseAttachment {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  docType: ExpenseAttachmentType;
+  dataUrl: string;
+  uploadedAt: string;
+  uploadedBy: string;
+}
+
+export type EtimsVerificationStatus = 'Verified' | 'Mismatch' | 'Exempt' | 'Unverified';
+
+export interface EtimsVerificationRecord {
+  id: string;
+  tenantId: string;
+  expenseId?: string;
+  voucherNumber?: string;
+  supplierName: string;
+  supplierKraPin: string;
+  cuInvoiceNumber: string;
+  receiptDate: string;
+  taxableAmount: number;
+  vatAmount: number;
+  totalAmount: number;
+  status: EtimsVerificationStatus;
+  verificationNotes: string;
+  checkedBy: string;
+  checkedAt: string;
+}
+
+export type ReconciliationChannel = 'M-Pesa' | 'Bank';
+export type ReconciliationStatus = 'Matched' | 'Unmatched' | 'Discrepancy';
+
+export interface ReconciliationLine {
+  id: string;
+  tenantId: string;
+  channel: ReconciliationChannel;
+  accountName: string;
+  transactionDate: string;
+  statementRef: string;
+  narration: string;
+  direction: 'Credit' | 'Debit';
+  amount: number;
+  status: ReconciliationStatus;
+  matchedType?: 'Fee Payment' | 'Expense Voucher';
+  matchedRecordId?: string;
+  matchedLabel?: string;
+  notes?: string;
+  importedAt: string;
+}
+
+export type PayrollStatus = 'Draft' | 'Approved' | 'Disbursed';
+
+export interface PayrollEntry {
+  id: string;
+  tenantId: string;
+  payPeriod: string; // e.g. '2026-11'
+  staffId: string;
+  staffName: string;
+  staffCategory: StaffCategory;
+  designation: string;
+  basicSalary: number;
+  allowances: number;
+  grossPay: number;
+  paye: number;
+  nssf: number;
+  shif: number;
+  housingLevy: number;
+  saccoOrLoan: number;
+  totalDeductions: number;
+  netPay: number;
+  status: PayrollStatus;
+  updatedAt: string;
+}
+
+export interface BudgetAllocation {
+  id: string;
+  tenantId: string;
+  fiscalYear: string;
+  term: string;
+  category: ExpenseCategory;
+  allocatedAmount: number;
+  notes?: string;
+  updatedAt: string;
+}
+
+export const APPROVAL_COMMITTEES = [
+  'Board of Management (BOM)',
+  'Procurement & Tendering Committee',
+  'Finance Sub-Committee',
+  'Principal Executive Sign-Off',
+] as const;
+
+export type ApprovalCommittee = (typeof APPROVAL_COMMITTEES)[number];
+export type ApprovalDecision = 'Pending Sign-Off' | 'Approved' | 'Deferred' | 'Rejected';
+
+export interface ApprovalSignOffRecord {
+  id: string;
+  tenantId: string;
+  referenceCode: string;
+  committee: ApprovalCommittee;
+  subject: string;
+  linkedExpenseId?: string;
+  linkedVoucherNumber?: string;
+  amount: number;
+  meetingDate: string;
+  minuteReference: string;
+  chairpersonName: string;
+  secretaryName: string;
+  bursarName: string;
+  decision: ApprovalDecision;
+  remarks?: string;
+  createdAt: string;
+  signedAt?: string;
+}
+
+export interface SchoolExpense {
+  id: string;
+  tenantId: string;
+  voucherNumber: string;
+  title: string;
+  category: ExpenseCategory;
+  vendor: string;
+  amount: number;
+  paymentMethod: PaymentMethod;
+  reference: string;
+  expenseDate: string;
+  status: ExpenseStatus;
+  recordedBy: string;
+  notes?: string;
+  attachments?: ExpenseAttachment[];
+  etimsCuNumber?: string;
+  supplierKraPin?: string;
+  etimsStatus?: EtimsVerificationStatus;
+  boardApprovalRef?: string;
   createdAt: string;
 }
 
@@ -931,6 +1106,22 @@ export interface NotificationItem {
   createdAt: string;
 }
 
+export type WhatsAppDispatchCategory = 'Report Card' | 'Fee Balance Reminder';
+
+export interface WhatsAppDispatchRecord {
+  id: string;
+  tenantId: string;
+  category: WhatsAppDispatchCategory;
+  studentId: string;
+  studentName: string;
+  guardianName: string;
+  guardianPhone: string;
+  referenceLabel: string;
+  messagePreview: string;
+  sentBy: string;
+  sentAt: string;
+}
+
 export interface TenantWorkspaceData {
   tenant: Tenant;
   tenants: Tenant[];
@@ -944,8 +1135,15 @@ export interface TenantWorkspaceData {
   examResults: ExamResult[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
+  expenses: SchoolExpense[];
+  etimsChecks: EtimsVerificationRecord[];
+  reconciliationLines: ReconciliationLine[];
+  payrollEntries: PayrollEntry[];
+  budgets: BudgetAllocation[];
+  approvalRecords: ApprovalSignOffRecord[];
   announcements: Announcement[];
   messages: DirectMessage[];
+  whatsappDispatches: WhatsAppDispatchRecord[];
   notifications: NotificationItem[];
 }
 

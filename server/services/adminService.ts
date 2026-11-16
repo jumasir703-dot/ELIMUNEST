@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   AdminAuditAction,
   AdminAuditEntry,
+  CurrencyCode,
   SuperAdminTenantSummary,
   TeacherClassAssignment,
   Tenant,
@@ -14,7 +15,7 @@ import { isPrivilegedAdminRole } from '../middleware/adminAuth.ts';
 import { ConflictError, TenantStore } from '../store.ts';
 
 const HEX_COLOR_RE = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/;
-const ALLOWED_CURRENCIES = new Set(['USD', 'GBP', 'EUR']);
+const ALLOWED_CURRENCIES = new Set<CurrencyCode>(['KES', 'USD']);
 const ALLOWED_PLANS = new Set(['Enterprise', 'Growth']);
 const ALLOWED_STATUSES = new Set<TenantStatus>(['Active', 'Trial', 'Suspended']);
 const LOGO_DATA_URI_RE =
@@ -26,7 +27,7 @@ export interface ProvisionTenantPayload {
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
-  currency?: 'USD' | 'GBP' | 'EUR';
+  currency?: CurrencyCode;
   plan?: 'Enterprise' | 'Growth';
   status?: TenantStatus;
   location?: string;
@@ -43,7 +44,7 @@ export interface UpdateTenantMetadataPayload {
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
-  currency?: 'USD' | 'GBP' | 'EUR';
+  currency?: CurrencyCode;
   location?: string;
   plan?: 'Enterprise' | 'Growth';
   status?: TenantStatus;
@@ -66,7 +67,7 @@ export interface UpdateTenantBrandingPayload {
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
-  currency?: 'USD' | 'GBP' | 'EUR';
+  currency?: CurrencyCode;
   plan?: 'Enterprise' | 'Growth';
   status?: TenantStatus;
   branding?: Partial<TenantBranding>;
@@ -220,9 +221,9 @@ export class PlatformAdminService {
       throw new ConflictError(`A school tenant named "${name}" already exists.`, 409);
     }
 
-    const currency = rawInput.currency || 'USD';
+    const currency = rawInput.currency || 'KES';
     if (!ALLOWED_CURRENCIES.has(currency)) {
-      throw new ConflictError(`Unsupported currency "${String(currency)}".`, 400);
+      throw new ConflictError(`Unsupported currency "${String(currency)}". Supported: KES, USD.`, 400);
     }
 
     const plan = rawInput.plan || 'Growth';

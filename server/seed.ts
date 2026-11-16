@@ -3,26 +3,35 @@ import {
   buildDefaultLevelWeeklyLessonsMap,
   computeAssessmentGrade,
   DEFAULT_SUBJECT_WEEKLY_LESSONS,
+  EXPENSE_CATEGORIES,
   KENYAN_BELL_SCHEDULE,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
   type AdminAuditEntry,
   type AdmissionApplication,
   type Announcement,
+  type ApprovalSignOffRecord,
   type AttendanceRecord,
+  type BudgetAllocation,
   type DayOfWeek,
   type DirectMessage,
+  type EtimsVerificationRecord,
   type ExamCycle,
   type ExamResult,
   type FeeInvoice,
   type FeeStructure,
+  type FeeVoteline,
   type LeaveOutChit,
   type NonTeachingStaffProfile,
   type NotificationItem,
+  type PayrollEntry,
+  type ReconciliationLine,
+  type SchoolExpense,
   type StaffAttendanceRecord,
   type Student,
   type Tenant,
   type TimetableSlot,
+  type WhatsAppDispatchRecord,
 } from '../src/shared/types.ts';
 
 export function buildDefaultNonTeachingStaff(
@@ -93,10 +102,389 @@ export interface DatabaseState {
   examResults: ExamResult[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
+  expenses: SchoolExpense[];
+  etimsChecks: EtimsVerificationRecord[];
+  reconciliationLines: ReconciliationLine[];
+  payrollEntries: PayrollEntry[];
+  budgets: BudgetAllocation[];
+  approvalRecords: ApprovalSignOffRecord[];
   announcements: Announcement[];
   messages: DirectMessage[];
+  whatsappDispatches: WhatsAppDispatchRecord[];
   notifications: NotificationItem[];
   adminAuditLogs: AdminAuditEntry[];
+}
+
+export function buildDefaultExpensesForTenant(
+  tenantId: string,
+  currency: 'KES' | 'USD',
+  prefix: string
+): SchoolExpense[] {
+  const isKes = currency === 'KES';
+  const mult = isKes ? 120 : 1;
+  return [
+    {
+      id: `exp-${tenantId}-1`,
+      tenantId,
+      voucherNumber: `${prefix}-EXP-202601`,
+      title: 'Science Laboratory Reagents & Apparatus',
+      category: 'Teaching & Lab Supplies',
+      vendor: 'AfriLab Scientific Supplies Ltd',
+      amount: 650 * mult,
+      paymentMethod: 'Bank Transfer',
+      reference: 'EFT-LAB-8821',
+      expenseDate: '2026-11-04',
+      status: 'Paid',
+      recordedBy: 'Bursar Office',
+      notes: 'Chemistry & Biology Grade 9-12 practical consumables.',
+      createdAt: '2026-11-04T09:15:00Z',
+    },
+    {
+      id: `exp-${tenantId}-2`,
+      tenantId,
+      voucherNumber: `${prefix}-EXP-202602`,
+      title: 'Term 1 Catering & Kitchen Provisions',
+      category: 'Catering & Boarding',
+      vendor: 'Highland Fresh Produce Co.',
+      amount: 1200 * mult,
+      paymentMethod: 'Bank Transfer',
+      reference: 'EFT-CAT-4410',
+      expenseDate: '2026-11-08',
+      status: 'Paid',
+      recordedBy: 'Bursar Office',
+      notes: 'Dry grains, dairy, and produce batch delivery.',
+      createdAt: '2026-11-08T11:30:00Z',
+    },
+    {
+      id: `exp-${tenantId}-3`,
+      tenantId,
+      voucherNumber: `${prefix}-EXP-202603`,
+      title: 'Electricity & Water Utility Settlement',
+      category: 'Utilities & Water',
+      vendor: 'Kenya Power & Water Services',
+      amount: 420 * mult,
+      paymentMethod: 'Mobile Money',
+      reference: 'MPESA-UTL-9034',
+      expenseDate: '2026-11-11',
+      status: 'Approved',
+      recordedBy: 'Accounts Office',
+      notes: 'Monthly campus electricity and borehole pump billing.',
+      createdAt: '2026-11-11T14:20:00Z',
+    },
+    {
+      id: `exp-${tenantId}-4`,
+      tenantId,
+      voucherNumber: `${prefix}-EXP-202604`,
+      title: 'School Bus Diesel & Routine Servicing',
+      category: 'Transport & Fuel',
+      vendor: 'Metro Fleet Energy Station',
+      amount: 310 * mult,
+      paymentMethod: 'Card',
+      reference: 'FLT-2026-19',
+      expenseDate: '2026-11-14',
+      status: 'Pending Approval',
+      recordedBy: 'Transport Coordinator',
+      notes: 'Scheduled 15,000 km brake & oil service plus diesel refill.',
+      etimsStatus: 'Unverified',
+      createdAt: '2026-11-14T08:45:00Z',
+    },
+  ];
+}
+
+export function computeStatutoryDeductions(grossPay: number, currency: 'KES' | 'USD') {
+  const gross = Math.max(0, Math.round(grossPay));
+  if (currency === 'USD') {
+    // Scaled international tax/social withholding approximation for USD campuses
+    const paye = Math.round(gross * 0.14);
+    const nssf = Math.round(gross * 0.04);
+    const shif = Math.round(gross * 0.025);
+    const housingLevy = Math.round(gross * 0.015);
+    return { paye, nssf, shif, housingLevy };
+  }
+
+  // Kenya KRA PAYE progressive monthly bands + Personal Relief (KES 2,400)
+  const nssf = Math.min(4320, Math.round(gross * 0.06));
+  const shif = Math.max(300, Math.round(gross * 0.0275));
+  const housingLevy = Math.round(gross * 0.015);
+  const taxable = Math.max(0, gross - nssf);
+
+  let tax = 0;
+  let rem = taxable;
+  const band1 = Math.min(rem, 24000);
+  tax += band1 * 0.1;
+  rem -= band1;
+  if (rem > 0) {
+    const band2 = Math.min(rem, 8333);
+    tax += band2 * 0.25;
+    rem -= band2;
+  }
+  if (rem > 0) {
+    const band3 = Math.min(rem, 467667);
+    tax += band3 * 0.3;
+    rem -= band3;
+  }
+  if (rem > 0) {
+    const band4 = Math.min(rem, 300000);
+    tax += band4 * 0.325;
+    rem -= band4;
+  }
+  if (rem > 0) {
+    tax += rem * 0.35;
+  }
+  const paye = Math.max(0, Math.round(tax - 2400));
+  return { paye, nssf, shif, housingLevy };
+}
+
+export function buildDefaultEtimsChecksForTenant(
+  tenantId: string,
+  currency: 'KES' | 'USD',
+  prefix: string
+): EtimsVerificationRecord[] {
+  const isKes = currency === 'KES';
+  const mult = isKes ? 120 : 1;
+  const total1 = 650 * mult;
+  const taxable1 = Math.round(total1 / 1.16);
+  const vat1 = total1 - taxable1;
+
+  const total2 = 1200 * mult;
+  const taxable2 = Math.round(total2 / 1.16);
+  const vat2 = total2 - taxable2;
+
+  return [
+    {
+      id: `etims-${tenantId}-1`,
+      tenantId,
+      expenseId: `exp-${tenantId}-1`,
+      voucherNumber: `${prefix}-EXP-202601`,
+      supplierName: 'AfriLab Scientific Supplies Ltd',
+      supplierKraPin: 'P051482910K',
+      cuInvoiceNumber: `KRAMW012026${prefix.slice(0, 2)}0184`,
+      receiptDate: '2026-11-04',
+      taxableAmount: taxable1,
+      vatAmount: vat1,
+      totalAmount: total1,
+      status: 'Verified',
+      verificationNotes: 'CU serial & supplier KRA PIN verified against KRA eTIMS format.',
+      checkedBy: 'Bursar Office',
+      checkedAt: '2026-11-04T10:10:00Z',
+    },
+    {
+      id: `etims-${tenantId}-2`,
+      tenantId,
+      expenseId: `exp-${tenantId}-2`,
+      voucherNumber: `${prefix}-EXP-202602`,
+      supplierName: 'Highland Fresh Produce Co.',
+      supplierKraPin: 'P051993044M',
+      cuInvoiceNumber: `KRAMW012026${prefix.slice(0, 2)}0299`,
+      receiptDate: '2026-11-08',
+      taxableAmount: taxable2,
+      vatAmount: vat2,
+      totalAmount: total2,
+      status: 'Verified',
+      verificationNotes: 'Zero-rated & standard rated farm produce tax invoice validated.',
+      checkedBy: 'Accounts Office',
+      checkedAt: '2026-11-08T13:05:00Z',
+    },
+  ];
+}
+
+export function buildDefaultReconciliationForTenant(
+  tenantId: string,
+  currency: 'KES' | 'USD',
+  prefix: string
+): ReconciliationLine[] {
+  const isKes = currency === 'KES';
+  const mult = isKes ? 120 : 1;
+  return [
+    {
+      id: `rec-${tenantId}-1`,
+      tenantId,
+      channel: 'M-Pesa',
+      accountName: 'Paybill 522533 — School Fees',
+      transactionDate: '2026-11-04',
+      statementRef: `UBC48KX${prefix.slice(0, 2)}1`,
+      narration: 'MPESA FEE COLLECTION - TERM 1',
+      direction: 'Credit',
+      amount: 1850 * mult,
+      status: 'Matched',
+      matchedType: 'Fee Payment',
+      matchedLabel: 'Tuition Fee Receipt Match',
+      importedAt: '2026-11-12T08:00:00Z',
+    },
+    {
+      id: `rec-${tenantId}-2`,
+      tenantId,
+      channel: 'Bank',
+      accountName: 'KCB Main Operating A/C',
+      transactionDate: '2026-11-04',
+      statementRef: 'EFT-LAB-8821',
+      narration: 'RTGS TO AFRILAB SCIENTIFIC SUPPLIES',
+      direction: 'Debit',
+      amount: 650 * mult,
+      status: 'Matched',
+      matchedType: 'Expense Voucher',
+      matchedRecordId: `exp-${tenantId}-1`,
+      matchedLabel: `${prefix}-EXP-202601 · AfriLab Scientific Supplies Ltd`,
+      importedAt: '2026-11-12T08:00:00Z',
+    },
+    {
+      id: `rec-${tenantId}-3`,
+      tenantId,
+      channel: 'Bank',
+      accountName: 'KCB Main Operating A/C',
+      transactionDate: '2026-11-13',
+      statementRef: `BNKCHG-${prefix}-11`,
+      narration: 'MONTHLY BANK LEDGER & RTGS COMMISSION',
+      direction: 'Debit',
+      amount: isKes ? 2450 : 25,
+      status: 'Unmatched',
+      notes: 'Pending expense voucher capture for monthly bank charge.',
+      importedAt: '2026-11-14T09:00:00Z',
+    },
+  ];
+}
+
+export function buildDefaultPayrollForTenant(
+  tenant: Tenant,
+  payPeriod = '2026-11'
+): PayrollEntry[] {
+  const isKes = tenant.currency === 'KES';
+  const entries: PayrollEntry[] = [];
+
+  tenant.teachers.forEach((teacher, idx) => {
+    const basicSalary = isKes ? 58000 + idx * 4500 : 1800 + idx * 140;
+    const allowances = isKes ? 9500 : 280;
+    const grossPay = basicSalary + allowances;
+    const { paye, nssf, shif, housingLevy } = computeStatutoryDeductions(grossPay, tenant.currency);
+    const saccoOrLoan = isKes ? (idx % 2 === 0 ? 3500 : 0) : idx % 2 === 0 ? 80 : 0;
+    const totalDeductions = paye + nssf + shif + housingLevy + saccoOrLoan;
+    entries.push({
+      id: `payr-${tenant.id}-t-${idx + 1}`,
+      tenantId: tenant.id,
+      payPeriod,
+      staffId: teacher.id,
+      staffName: teacher.name,
+      staffCategory: 'Teaching',
+      designation: `${teacher.department} Teacher`,
+      basicSalary,
+      allowances,
+      grossPay,
+      paye,
+      nssf,
+      shif,
+      housingLevy,
+      saccoOrLoan,
+      totalDeductions,
+      netPay: Math.max(0, grossPay - totalDeductions),
+      status: 'Approved',
+      updatedAt: '2026-11-14T10:00:00Z',
+    });
+  });
+
+  (tenant.nonTeachingStaff || []).forEach((staff, idx) => {
+    const basicSalary = isKes ? 34000 + idx * 3500 : 1050 + idx * 90;
+    const allowances = isKes ? 5000 : 150;
+    const grossPay = basicSalary + allowances;
+    const { paye, nssf, shif, housingLevy } = computeStatutoryDeductions(grossPay, tenant.currency);
+    const saccoOrLoan = isKes && idx === 0 ? 2500 : 0;
+    const totalDeductions = paye + nssf + shif + housingLevy + saccoOrLoan;
+    entries.push({
+      id: `payr-${tenant.id}-n-${idx + 1}`,
+      tenantId: tenant.id,
+      payPeriod,
+      staffId: staff.id,
+      staffName: staff.name,
+      staffCategory: 'Non-Teaching',
+      designation: staff.role,
+      basicSalary,
+      allowances,
+      grossPay,
+      paye,
+      nssf,
+      shif,
+      housingLevy,
+      saccoOrLoan,
+      totalDeductions,
+      netPay: Math.max(0, grossPay - totalDeductions),
+      status: 'Draft',
+      updatedAt: '2026-11-14T10:00:00Z',
+    });
+  });
+
+  return entries;
+}
+
+export function buildDefaultBudgetsForTenant(tenant: Tenant): BudgetAllocation[] {
+  const isKes = tenant.currency === 'KES';
+  const scale = isKes ? 1 : 0.008;
+  const baseAmounts: Record<(typeof EXPENSE_CATEGORIES)[number], number> = {
+    'Payroll & Allowances': Math.round(750000 * scale),
+    'Utilities & Water': Math.round(95000 * scale),
+    'Catering & Boarding': Math.round(280000 * scale),
+    'Teaching & Lab Supplies': Math.round(140000 * scale),
+    'Maintenance & Repairs': Math.round(110000 * scale),
+    'Transport & Fuel': Math.round(90000 * scale),
+    'ICT & Software': Math.round(75000 * scale),
+    'Administration & Statutory': Math.round(85000 * scale),
+  };
+
+  return EXPENSE_CATEGORIES.map((category, idx) => ({
+    id: `bdg-${tenant.id}-${idx + 1}`,
+    tenantId: tenant.id,
+    fiscalYear: tenant.academicYear || '2026–2027',
+    term: tenant.currentTerm || 'Term 1',
+    category,
+    allocatedAmount: Math.max(100, baseAmounts[category]),
+    notes: `${tenant.currentTerm} departmental ceiling`,
+    updatedAt: '2026-11-01T08:00:00Z',
+  }));
+}
+
+export function buildDefaultApprovalsForTenant(
+  tenantId: string,
+  currency: 'KES' | 'USD',
+  prefix: string
+): ApprovalSignOffRecord[] {
+  const mult = currency === 'KES' ? 120 : 1;
+  return [
+    {
+      id: `apr-${tenantId}-1`,
+      tenantId,
+      referenceCode: `${prefix}-BOM-2026-01`,
+      committee: 'Procurement & Tendering Committee',
+      subject: 'Term 1 Science Laboratory Apparatus & Reagents Tender',
+      linkedExpenseId: `exp-${tenantId}-1`,
+      linkedVoucherNumber: `${prefix}-EXP-202601`,
+      amount: 650 * mult,
+      meetingDate: '2026-11-02',
+      minuteReference: 'MIN/PROC/04/2026',
+      chairpersonName: 'Dr. Margaret Kariuki (BOM Chair)',
+      secretaryName: 'Dr. Helena Vance (Principal)',
+      bursarName: 'Mary Wanjiru (School Bursar)',
+      decision: 'Approved',
+      remarks: 'Awarded to lowest evaluated compliant bidder AfriLab Scientific.',
+      createdAt: '2026-11-02T14:00:00Z',
+      signedAt: '2026-11-02T16:15:00Z',
+    },
+    {
+      id: `apr-${tenantId}-2`,
+      tenantId,
+      referenceCode: `${prefix}-BOM-2026-02`,
+      committee: 'Board of Management (BOM)',
+      subject: 'School Bus Major Service & Term 1 Fleet Fuel Requisition',
+      linkedExpenseId: `exp-${tenantId}-4`,
+      linkedVoucherNumber: `${prefix}-EXP-202604`,
+      amount: 310 * mult,
+      meetingDate: '2026-11-15',
+      minuteReference: 'MIN/FIN/11/2026',
+      chairpersonName: 'Dr. Margaret Kariuki (BOM Chair)',
+      secretaryName: 'Dr. Helena Vance (Principal)',
+      bursarName: 'Mary Wanjiru (School Bursar)',
+      decision: 'Pending Sign-Off',
+      remarks: 'Awaiting Finance Sub-Committee counter-signature before disbursement.',
+      createdAt: '2026-11-15T09:00:00Z',
+    },
+  ];
 }
 
 export function computeLetterGrade(
@@ -132,7 +520,7 @@ export function createSeedDatabase(): DatabaseState {
       curriculum: 'Kenyan CBC (Playgroup – Grade 12)',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
-      currency: 'USD',
+      currency: 'KES',
       plan: 'Enterprise',
       status: 'Active',
       location: 'Nairobi, KE',
@@ -238,7 +626,7 @@ export function createSeedDatabase(): DatabaseState {
       curriculum: 'Kenyan CBC STEM Track',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
-      currency: 'USD',
+      currency: 'KES',
       plan: 'Growth',
       status: 'Active',
       location: 'Mombasa, KE',
@@ -279,7 +667,7 @@ export function createSeedDatabase(): DatabaseState {
       curriculum: 'Cambridge & CBC Hybrid',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
-      currency: 'GBP',
+      currency: 'USD',
       plan: 'Enterprise',
       status: 'Active',
       location: 'Kisumu, KE',
@@ -1131,6 +1519,18 @@ export function createSeedDatabase(): DatabaseState {
       });
     });
 
+  const buildSeedVotelines = (
+    tuitionFee: number,
+    labFee: number,
+    technologyFee: number,
+    activitiesFee: number
+  ): FeeVoteline[] => [
+    { id: 'vl-tuition', name: 'Tuition Fee', amount: tuitionFee },
+    { id: 'vl-lab', name: 'Laboratory Fee', amount: labFee },
+    { id: 'vl-tech', name: 'Technology & ICT', amount: technologyFee },
+    { id: 'vl-act', name: 'Co-Curricular & Activities', amount: activitiesFee },
+  ];
+
   // Fee Structures
   const feeStructures: FeeStructure[] = [
     {
@@ -1138,6 +1538,7 @@ export function createSeedDatabase(): DatabaseState {
       tenantId: 'tenant-oakridge',
       grade: 'Grade 9',
       term: 'Term 1 (Autumn)',
+      votelines: buildSeedVotelines(4200, 350, 250, 200),
       tuitionFee: 4200,
       labFee: 350,
       technologyFee: 250,
@@ -1149,6 +1550,7 @@ export function createSeedDatabase(): DatabaseState {
       tenantId: 'tenant-oakridge',
       grade: 'Grade 10',
       term: 'Term 1 (Autumn)',
+      votelines: buildSeedVotelines(4500, 400, 250, 250),
       tuitionFee: 4500,
       labFee: 400,
       technologyFee: 250,
@@ -1160,6 +1562,7 @@ export function createSeedDatabase(): DatabaseState {
       tenantId: 'tenant-oakridge',
       grade: 'Grade 11',
       term: 'Term 1 (Autumn)',
+      votelines: buildSeedVotelines(4900, 450, 300, 250),
       tuitionFee: 4900,
       labFee: 450,
       technologyFee: 300,
@@ -1171,6 +1574,7 @@ export function createSeedDatabase(): DatabaseState {
       tenantId: 'tenant-westfield',
       grade: 'Grade 9',
       term: 'Fall Semester',
+      votelines: buildSeedVotelines(3400, 300, 200, 150),
       tuitionFee: 3400,
       labFee: 300,
       technologyFee: 200,
@@ -1182,6 +1586,7 @@ export function createSeedDatabase(): DatabaseState {
       tenantId: 'tenant-stjude',
       grade: 'Grade 9',
       term: 'Michaelmas Term',
+      votelines: buildSeedVotelines(5200, 400, 250, 300),
       tuitionFee: 5200,
       labFee: 400,
       technologyFee: 250,
@@ -1584,6 +1989,28 @@ export function createSeedDatabase(): DatabaseState {
     },
   ];
 
+  const expenses: SchoolExpense[] = tenants.flatMap((t) =>
+    buildDefaultExpensesForTenant(t.id, t.currency, t.slug.slice(0, 3).toUpperCase())
+  );
+
+  const etimsChecks: EtimsVerificationRecord[] = tenants.flatMap((t) =>
+    buildDefaultEtimsChecksForTenant(t.id, t.currency, t.slug.slice(0, 3).toUpperCase())
+  );
+
+  const reconciliationLines: ReconciliationLine[] = tenants.flatMap((t) =>
+    buildDefaultReconciliationForTenant(t.id, t.currency, t.slug.slice(0, 3).toUpperCase())
+  );
+
+  const payrollEntries: PayrollEntry[] = tenants.flatMap((t) =>
+    buildDefaultPayrollForTenant(t, '2026-11')
+  );
+
+  const budgets: BudgetAllocation[] = tenants.flatMap((t) => buildDefaultBudgetsForTenant(t));
+
+  const approvalRecords: ApprovalSignOffRecord[] = tenants.flatMap((t) =>
+    buildDefaultApprovalsForTenant(t.id, t.currency, t.slug.slice(0, 3).toUpperCase())
+  );
+
   return {
     tenants,
     students,
@@ -1596,8 +2023,15 @@ export function createSeedDatabase(): DatabaseState {
     examResults,
     feeStructures,
     invoices,
+    expenses,
+    etimsChecks,
+    reconciliationLines,
+    payrollEntries,
+    budgets,
+    approvalRecords,
     announcements,
     messages,
+    whatsappDispatches: [],
     notifications,
     adminAuditLogs: [],
   };

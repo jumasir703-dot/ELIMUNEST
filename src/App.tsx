@@ -5,8 +5,8 @@ import {
   Building2,
   CalendarClock,
   CheckSquare,
-  CreditCard,
   GraduationCap,
+  Landmark,
   Menu,
   MessageSquare,
   Moon,
@@ -21,7 +21,7 @@ import { AdmissionsModule } from './components/AdmissionsModule';
 import { AttendanceModule } from './components/AttendanceModule';
 import { CommunicationsModule } from './components/CommunicationsModule';
 import { ExamsModule } from './components/ExamsModule';
-import { FeesModule } from './components/FeesModule';
+import { FinanceModule } from './components/FinanceModule';
 import { SettingsModule } from './components/SettingsModule';
 import { SuperAdminModule } from './components/SuperAdminModule';
 import { TimetableModule } from './components/TimetableModule';
@@ -60,7 +60,7 @@ const NAV_ITEMS: Array<{ id: ModuleId; label: string; icon: typeof BarChart3; ad
   { id: 'timetable', label: 'Timetable', icon: CalendarClock },
   { id: 'attendance', label: 'Attendance', icon: CheckSquare },
   { id: 'exams', label: 'Exams & Grades', icon: GraduationCap },
-  { id: 'fees', label: 'Fees & Billing', icon: CreditCard },
+  { id: 'fees', label: 'Finance & Accounting', icon: Landmark },
   { id: 'communications', label: 'Communications', icon: MessageSquare },
   { id: 'settings', label: 'School Settings', icon: Settings },
   { id: 'super-admin', label: 'Super Admin', icon: ShieldCheck, adminOnly: true },
@@ -536,7 +536,7 @@ export default function App() {
                 />
               )}
               {activeModule === 'fees' && (
-                <FeesModule
+                <FinanceModule
                   workspace={workspace}
                   currentRole={currentRole}
                   onRefresh={() => loadWorkspace(tenantId, true)}

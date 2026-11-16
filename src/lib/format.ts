@@ -1,9 +1,16 @@
-import { computeAssessmentGrade, KENYAN_BELL_SCHEDULE } from '../shared/types';
+import { computeAssessmentGrade, KENYAN_BELL_SCHEDULE, type CurrencyCode } from '../shared/types';
 
-export function formatCurrency(amount: number, currency: 'USD' | 'GBP' | 'EUR' = 'USD'): string {
+export function formatCurrency(amount: number, currency: CurrencyCode = 'KES'): string {
+  if (currency === 'KES') {
+    return new Intl.NumberFormat('en-KE', {
+      style: 'currency',
+      currency: 'KES',
+      maximumFractionDigits: 0,
+    }).format(amount);
+  }
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
-    currency,
+    currency: 'USD',
     maximumFractionDigits: 0,
   }).format(amount);
 }

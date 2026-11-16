@@ -9,6 +9,9 @@ import {
   computeAssessmentGrade,
   DEFAULT_SUBJECT_WEEKLY_LESSONS,
   DEFAULT_TENANT_BRANDING,
+  APPROVAL_COMMITTEES,
+  EXPENSE_ATTACHMENT_TYPES,
+  EXPENSE_CATEGORIES,
   getClusterForGrade,
   getLessonsPerWeekForSubject,
   getStreamsForGrade,
@@ -20,25 +23,44 @@ import {
   KENYAN_CBC_CLUSTERS,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
+  MAX_FEE_VOTELINES,
   type AdminAuditEntry,
   type AdmissionApplication,
   type AdmissionStage,
   type Announcement,
+  type ApprovalCommittee,
+  type ApprovalDecision,
+  type ApprovalSignOffRecord,
   type AttendanceRecord,
   type AttendanceStatus,
+  type BudgetAllocation,
   type CbcClusterId,
+  type CurrencyCode,
   type DayOfWeek,
   type DirectMessage,
+  type EtimsVerificationRecord,
+  type EtimsVerificationStatus,
   type ExamCycle,
   type ExamResult,
+  type ExpenseAttachment,
+  type ExpenseAttachmentType,
+  type ExpenseCategory,
+  type ExpenseStatus,
   type FeeInvoice,
   type FeeStructure,
+  type FeeVoteline,
   type LeaveOutChit,
   type NonTeachingStaffProfile,
   type NotificationCategory,
   type NotificationItem,
   type OnboardingChecklist,
   type PaymentMethod,
+  type PayrollEntry,
+  type PayrollStatus,
+  type ReconciliationChannel,
+  type ReconciliationLine,
+  type ReconciliationStatus,
+  type SchoolExpense,
   type StaffAttendanceRecord,
   type StaffCategory,
   type Student,
@@ -51,10 +73,19 @@ import {
   type TenantWorkspaceData,
   type TimetableSlot,
   type UserRole,
+  type WhatsAppDispatchCategory,
+  type WhatsAppDispatchRecord,
 } from '../src/shared/types.ts';
 import {
+  buildDefaultApprovalsForTenant,
+  buildDefaultBudgetsForTenant,
+  buildDefaultEtimsChecksForTenant,
+  buildDefaultExpensesForTenant,
   buildDefaultNonTeachingStaff,
+  buildDefaultPayrollForTenant,
+  buildDefaultReconciliationForTenant,
   computeLetterGrade,
+  computeStatutoryDeductions,
   createSeedDatabase,
   PERIOD_TIMES,
   type DatabaseState,
@@ -263,6 +294,10 @@ export class TenantStore {
               t.status = 'Active';
               dirty = true;
             }
+            if (t.currency !== 'KES' && t.currency !== 'USD') {
+              t.currency = 'KES';
+              dirty = true;
+            }
             if (!t.branding || !t.branding.primaryColor) {
               const seededDefaults: Record<string, TenantBranding> = {
                 'tenant-oakridge': {
@@ -423,6 +458,83 @@ export class TenantStore {
             dirty = true;
           }
 
+          // Backfill votelines on persisted feeStructures lacking customizable votelines
+          parsed.feeStructures.forEach((fsItem) => {
+            if (!Array.isArray(fsItem.votelines) || fsItem.votelines.length === 0) {
+              fsItem.votelines = [
+                { id: 'vl-tuition', name: 'Tuition Fee', amount: Number(fsItem.tuitionFee || 0) },
+                { id: 'vl-lab', name: 'Laboratory Fee', amount: Number(fsItem.labFee || 0) },
+                {
+                  id: 'vl-tech',
+                  name: 'Technology & ICT',
+                  amount: Number(fsItem.technologyFee || 0),
+                },
+                {
+                  id: 'vl-act',
+                  name: 'Co-Curricular & Activities',
+                  amount: Number(fsItem.activitiesFee || 0),
+                },
+              ];
+              fsItem.totalFee = fsItem.votelines.reduce((sum, v) => sum + v.amount, 0);
+              dirty = true;
+            }
+          });
+
+          if (!Array.isArray(parsed.expenses)) {
+            parsed.expenses = parsed.tenants.flatMap((t) =>
+              buildDefaultExpensesForTenant(
+                t.id,
+                t.currency === 'USD' ? 'USD' : 'KES',
+                t.slug.slice(0, 3).toUpperCase()
+              )
+            );
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.etimsChecks)) {
+            parsed.etimsChecks = parsed.tenants.flatMap((t) =>
+              buildDefaultEtimsChecksForTenant(
+                t.id,
+                t.currency === 'USD' ? 'USD' : 'KES',
+                t.slug.slice(0, 3).toUpperCase()
+              )
+            );
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.reconciliationLines)) {
+            parsed.reconciliationLines = parsed.tenants.flatMap((t) =>
+              buildDefaultReconciliationForTenant(
+                t.id,
+                t.currency === 'USD' ? 'USD' : 'KES',
+                t.slug.slice(0, 3).toUpperCase()
+              )
+            );
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.payrollEntries)) {
+            parsed.payrollEntries = parsed.tenants.flatMap((t) =>
+              buildDefaultPayrollForTenant(t, '2026-11')
+            );
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.budgets)) {
+            parsed.budgets = parsed.tenants.flatMap((t) => buildDefaultBudgetsForTenant(t));
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.approvalRecords)) {
+            parsed.approvalRecords = parsed.tenants.flatMap((t) =>
+              buildDefaultApprovalsForTenant(
+                t.id,
+                t.currency === 'USD' ? 'USD' : 'KES',
+                t.slug.slice(0, 3).toUpperCase()
+              )
+            );
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.whatsappDispatches)) {
+            parsed.whatsappDispatches = [];
+            dirty = true;
+          }
+
           if (dirty) {
             this.persist(parsed);
           }
@@ -557,8 +669,21 @@ export class TenantStore {
       examResults: this.state.examResults.filter((r) => r.tenantId === tenantId),
       feeStructures: this.state.feeStructures.filter((f) => f.tenantId === tenantId),
       invoices: this.state.invoices.filter((i) => i.tenantId === tenantId),
+      expenses: this.state.expenses.filter((e) => e.tenantId === tenantId),
+      etimsChecks: (this.state.etimsChecks || []).filter((e) => e.tenantId === tenantId),
+      reconciliationLines: (this.state.reconciliationLines || []).filter(
+        (r) => r.tenantId === tenantId
+      ),
+      payrollEntries: (this.state.payrollEntries || []).filter((p) => p.tenantId === tenantId),
+      budgets: (this.state.budgets || []).filter((b) => b.tenantId === tenantId),
+      approvalRecords: (this.state.approvalRecords || []).filter(
+        (a) => a.tenantId === tenantId
+      ),
       announcements: this.state.announcements.filter((a) => a.tenantId === tenantId),
       messages: this.state.messages.filter((m) => m.tenantId === tenantId),
+      whatsappDispatches: (this.state.whatsappDispatches || []).filter(
+        (w) => w.tenantId === tenantId
+      ),
       notifications: this.state.notifications.filter((n) => n.tenantId === tenantId),
     };
   }
@@ -568,7 +693,7 @@ export class TenantStore {
     curriculum: string;
     academicYear: string;
     currentTerm: string;
-    currency: 'USD' | 'GBP' | 'EUR';
+    currency: CurrencyCode;
     plan: 'Enterprise' | 'Growth';
     status?: TenantStatus;
     location: string;
@@ -602,7 +727,7 @@ export class TenantStore {
       curriculum: input.curriculum.trim() || 'Standard Curriculum',
       academicYear: input.academicYear.trim() || '2026–2027',
       currentTerm: input.currentTerm.trim() || 'Term 1',
-      currency: input.currency || 'USD',
+      currency: input.currency || 'KES',
       plan: input.plan || 'Growth',
       status: input.status || 'Active',
       location: input.location.trim() || 'Campus Main',
@@ -663,12 +788,33 @@ export class TenantStore {
       tenantId: id,
       grade: tenant.grades[0],
       term: tenant.currentTerm,
+      votelines: [
+        { id: 'vl-tuition', name: 'Tuition Fee', amount: 3800 },
+        { id: 'vl-lab', name: 'Laboratory Fee', amount: 300 },
+        { id: 'vl-tech', name: 'Technology & ICT', amount: 200 },
+        { id: 'vl-act', name: 'Co-Curricular & Activities', amount: 150 },
+      ],
       tuitionFee: 3800,
       labFee: 300,
       technologyFee: 200,
       activitiesFee: 150,
       totalFee: 4450,
     });
+
+    this.state.expenses.push(
+      ...buildDefaultExpensesForTenant(id, tenant.currency, slug.slice(0, 3).toUpperCase())
+    );
+    this.state.etimsChecks.push(
+      ...buildDefaultEtimsChecksForTenant(id, tenant.currency, slug.slice(0, 3).toUpperCase())
+    );
+    this.state.reconciliationLines.push(
+      ...buildDefaultReconciliationForTenant(id, tenant.currency, slug.slice(0, 3).toUpperCase())
+    );
+    this.state.payrollEntries.push(...buildDefaultPayrollForTenant(tenant, '2026-11'));
+    this.state.budgets.push(...buildDefaultBudgetsForTenant(tenant));
+    this.state.approvalRecords.push(
+      ...buildDefaultApprovalsForTenant(id, tenant.currency, slug.slice(0, 3).toUpperCase())
+    );
 
     // Seed Term Opening, Mid-Term, and End of Term exam cycles
     const termLabel = tenant.currentTerm || 'Term 1';
@@ -823,7 +969,7 @@ export class TenantStore {
       curriculum?: string;
       academicYear?: string;
       currentTerm?: string;
-      currency?: 'USD' | 'GBP' | 'EUR';
+      currency?: CurrencyCode;
       plan?: 'Enterprise' | 'Growth';
       status?: TenantStatus;
       branding?: Partial<TenantBranding>;
@@ -857,8 +1003,23 @@ export class TenantStore {
     this.state.examResults = this.state.examResults.filter((r) => r.tenantId !== tenantId);
     this.state.feeStructures = this.state.feeStructures.filter((f) => f.tenantId !== tenantId);
     this.state.invoices = this.state.invoices.filter((i) => i.tenantId !== tenantId);
+    this.state.expenses = this.state.expenses.filter((e) => e.tenantId !== tenantId);
+    this.state.etimsChecks = (this.state.etimsChecks || []).filter((e) => e.tenantId !== tenantId);
+    this.state.reconciliationLines = (this.state.reconciliationLines || []).filter(
+      (r) => r.tenantId !== tenantId
+    );
+    this.state.payrollEntries = (this.state.payrollEntries || []).filter(
+      (p) => p.tenantId !== tenantId
+    );
+    this.state.budgets = (this.state.budgets || []).filter((b) => b.tenantId !== tenantId);
+    this.state.approvalRecords = (this.state.approvalRecords || []).filter(
+      (a) => a.tenantId !== tenantId
+    );
     this.state.announcements = this.state.announcements.filter((a) => a.tenantId !== tenantId);
     this.state.messages = this.state.messages.filter((m) => m.tenantId !== tenantId);
+    this.state.whatsappDispatches = (this.state.whatsappDispatches || []).filter(
+      (w) => w.tenantId !== tenantId
+    );
     this.state.notifications = this.state.notifications.filter((n) => n.tenantId !== tenantId);
 
     this.persist();
@@ -2832,27 +2993,79 @@ export class TenantStore {
     input: {
       grade: string;
       term: string;
-      tuitionFee: number;
-      labFee: number;
-      technologyFee: number;
-      activitiesFee: number;
+      votelines?: Array<{ id?: string; name: string; amount: number }>;
+      tuitionFee?: number;
+      labFee?: number;
+      technologyFee?: number;
+      activitiesFee?: number;
     }
   ): FeeStructure {
     this.requireTenant(tenantId);
-    const totalFee =
-      Number(input.tuitionFee) +
-      Number(input.labFee) +
-      Number(input.technologyFee) +
-      Number(input.activitiesFee);
+
+    const grade = (input.grade || '').trim();
+    const term = (input.term || '').trim();
+    if (!grade || !term) {
+      throw new ConflictError('Grade and term are required for a fee structure.', 400);
+    }
+
+    let normalizedVotelines: FeeVoteline[];
+    if (Array.isArray(input.votelines)) {
+      if (input.votelines.length === 0) {
+        throw new ConflictError('Provide at least 1 fee voteline.', 400);
+      }
+      if (input.votelines.length > MAX_FEE_VOTELINES) {
+        throw new ConflictError(
+          `Fee structures support at most ${MAX_FEE_VOTELINES} votelines.`,
+          400
+        );
+      }
+      normalizedVotelines = input.votelines.map((line, index) => {
+        const name = typeof line.name === 'string' ? line.name.trim() : '';
+        if (!name) {
+          throw new ConflictError(`Voteline #${index + 1} requires a name.`, 400);
+        }
+        const rawAmt = Number(line.amount);
+        if (!Number.isFinite(rawAmt) || rawAmt < 0) {
+          throw new ConflictError(`Voteline "${name}" must have a valid non-negative amount.`, 400);
+        }
+        return {
+          id:
+            typeof line.id === 'string' && line.id.trim()
+              ? line.id.trim()
+              : `vl-${randomUUID().slice(0, 8)}`,
+          name,
+          amount: Math.round(rawAmt),
+        };
+      });
+    } else {
+      normalizedVotelines = [
+        { id: 'vl-tuition', name: 'Tuition Fee', amount: Math.max(0, Math.round(Number(input.tuitionFee || 0))) },
+        { id: 'vl-lab', name: 'Laboratory Fee', amount: Math.max(0, Math.round(Number(input.labFee || 0))) },
+        { id: 'vl-tech', name: 'Technology & ICT', amount: Math.max(0, Math.round(Number(input.technologyFee || 0))) },
+        { id: 'vl-act', name: 'Co-Curricular & Activities', amount: Math.max(0, Math.round(Number(input.activitiesFee || 0))) },
+      ];
+    }
+
+    const totalFee = normalizedVotelines.reduce((sum, line) => sum + line.amount, 0);
+    const findAmt = (pattern: RegExp, fallbackIdx: number) =>
+      normalizedVotelines.find((v) => pattern.test(v.name))?.amount ??
+      normalizedVotelines[fallbackIdx]?.amount ??
+      0;
+
+    const tuitionFee = findAmt(/tuition/i, 0);
+    const labFee = findAmt(/lab|science/i, 1);
+    const technologyFee = findAmt(/tech|ict|comp/i, 2);
+    const activitiesFee = findAmt(/activ|sport|co[- ]?curr/i, 3);
 
     const existing = this.state.feeStructures.find(
-      (f) => f.tenantId === tenantId && f.grade === input.grade && f.term === input.term
+      (f) => f.tenantId === tenantId && f.grade === grade && f.term === term
     );
     if (existing) {
-      existing.tuitionFee = Number(input.tuitionFee);
-      existing.labFee = Number(input.labFee);
-      existing.technologyFee = Number(input.technologyFee);
-      existing.activitiesFee = Number(input.activitiesFee);
+      existing.votelines = normalizedVotelines;
+      existing.tuitionFee = tuitionFee;
+      existing.labFee = labFee;
+      existing.technologyFee = technologyFee;
+      existing.activitiesFee = activitiesFee;
       existing.totalFee = totalFee;
       this.persist();
       this.syncTenant(tenantId, 'fee:structure-updated');
@@ -2862,12 +3075,13 @@ export class TenantStore {
     const fsItem: FeeStructure = {
       id: `fs-${randomUUID().slice(0, 8)}`,
       tenantId,
-      grade: input.grade,
-      term: input.term,
-      tuitionFee: Number(input.tuitionFee),
-      labFee: Number(input.labFee),
-      technologyFee: Number(input.technologyFee),
-      activitiesFee: Number(input.activitiesFee),
+      grade,
+      term,
+      votelines: normalizedVotelines,
+      tuitionFee,
+      labFee,
+      technologyFee,
+      activitiesFee,
       totalFee,
     };
     this.state.feeStructures.push(fsItem);
@@ -2921,7 +3135,13 @@ export class TenantStore {
   recordPayment(
     tenantId: string,
     invoiceId: string,
-    input: { amount: number; method: PaymentMethod; reference: string; recordedBy: string }
+    input: {
+      amount: number;
+      method: PaymentMethod;
+      reference: string;
+      recordedBy: string;
+      paidAt?: string;
+    }
   ): FeeInvoice {
     const tenant = this.requireTenant(tenantId);
     const invoice = this.state.invoices.find((i) => i.id === invoiceId && i.tenantId === tenantId);
@@ -2933,13 +3153,18 @@ export class TenantStore {
     }
 
     const receiptNumber = `RCT-${Math.floor(10000 + Math.random() * 89999)}`;
+    const paidAtIso =
+      input.paidAt && !Number.isNaN(Date.parse(input.paidAt))
+        ? new Date(input.paidAt).toISOString()
+        : new Date().toISOString();
+
     invoice.payments.push({
       id: `pay-${randomUUID().slice(0, 8)}`,
       receiptNumber,
       amount: payAmount,
       method: input.method,
       reference: input.reference.trim() || receiptNumber,
-      paidAt: new Date().toISOString(),
+      paidAt: paidAtIso,
       recordedBy: input.recordedBy || 'Bursar Office',
     });
 
@@ -2957,6 +3182,1099 @@ export class TenantStore {
     );
     this.syncTenant(tenantId, 'fee:payment-recorded');
     return invoice;
+  }
+
+  recordPaymentsBatch(
+    tenantId: string,
+    input: {
+      recordedBy?: string;
+      entries: Array<{
+        invoiceId?: string;
+        invoiceNumber?: string;
+        studentId?: string;
+        studentCode?: string;
+        amount: number;
+        method?: PaymentMethod;
+        reference?: string;
+        paidAt?: string;
+      }>;
+    }
+  ): {
+    updatedInvoices: FeeInvoice[];
+    processedCount: number;
+    skippedCount: number;
+    totalCollected: number;
+  } {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(input.entries) || input.entries.length === 0) {
+      throw new ConflictError('Provide at least one fee payment entry to post.', 400);
+    }
+
+    const validMethods = new Set<PaymentMethod>(['Bank Transfer', 'Card', 'Mobile Money', 'Cash']);
+    const recordedBy = (input.recordedBy || '').trim() || 'Bursar Office';
+    const touchedIds = new Set<string>();
+    let processedCount = 0;
+    let skippedCount = 0;
+    let totalCollected = 0;
+
+    for (const entry of input.entries) {
+      const requestedAmount = Math.round(Number(entry.amount));
+      if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+        skippedCount += 1;
+        continue;
+      }
+
+      let targetInvoice: FeeInvoice | undefined;
+      if (entry.invoiceId) {
+        targetInvoice = this.state.invoices.find(
+          (i) => i.id === entry.invoiceId && i.tenantId === tenantId
+        );
+      }
+      if (!targetInvoice && entry.invoiceNumber) {
+        const invNum = entry.invoiceNumber.trim().toLowerCase();
+        targetInvoice = this.state.invoices.find(
+          (i) => i.tenantId === tenantId && i.invoiceNumber.trim().toLowerCase() === invNum
+        );
+      }
+      if (!targetInvoice && entry.studentId) {
+        targetInvoice = this.state.invoices.find(
+          (i) => i.tenantId === tenantId && i.studentId === entry.studentId && i.balance > 0
+        );
+      }
+      if (!targetInvoice && entry.studentCode) {
+        const code = entry.studentCode.trim().toLowerCase();
+        targetInvoice = this.state.invoices.find(
+          (i) =>
+            i.tenantId === tenantId &&
+            i.studentCode.trim().toLowerCase() === code &&
+            i.balance > 0
+        );
+      }
+
+      if (!targetInvoice || targetInvoice.balance <= 0) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const payAmount = Math.min(targetInvoice.balance, requestedAmount);
+      const method: PaymentMethod =
+        entry.method && validMethods.has(entry.method) ? entry.method : 'Bank Transfer';
+      const receiptNumber = `RCT-${Math.floor(10000 + Math.random() * 89999)}`;
+      const paidAtIso =
+        entry.paidAt && !Number.isNaN(Date.parse(entry.paidAt))
+          ? new Date(entry.paidAt).toISOString()
+          : new Date().toISOString();
+
+      targetInvoice.payments.push({
+        id: `pay-${randomUUID().slice(0, 8)}`,
+        receiptNumber,
+        amount: payAmount,
+        method,
+        reference: (entry.reference || '').trim() || receiptNumber,
+        paidAt: paidAtIso,
+        recordedBy,
+      });
+
+      targetInvoice.paidAmount += payAmount;
+      targetInvoice.balance = Math.max(0, targetInvoice.totalAmount - targetInvoice.paidAmount);
+      targetInvoice.status = targetInvoice.balance === 0 ? 'Paid' : 'Partial';
+
+      touchedIds.add(targetInvoice.id);
+      processedCount += 1;
+      totalCollected += payAmount;
+    }
+
+    if (processedCount === 0) {
+      throw new ConflictError(
+        'No valid open-balance invoices matched the uploaded payment entries.',
+        400
+      );
+    }
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Batch Fee Payments Recorded (${processedCount})`,
+      `${tenant.currency} ${totalCollected.toLocaleString()} credited across ${touchedIds.size} student invoice(s).`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:payments-batch');
+
+    return {
+      updatedInvoices: this.state.invoices.filter(
+        (i) => i.tenantId === tenantId && touchedIds.has(i.id)
+      ),
+      processedCount,
+      skippedCount,
+      totalCollected,
+    };
+  }
+
+  // Finance & Accounting: Expensing Vouchers & Supporting Documents
+  private normalizeExpenseAttachments(
+    raw:
+      | Array<{
+          fileName: string;
+          mimeType?: string;
+          fileSize?: number;
+          docType?: ExpenseAttachmentType;
+          dataUrl: string;
+          uploadedBy?: string;
+        }>
+      | undefined,
+    defaultUploader: string
+  ): ExpenseAttachment[] {
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+    if (raw.length > 6) {
+      throw new ConflictError('Attach up to 6 supporting documents per expense voucher.', 400);
+    }
+    const validDocTypes = new Set<string>(EXPENSE_ATTACHMENT_TYPES);
+    const MAX_DATA_URL_LEN = 3_500_000; // ~2.5MB decoded binary per file
+    const attachments: ExpenseAttachment[] = [];
+
+    for (const item of raw) {
+      const fileName = (item?.fileName || '').trim();
+      const dataUrl = typeof item?.dataUrl === 'string' ? item.dataUrl.trim() : '';
+      if (!fileName || !dataUrl.startsWith('data:')) {
+        throw new ConflictError('Supporting document requires a valid file name and uploaded file data.', 400);
+      }
+      if (dataUrl.length > MAX_DATA_URL_LEN) {
+        throw new ConflictError(`Attachment "${fileName}" exceeds the 2.5 MB file size limit.`, 400);
+      }
+      const docType: ExpenseAttachmentType =
+        item.docType && validDocTypes.has(item.docType)
+          ? item.docType
+          : 'Other Supporting Document';
+      const mimeMatch = dataUrl.match(/^data:([^;]+);/);
+      const mimeType = (item.mimeType || mimeMatch?.[1] || 'application/octet-stream').trim();
+      const fileSize = Number.isFinite(Number(item.fileSize))
+        ? Math.max(0, Math.round(Number(item.fileSize)))
+        : Math.round((dataUrl.length * 3) / 4);
+
+      attachments.push({
+        id: `att-${randomUUID().slice(0, 8)}`,
+        fileName,
+        mimeType,
+        fileSize,
+        docType,
+        dataUrl,
+        uploadedAt: new Date().toISOString(),
+        uploadedBy: (item.uploadedBy || '').trim() || defaultUploader,
+      });
+    }
+    return attachments;
+  }
+
+  createExpense(
+    tenantId: string,
+    input: {
+      title: string;
+      category: ExpenseCategory;
+      vendor: string;
+      amount: number;
+      paymentMethod: PaymentMethod;
+      reference?: string;
+      expenseDate?: string;
+      status?: ExpenseStatus;
+      recordedBy?: string;
+      notes?: string;
+      attachments?: Array<{
+        fileName: string;
+        mimeType?: string;
+        fileSize?: number;
+        docType?: ExpenseAttachmentType;
+        dataUrl: string;
+        uploadedBy?: string;
+      }>;
+    }
+  ): SchoolExpense {
+    const tenant = this.requireTenant(tenantId);
+    const title = (input.title || '').trim();
+    const vendor = (input.vendor || '').trim();
+    const amount = Math.round(Number(input.amount));
+
+    if (!title) {
+      throw new ConflictError('Expense description / title is required.', 400);
+    }
+    if (!vendor) {
+      throw new ConflictError('Vendor / Payee name is required.', 400);
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new ConflictError('Expense amount must be greater than zero.', 400);
+    }
+
+    const validCategories = new Set<string>(EXPENSE_CATEGORIES);
+    const category: ExpenseCategory = validCategories.has(input.category)
+      ? input.category
+      : 'Administration & Statutory';
+    const validMethods = new Set<PaymentMethod>(['Bank Transfer', 'Card', 'Mobile Money', 'Cash']);
+    const paymentMethod: PaymentMethod = validMethods.has(input.paymentMethod)
+      ? input.paymentMethod
+      : 'Bank Transfer';
+    const validStatuses = new Set<ExpenseStatus>(['Pending Approval', 'Approved', 'Paid']);
+    const status: ExpenseStatus =
+      input.status && validStatuses.has(input.status) ? input.status : 'Pending Approval';
+
+    const count = this.state.expenses.filter((e) => e.tenantId === tenantId).length;
+    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+    const voucherNumber = `${prefix}-EXP-${202600 + count + 1}`;
+    const expenseDate =
+      input.expenseDate && !Number.isNaN(Date.parse(input.expenseDate))
+        ? new Date(input.expenseDate).toISOString().slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
+
+    const recordedBy = (input.recordedBy || '').trim() || 'Bursar Office';
+    const attachments = this.normalizeExpenseAttachments(input.attachments, recordedBy);
+
+    const expense: SchoolExpense = {
+      id: `exp-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      voucherNumber,
+      title,
+      category,
+      vendor,
+      amount,
+      paymentMethod,
+      reference: (input.reference || '').trim() || voucherNumber,
+      expenseDate,
+      status,
+      recordedBy,
+      notes: (input.notes || '').trim() || undefined,
+      attachments,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.state.expenses.unshift(expense);
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Expense Voucher Recorded: ${voucherNumber}`,
+      `${title} — ${tenant.currency} ${amount.toLocaleString()} (${status}) to ${vendor}.`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'finance:expense-created');
+    return expense;
+  }
+
+  addExpenseAttachment(
+    tenantId: string,
+    expenseId: string,
+    input: {
+      fileName: string;
+      mimeType?: string;
+      fileSize?: number;
+      docType?: ExpenseAttachmentType;
+      dataUrl: string;
+      uploadedBy?: string;
+    }
+  ): SchoolExpense {
+    this.requireTenant(tenantId);
+    const expense = this.state.expenses.find(
+      (e) => e.id === expenseId && e.tenantId === tenantId
+    );
+    if (!expense) {
+      throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+
+    const existing = expense.attachments || [];
+    if (existing.length >= 6) {
+      throw new ConflictError('Maximum of 6 supporting documents reached for this voucher.', 400);
+    }
+
+    const [createdAttachment] = this.normalizeExpenseAttachments([input], expense.recordedBy);
+    expense.attachments = [...existing, createdAttachment];
+    this.persist();
+    this.syncTenant(tenantId, 'finance:expense-attachment-added');
+    return expense;
+  }
+
+  deleteExpenseAttachment(
+    tenantId: string,
+    expenseId: string,
+    attachmentId: string
+  ): SchoolExpense {
+    this.requireTenant(tenantId);
+    const expense = this.state.expenses.find(
+      (e) => e.id === expenseId && e.tenantId === tenantId
+    );
+    if (!expense) {
+      throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+    const existing = expense.attachments || [];
+    const next = existing.filter((a) => a.id !== attachmentId);
+    if (next.length === existing.length) {
+      throw new ConflictError('Supporting document not found.', 404);
+    }
+    expense.attachments = next;
+    this.persist();
+    this.syncTenant(tenantId, 'finance:expense-attachment-deleted');
+    return expense;
+  }
+
+  updateExpenseStatus(tenantId: string, expenseId: string, status: ExpenseStatus): SchoolExpense {
+    this.requireTenant(tenantId);
+    const validStatuses = new Set<ExpenseStatus>(['Pending Approval', 'Approved', 'Paid']);
+    if (!validStatuses.has(status)) {
+      throw new ConflictError(`Invalid expense status "${status}".`, 400);
+    }
+
+    const expense = this.state.expenses.find(
+      (e) => e.id === expenseId && e.tenantId === tenantId
+    );
+    if (!expense) {
+      throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+
+    expense.status = status;
+    this.persist();
+    this.syncTenant(tenantId, 'finance:expense-updated');
+    return expense;
+  }
+
+  deleteExpense(tenantId: string, expenseId: string): { deleted: boolean } {
+    this.requireTenant(tenantId);
+    const idx = this.state.expenses.findIndex(
+      (e) => e.id === expenseId && e.tenantId === tenantId
+    );
+    if (idx === -1) {
+      throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+    this.state.expenses.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:expense-deleted');
+    return { deleted: true };
+  }
+
+  // Finance Controls: eTIMS Receipt Verification
+  verifyEtimsReceipt(
+    tenantId: string,
+    input: {
+      expenseId?: string;
+      supplierName: string;
+      supplierKraPin: string;
+      cuInvoiceNumber: string;
+      receiptDate?: string;
+      taxableAmount?: number;
+      vatAmount?: number;
+      totalAmount: number;
+      exemptVat?: boolean;
+      checkedBy?: string;
+    }
+  ): EtimsVerificationRecord {
+    const tenant = this.requireTenant(tenantId);
+    const supplierName = (input.supplierName || '').trim();
+    const supplierKraPin = (input.supplierKraPin || '').trim().toUpperCase();
+    const cuInvoiceNumber = (input.cuInvoiceNumber || '').trim().toUpperCase();
+    const totalAmount = Math.round(Number(input.totalAmount));
+
+    if (!supplierName) {
+      throw new ConflictError('Supplier name is required for eTIMS check.', 400);
+    }
+    if (!/^[AP]\d{9}[A-Z]$/.test(supplierKraPin)) {
+      throw new ConflictError(
+        'Invalid KRA PIN format. Expected 11 characters such as P051482910K or A001234567Z.',
+        400
+      );
+    }
+    if (cuInvoiceNumber.length < 8) {
+      throw new ConflictError('Enter a valid eTIMS CU Invoice / Control Unit serial number.', 400);
+    }
+    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+      throw new ConflictError('Receipt total amount must be greater than zero.', 400);
+    }
+
+    const linkedExpense = input.expenseId
+      ? this.state.expenses.find((e) => e.id === input.expenseId && e.tenantId === tenantId)
+      : undefined;
+
+    const vatAmount = input.exemptVat
+      ? 0
+      : Number.isFinite(Number(input.vatAmount))
+      ? Math.max(0, Math.round(Number(input.vatAmount)))
+      : totalAmount - Math.round(totalAmount / 1.16);
+    const taxableAmount = Number.isFinite(Number(input.taxableAmount))
+      ? Math.max(0, Math.round(Number(input.taxableAmount)))
+      : Math.max(0, totalAmount - vatAmount);
+
+    let status: EtimsVerificationStatus = input.exemptVat ? 'Exempt' : 'Verified';
+    let verificationNotes = input.exemptVat
+      ? 'Zero-rated / VAT-exempt KRA eTIMS tax invoice verified.'
+      : 'Supplier KRA PIN format, CU Invoice serial, and 16% VAT breakdown verified.';
+
+    if (linkedExpense && Math.abs(linkedExpense.amount - totalAmount) > 5) {
+      status = 'Mismatch';
+      verificationNotes = `Amount variance detected: Voucher ${linkedExpense.voucherNumber} is ${tenant.currency} ${linkedExpense.amount.toLocaleString()} vs eTIMS receipt ${tenant.currency} ${totalAmount.toLocaleString()}.`;
+    }
+
+    const record: EtimsVerificationRecord = {
+      id: `etims-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      expenseId: linkedExpense?.id,
+      voucherNumber: linkedExpense?.voucherNumber,
+      supplierName,
+      supplierKraPin,
+      cuInvoiceNumber,
+      receiptDate:
+        input.receiptDate && !Number.isNaN(Date.parse(input.receiptDate))
+          ? new Date(input.receiptDate).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10),
+      taxableAmount,
+      vatAmount,
+      totalAmount,
+      status,
+      verificationNotes,
+      checkedBy: (input.checkedBy || '').trim() || 'Bursar Compliance Desk',
+      checkedAt: new Date().toISOString(),
+    };
+
+    if (linkedExpense) {
+      linkedExpense.etimsCuNumber = cuInvoiceNumber;
+      linkedExpense.supplierKraPin = supplierKraPin;
+      linkedExpense.etimsStatus = status;
+    }
+
+    if (!Array.isArray(this.state.etimsChecks)) this.state.etimsChecks = [];
+    this.state.etimsChecks.unshift(record);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:etims-verified');
+    return record;
+  }
+
+  deleteEtimsCheck(tenantId: string, checkId: string): { deleted: boolean } {
+    this.requireTenant(tenantId);
+    const idx = (this.state.etimsChecks || []).findIndex(
+      (c) => c.id === checkId && c.tenantId === tenantId
+    );
+    if (idx === -1) {
+      throw new ConflictError('eTIMS verification record not found.', 404);
+    }
+    this.state.etimsChecks.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:etims-deleted');
+    return { deleted: true };
+  }
+
+  // Finance Controls: M-Pesa & Bank Statement Reconciliation
+  private matchStatementLineWithTenantLedger(
+    tenantId: string,
+    line: {
+      direction: 'Credit' | 'Debit';
+      statementRef: string;
+      amount: number;
+      narration: string;
+    }
+  ): {
+    status: ReconciliationStatus;
+    matchedType?: 'Fee Payment' | 'Expense Voucher';
+    matchedRecordId?: string;
+    matchedLabel?: string;
+  } {
+    const refNorm = line.statementRef.trim().toLowerCase();
+    const narrNorm = line.narration.trim().toLowerCase();
+
+    if (line.direction === 'Credit') {
+      const invoices = this.state.invoices.filter((i) => i.tenantId === tenantId);
+      for (const inv of invoices) {
+        for (const pay of inv.payments || []) {
+          const payRef = (pay.reference || '').trim().toLowerCase();
+          const recNo = pay.receiptNumber.trim().toLowerCase();
+          const refHit =
+            (payRef && (payRef === refNorm || narrNorm.includes(payRef))) ||
+            (recNo && (recNo === refNorm || narrNorm.includes(recNo)));
+          if (refHit && pay.amount === line.amount) {
+            return {
+              status: 'Matched',
+              matchedType: 'Fee Payment',
+              matchedRecordId: pay.id,
+              matchedLabel: `${pay.receiptNumber} · ${inv.studentName} (${inv.invoiceNumber})`,
+            };
+          }
+          if (refHit && pay.amount !== line.amount) {
+            return {
+              status: 'Discrepancy',
+              matchedType: 'Fee Payment',
+              matchedRecordId: pay.id,
+              matchedLabel: `${pay.receiptNumber} · Amount mismatch`,
+            };
+          }
+        }
+      }
+      // Fallback exact amount match against single open payment if reference differs
+      for (const inv of invoices) {
+        const pay = (inv.payments || []).find((p) => p.amount === line.amount);
+        if (pay) {
+          return {
+            status: 'Matched',
+            matchedType: 'Fee Payment',
+            matchedRecordId: pay.id,
+            matchedLabel: `${pay.receiptNumber} · ${inv.studentName} (Amount match)`,
+          };
+        }
+      }
+      return { status: 'Unmatched' };
+    }
+
+    // Debit: Match against Paid / Approved Expenses
+    const expenses = this.state.expenses.filter((e) => e.tenantId === tenantId);
+    for (const exp of expenses) {
+      const expRef = (exp.reference || '').trim().toLowerCase();
+      const vNo = exp.voucherNumber.trim().toLowerCase();
+      const refHit =
+        (expRef && (expRef === refNorm || narrNorm.includes(expRef))) ||
+        (vNo && (vNo === refNorm || narrNorm.includes(vNo)));
+      if (refHit && exp.amount === line.amount) {
+        return {
+          status: 'Matched',
+          matchedType: 'Expense Voucher',
+          matchedRecordId: exp.id,
+          matchedLabel: `${exp.voucherNumber} · ${exp.vendor}`,
+        };
+      }
+      if (refHit && exp.amount !== line.amount) {
+        return {
+          status: 'Discrepancy',
+          matchedType: 'Expense Voucher',
+          matchedRecordId: exp.id,
+          matchedLabel: `${exp.voucherNumber} · Amount mismatch`,
+        };
+      }
+    }
+    const exactExp = expenses.find((e) => e.status === 'Paid' && e.amount === line.amount);
+    if (exactExp) {
+      return {
+        status: 'Matched',
+        matchedType: 'Expense Voucher',
+        matchedRecordId: exactExp.id,
+        matchedLabel: `${exactExp.voucherNumber} · ${exactExp.vendor} (Amount match)`,
+      };
+    }
+    return { status: 'Unmatched' };
+  }
+
+  importReconciliationLines(
+    tenantId: string,
+    lines: Array<{
+      channel: ReconciliationChannel;
+      accountName?: string;
+      transactionDate?: string;
+      statementRef: string;
+      narration: string;
+      direction: 'Credit' | 'Debit';
+      amount: number;
+      notes?: string;
+    }>
+  ): { imported: ReconciliationLine[]; matchedCount: number; unmatchedCount: number } {
+    this.requireTenant(tenantId);
+    if (!Array.isArray(lines) || lines.length === 0) {
+      throw new ConflictError('Provide at least one statement line to import.', 400);
+    }
+
+    if (!Array.isArray(this.state.reconciliationLines)) {
+      this.state.reconciliationLines = [];
+    }
+
+    const imported: ReconciliationLine[] = [];
+    let matchedCount = 0;
+    let unmatchedCount = 0;
+
+    for (const raw of lines) {
+      const statementRef = (raw.statementRef || '').trim();
+      const narration = (raw.narration || '').trim() || statementRef;
+      const amount = Math.round(Number(raw.amount));
+      if (!statementRef || !Number.isFinite(amount) || amount <= 0) {
+        throw new ConflictError(
+          'Each statement line requires a reference code and positive amount.',
+          400
+        );
+      }
+      const channel: ReconciliationChannel = raw.channel === 'M-Pesa' ? 'M-Pesa' : 'Bank';
+      const direction: 'Credit' | 'Debit' = raw.direction === 'Debit' ? 'Debit' : 'Credit';
+      const transactionDate =
+        raw.transactionDate && !Number.isNaN(Date.parse(raw.transactionDate))
+          ? new Date(raw.transactionDate).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
+
+      const matchResult = this.matchStatementLineWithTenantLedger(tenantId, {
+        direction,
+        statementRef,
+        amount,
+        narration,
+      });
+      if (matchResult.status === 'Matched') matchedCount += 1;
+      else unmatchedCount += 1;
+
+      const created: ReconciliationLine = {
+        id: `rec-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        channel,
+        accountName:
+          (raw.accountName || '').trim() ||
+          (channel === 'M-Pesa' ? 'Paybill Settlement Account' : 'Main Bank Operating Account'),
+        transactionDate,
+        statementRef,
+        narration,
+        direction,
+        amount,
+        status: matchResult.status,
+        matchedType: matchResult.matchedType,
+        matchedRecordId: matchResult.matchedRecordId,
+        matchedLabel: matchResult.matchedLabel,
+        notes: (raw.notes || '').trim() || undefined,
+        importedAt: new Date().toISOString(),
+      };
+      this.state.reconciliationLines.unshift(created);
+      imported.push(created);
+    }
+
+    this.persist();
+    this.syncTenant(tenantId, 'finance:reconciliation-imported');
+    return { imported, matchedCount, unmatchedCount };
+  }
+
+  autoMatchReconciliation(tenantId: string): { matchedCount: number } {
+    this.requireTenant(tenantId);
+    let matchedCount = 0;
+    for (const line of this.state.reconciliationLines || []) {
+      if (line.tenantId !== tenantId || line.status === 'Matched') continue;
+      const res = this.matchStatementLineWithTenantLedger(tenantId, line);
+      line.status = res.status;
+      line.matchedType = res.matchedType;
+      line.matchedRecordId = res.matchedRecordId;
+      line.matchedLabel = res.matchedLabel;
+      if (res.status === 'Matched') matchedCount += 1;
+    }
+    this.persist();
+    this.syncTenant(tenantId, 'finance:reconciliation-automatch');
+    return { matchedCount };
+  }
+
+  updateReconciliationLine(
+    tenantId: string,
+    lineId: string,
+    patch: {
+      status: ReconciliationStatus;
+      matchedType?: 'Fee Payment' | 'Expense Voucher';
+      matchedRecordId?: string;
+      matchedLabel?: string;
+      notes?: string;
+    }
+  ): ReconciliationLine {
+    this.requireTenant(tenantId);
+    const valid = new Set<ReconciliationStatus>(['Matched', 'Unmatched', 'Discrepancy']);
+    if (!valid.has(patch.status)) {
+      throw new ConflictError(`Invalid reconciliation status "${patch.status}".`, 400);
+    }
+    const line = (this.state.reconciliationLines || []).find(
+      (r) => r.id === lineId && r.tenantId === tenantId
+    );
+    if (!line) {
+      throw new ConflictError('Reconciliation statement line not found.', 404);
+    }
+    line.status = patch.status;
+    if (patch.status === 'Unmatched') {
+      line.matchedType = undefined;
+      line.matchedRecordId = undefined;
+      line.matchedLabel = undefined;
+    } else {
+      if (patch.matchedType !== undefined) line.matchedType = patch.matchedType;
+      if (patch.matchedRecordId !== undefined) line.matchedRecordId = patch.matchedRecordId;
+      if (patch.matchedLabel !== undefined) line.matchedLabel = patch.matchedLabel.trim() || undefined;
+    }
+    if (patch.notes !== undefined) line.notes = patch.notes.trim() || undefined;
+    this.persist();
+    this.syncTenant(tenantId, 'finance:reconciliation-updated');
+    return line;
+  }
+
+  deleteReconciliationLine(tenantId: string, lineId: string): { deleted: boolean } {
+    this.requireTenant(tenantId);
+    const idx = (this.state.reconciliationLines || []).findIndex(
+      (r) => r.id === lineId && r.tenantId === tenantId
+    );
+    if (idx === -1) {
+      throw new ConflictError('Reconciliation statement line not found.', 404);
+    }
+    this.state.reconciliationLines.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:reconciliation-deleted');
+    return { deleted: true };
+  }
+
+  // Finance Controls: Payroll & Statutory Deductions
+  generatePayrollRun(tenantId: string, payPeriod: string): PayrollEntry[] {
+    const tenant = this.requireTenant(tenantId);
+    const period = (payPeriod || '').trim() || new Date().toISOString().slice(0, 7);
+    if (!Array.isArray(this.state.payrollEntries)) this.state.payrollEntries = [];
+
+    const existingStaffIds = new Set(
+      this.state.payrollEntries
+        .filter((p) => p.tenantId === tenantId && p.payPeriod === period)
+        .map((p) => p.staffId)
+    );
+
+    const defaults = buildDefaultPayrollForTenant(tenant, period);
+    const created: PayrollEntry[] = [];
+    for (const entry of defaults) {
+      if (!existingStaffIds.has(entry.staffId)) {
+        const nextEntry = { ...entry, id: `payr-${randomUUID().slice(0, 8)}` };
+        this.state.payrollEntries.push(nextEntry);
+        created.push(nextEntry);
+      }
+    }
+    this.persist();
+    this.syncTenant(tenantId, 'finance:payroll-generated');
+    return this.state.payrollEntries.filter(
+      (p) => p.tenantId === tenantId && p.payPeriod === period
+    );
+  }
+
+  upsertPayrollEntry(
+    tenantId: string,
+    input: {
+      id?: string;
+      payPeriod: string;
+      staffId?: string;
+      staffName: string;
+      staffCategory: StaffCategory;
+      designation: string;
+      basicSalary: number;
+      allowances: number;
+      saccoOrLoan?: number;
+      autoComputeStatutory?: boolean;
+      paye?: number;
+      nssf?: number;
+      shif?: number;
+      housingLevy?: number;
+      status?: PayrollStatus;
+    }
+  ): PayrollEntry {
+    const tenant = this.requireTenant(tenantId);
+    const staffName = (input.staffName || '').trim();
+    if (!staffName) {
+      throw new ConflictError('Staff full name is required for payroll entry.', 400);
+    }
+    const basicSalary = Math.max(0, Math.round(Number(input.basicSalary)));
+    const allowances = Math.max(0, Math.round(Number(input.allowances || 0)));
+    const saccoOrLoan = Math.max(0, Math.round(Number(input.saccoOrLoan || 0)));
+    const grossPay = basicSalary + allowances;
+    if (grossPay <= 0) {
+      throw new ConflictError('Gross salary must be greater than zero.', 400);
+    }
+
+    const statutory = computeStatutoryDeductions(grossPay, tenant.currency);
+    const useAuto = input.autoComputeStatutory !== false;
+    const paye = useAuto
+      ? statutory.paye
+      : Math.max(0, Math.round(Number(input.paye ?? statutory.paye)));
+    const nssf = useAuto
+      ? statutory.nssf
+      : Math.max(0, Math.round(Number(input.nssf ?? statutory.nssf)));
+    const shif = useAuto
+      ? statutory.shif
+      : Math.max(0, Math.round(Number(input.shif ?? statutory.shif)));
+    const housingLevy = useAuto
+      ? statutory.housingLevy
+      : Math.max(0, Math.round(Number(input.housingLevy ?? statutory.housingLevy)));
+
+    const totalDeductions = paye + nssf + shif + housingLevy + saccoOrLoan;
+    const netPay = Math.max(0, grossPay - totalDeductions);
+    const payPeriod = (input.payPeriod || '').trim() || new Date().toISOString().slice(0, 7);
+    const status: PayrollStatus =
+      input.status === 'Approved' || input.status === 'Disbursed' ? input.status : 'Draft';
+
+    if (!Array.isArray(this.state.payrollEntries)) this.state.payrollEntries = [];
+    const existing = input.id
+      ? this.state.payrollEntries.find((p) => p.id === input.id && p.tenantId === tenantId)
+      : undefined;
+
+    if (existing) {
+      existing.payPeriod = payPeriod;
+      existing.staffName = staffName;
+      existing.staffCategory = input.staffCategory === 'Non-Teaching' ? 'Non-Teaching' : 'Teaching';
+      existing.designation = (input.designation || '').trim() || existing.designation;
+      existing.basicSalary = basicSalary;
+      existing.allowances = allowances;
+      existing.grossPay = grossPay;
+      existing.paye = paye;
+      existing.nssf = nssf;
+      existing.shif = shif;
+      existing.housingLevy = housingLevy;
+      existing.saccoOrLoan = saccoOrLoan;
+      existing.totalDeductions = totalDeductions;
+      existing.netPay = netPay;
+      existing.status = status;
+      existing.updatedAt = new Date().toISOString();
+      this.persist();
+      this.syncTenant(tenantId, 'finance:payroll-updated');
+      return existing;
+    }
+
+    const created: PayrollEntry = {
+      id: `payr-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      payPeriod,
+      staffId: (input.staffId || '').trim() || `stf-${randomUUID().slice(0, 6)}`,
+      staffName,
+      staffCategory: input.staffCategory === 'Non-Teaching' ? 'Non-Teaching' : 'Teaching',
+      designation: (input.designation || '').trim() || 'Staff Member',
+      basicSalary,
+      allowances,
+      grossPay,
+      paye,
+      nssf,
+      shif,
+      housingLevy,
+      saccoOrLoan,
+      totalDeductions,
+      netPay,
+      status,
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.state.payrollEntries.push(created);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:payroll-created');
+    return created;
+  }
+
+  updatePayrollStatus(tenantId: string, entryId: string, status: PayrollStatus): PayrollEntry {
+    this.requireTenant(tenantId);
+    const valid = new Set<PayrollStatus>(['Draft', 'Approved', 'Disbursed']);
+    if (!valid.has(status)) {
+      throw new ConflictError(`Invalid payroll status "${status}".`, 400);
+    }
+    const entry = (this.state.payrollEntries || []).find(
+      (p) => p.id === entryId && p.tenantId === tenantId
+    );
+    if (!entry) {
+      throw new ConflictError('Payroll entry not found in tenant.', 404);
+    }
+    entry.status = status;
+    entry.updatedAt = new Date().toISOString();
+    this.persist();
+    this.syncTenant(tenantId, 'finance:payroll-status');
+    return entry;
+  }
+
+  deletePayrollEntry(tenantId: string, entryId: string): { deleted: boolean } {
+    this.requireTenant(tenantId);
+    const idx = (this.state.payrollEntries || []).findIndex(
+      (p) => p.id === entryId && p.tenantId === tenantId
+    );
+    if (idx === -1) {
+      throw new ConflictError('Payroll entry not found in tenant.', 404);
+    }
+    this.state.payrollEntries.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:payroll-deleted');
+    return { deleted: true };
+  }
+
+  // Finance Controls: Departmental Budget Allocations & Tracking
+  upsertBudgetAllocation(
+    tenantId: string,
+    input: {
+      category: ExpenseCategory;
+      allocatedAmount: number;
+      fiscalYear?: string;
+      term?: string;
+      notes?: string;
+    }
+  ): BudgetAllocation {
+    const tenant = this.requireTenant(tenantId);
+    const validCategories = new Set<string>(EXPENSE_CATEGORIES);
+    if (!validCategories.has(input.category)) {
+      throw new ConflictError(`Invalid budget expense category "${input.category}".`, 400);
+    }
+    const allocatedAmount = Math.round(Number(input.allocatedAmount));
+    if (!Number.isFinite(allocatedAmount) || allocatedAmount < 0) {
+      throw new ConflictError('Budget allocation amount must be zero or positive.', 400);
+    }
+
+    if (!Array.isArray(this.state.budgets)) this.state.budgets = [];
+    const existing = this.state.budgets.find(
+      (b) => b.tenantId === tenantId && b.category === input.category
+    );
+
+    if (existing) {
+      existing.allocatedAmount = allocatedAmount;
+      if (input.fiscalYear) existing.fiscalYear = input.fiscalYear.trim();
+      if (input.term) existing.term = input.term.trim();
+      if (input.notes !== undefined) existing.notes = input.notes.trim() || undefined;
+      existing.updatedAt = new Date().toISOString();
+      this.persist();
+      this.syncTenant(tenantId, 'finance:budget-updated');
+      return existing;
+    }
+
+    const created: BudgetAllocation = {
+      id: `bdg-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      fiscalYear: (input.fiscalYear || '').trim() || tenant.academicYear || '2026–2027',
+      term: (input.term || '').trim() || tenant.currentTerm || 'Term 1',
+      category: input.category,
+      allocatedAmount,
+      notes: (input.notes || '').trim() || undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    this.state.budgets.push(created);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:budget-created');
+    return created;
+  }
+
+  // Finance Controls: Board / Procurement Sign-Off Approvals
+  createApprovalRecord(
+    tenantId: string,
+    input: {
+      committee: ApprovalCommittee;
+      subject: string;
+      linkedExpenseId?: string;
+      amount: number;
+      meetingDate?: string;
+      minuteReference: string;
+      chairpersonName: string;
+      secretaryName: string;
+      bursarName?: string;
+      decision?: ApprovalDecision;
+      remarks?: string;
+    }
+  ): ApprovalSignOffRecord {
+    const tenant = this.requireTenant(tenantId);
+    const subject = (input.subject || '').trim();
+    const minuteReference = (input.minuteReference || '').trim();
+    const chairpersonName = (input.chairpersonName || '').trim();
+    const secretaryName = (input.secretaryName || '').trim();
+    const amount = Math.round(Number(input.amount));
+
+    if (!subject || !minuteReference || !chairpersonName || !secretaryName) {
+      throw new ConflictError(
+        'Subject, minute reference, chairperson, and secretary signatories are required.',
+        400
+      );
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new ConflictError('Sign-off amount must be greater than zero.', 400);
+    }
+
+    const validCommittees = new Set<string>(APPROVAL_COMMITTEES);
+    const committee: ApprovalCommittee = validCommittees.has(input.committee)
+      ? input.committee
+      : 'Board of Management (BOM)';
+    const validDecisions = new Set<ApprovalDecision>([
+      'Pending Sign-Off',
+      'Approved',
+      'Deferred',
+      'Rejected',
+    ]);
+    const decision: ApprovalDecision =
+      input.decision && validDecisions.has(input.decision)
+        ? input.decision
+        : 'Pending Sign-Off';
+
+    const linkedExpense = input.linkedExpenseId
+      ? this.state.expenses.find((e) => e.id === input.linkedExpenseId && e.tenantId === tenantId)
+      : undefined;
+
+    if (!Array.isArray(this.state.approvalRecords)) this.state.approvalRecords = [];
+    const count = this.state.approvalRecords.filter((a) => a.tenantId === tenantId).length;
+    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+    const referenceCode = `${prefix}-BOM-2026-${String(count + 1).padStart(2, '0')}`;
+
+    const record: ApprovalSignOffRecord = {
+      id: `apr-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      referenceCode,
+      committee,
+      subject,
+      linkedExpenseId: linkedExpense?.id,
+      linkedVoucherNumber: linkedExpense?.voucherNumber,
+      amount,
+      meetingDate:
+        input.meetingDate && !Number.isNaN(Date.parse(input.meetingDate))
+          ? new Date(input.meetingDate).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10),
+      minuteReference,
+      chairpersonName,
+      secretaryName,
+      bursarName: (input.bursarName || '').trim() || 'School Bursar',
+      decision,
+      remarks: (input.remarks || '').trim() || undefined,
+      createdAt: new Date().toISOString(),
+      signedAt: decision === 'Approved' ? new Date().toISOString() : undefined,
+    };
+
+    if (linkedExpense) {
+      linkedExpense.boardApprovalRef = `${referenceCode} (${minuteReference})`;
+      if (decision === 'Approved' && linkedExpense.status === 'Pending Approval') {
+        linkedExpense.status = 'Approved';
+      }
+    }
+
+    this.state.approvalRecords.unshift(record);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:approval-created');
+    return record;
+  }
+
+  updateApprovalDecision(
+    tenantId: string,
+    recordId: string,
+    patch: { decision: ApprovalDecision; remarks?: string }
+  ): ApprovalSignOffRecord {
+    this.requireTenant(tenantId);
+    const validDecisions = new Set<ApprovalDecision>([
+      'Pending Sign-Off',
+      'Approved',
+      'Deferred',
+      'Rejected',
+    ]);
+    if (!validDecisions.has(patch.decision)) {
+      throw new ConflictError(`Invalid approval decision "${patch.decision}".`, 400);
+    }
+
+    const record = (this.state.approvalRecords || []).find(
+      (a) => a.id === recordId && a.tenantId === tenantId
+    );
+    if (!record) {
+      throw new ConflictError('Board / Procurement approval record not found.', 404);
+    }
+
+    record.decision = patch.decision;
+    if (patch.remarks !== undefined) record.remarks = patch.remarks.trim() || undefined;
+    record.signedAt = patch.decision === 'Approved' ? new Date().toISOString() : undefined;
+
+    if (record.linkedExpenseId) {
+      const linkedExpense = this.state.expenses.find(
+        (e) => e.id === record.linkedExpenseId && e.tenantId === tenantId
+      );
+      if (linkedExpense) {
+        linkedExpense.boardApprovalRef = `${record.referenceCode} (${record.minuteReference})`;
+        if (patch.decision === 'Approved' && linkedExpense.status === 'Pending Approval') {
+          linkedExpense.status = 'Approved';
+        }
+      }
+    }
+
+    this.persist();
+    this.syncTenant(tenantId, 'finance:approval-updated');
+    return record;
+  }
+
+  deleteApprovalRecord(tenantId: string, recordId: string): { deleted: boolean } {
+    this.requireTenant(tenantId);
+    const idx = (this.state.approvalRecords || []).findIndex(
+      (a) => a.id === recordId && a.tenantId === tenantId
+    );
+    if (idx === -1) {
+      throw new ConflictError('Board / Procurement approval record not found.', 404);
+    }
+    this.state.approvalRecords.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:approval-deleted');
+    return { deleted: true };
   }
 
   // Communications
@@ -3021,6 +4339,54 @@ export class TenantStore {
       'communications'
     );
     return msg;
+  }
+
+  logWhatsAppDispatch(
+    tenantId: string,
+    input: {
+      category: WhatsAppDispatchCategory;
+      studentId: string;
+      studentName: string;
+      guardianName: string;
+      guardianPhone: string;
+      referenceLabel: string;
+      messagePreview: string;
+      sentBy: string;
+    }
+  ): WhatsAppDispatchRecord {
+    this.requireTenant(tenantId);
+    if (!input.studentName?.trim() || !input.guardianPhone?.trim()) {
+      throw new ConflictError('Student name and guardian phone number are required.', 400);
+    }
+    if (!Array.isArray(this.state.whatsappDispatches)) {
+      this.state.whatsappDispatches = [];
+    }
+    const record: WhatsAppDispatchRecord = {
+      id: `wa-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      category: input.category,
+      studentId: input.studentId || '',
+      studentName: input.studentName.trim(),
+      guardianName: (input.guardianName || 'Parent / Guardian').trim(),
+      guardianPhone: input.guardianPhone.trim(),
+      referenceLabel: (input.referenceLabel || input.category).trim(),
+      messagePreview: (input.messagePreview || '').trim().slice(0, 1200),
+      sentBy: (input.sentBy || 'Staff').trim(),
+      sentAt: new Date().toISOString(),
+    };
+    this.state.whatsappDispatches.unshift(record);
+    if (this.state.whatsappDispatches.length > 500) {
+      this.state.whatsappDispatches = this.state.whatsappDispatches.slice(0, 500);
+    }
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      input.category === 'Report Card' ? 'exam' : 'fee',
+      `WhatsApp ${input.category} Sent`,
+      `Sent to ${record.guardianName} (${record.guardianPhone}) for ${record.studentName} · ${record.referenceLabel}`,
+      input.category === 'Report Card' ? 'exams' : 'fees'
+    );
+    return record;
   }
 
   markNotificationsRead(tenantId: string, notificationId?: string) {

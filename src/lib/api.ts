@@ -5,19 +5,34 @@ import type {
   AdmissionApplication,
   AdmissionStage,
   Announcement,
+  ApprovalCommittee,
+  ApprovalDecision,
+  ApprovalSignOffRecord,
   AttendanceRecord,
   AttendanceStatus,
+  BudgetAllocation,
   CbcClusterId,
+  CurrencyCode,
   DayOfWeek,
   DirectMessage,
+  EtimsVerificationRecord,
   ExamCycle,
   ExamResult,
+  ExpenseAttachmentType,
+  ExpenseCategory,
+  ExpenseStatus,
   FeeInvoice,
   FeeStructure,
   LeaveOutChit,
   NonTeachingStaffProfile,
   OnboardingChecklist,
   PaymentMethod,
+  PayrollEntry,
+  PayrollStatus,
+  ReconciliationChannel,
+  ReconciliationLine,
+  ReconciliationStatus,
+  SchoolExpense,
   StaffAttendanceRecord,
   StaffCategory,
   Student,
@@ -30,6 +45,8 @@ import type {
   TenantWorkspaceData,
   TimetableSlot,
   UserRole,
+  WhatsAppDispatchCategory,
+  WhatsAppDispatchRecord,
   WsServerEvent,
 } from '../shared/types';
 
@@ -180,7 +197,7 @@ export const saasApi = {
     curriculum: string;
     academicYear: string;
     currentTerm: string;
-    currency: 'USD' | 'GBP' | 'EUR';
+    currency: CurrencyCode;
     plan: 'Enterprise' | 'Growth';
     status?: TenantStatus;
     location: string;
@@ -236,7 +253,7 @@ export const saasApi = {
       curriculum?: string;
       academicYear?: string;
       currentTerm?: string;
-      currency?: 'USD' | 'GBP' | 'EUR';
+      currency?: CurrencyCode;
       plan?: 'Enterprise' | 'Growth';
       status?: TenantStatus;
       branding?: Partial<TenantBranding>;
@@ -630,10 +647,7 @@ export const saasApi = {
     payload: {
       grade: string;
       term: string;
-      tuitionFee: number;
-      labFee: number;
-      technologyFee: number;
-      activitiesFee: number;
+      votelines: Array<{ id?: string; name: string; amount: number }>;
     }
   ) {
     return apiRequest<{ feeStructure: FeeStructure }>('/api/fees/structures', {
@@ -657,12 +671,317 @@ export const saasApi = {
   recordPayment(
     tenantId: string,
     invoiceId: string,
-    payload: { amount: number; method: PaymentMethod; reference: string; recordedBy: string }
+    payload: {
+      amount: number;
+      method: PaymentMethod;
+      reference: string;
+      recordedBy: string;
+      paidAt?: string;
+    }
   ) {
     return apiRequest<{ invoice: FeeInvoice }>(`/api/fees/invoices/${invoiceId}/payments`, {
       method: 'POST',
       tenantId,
       body: JSON.stringify(payload),
+    });
+  },
+
+  recordPaymentsBatch(
+    tenantId: string,
+    payload: {
+      recordedBy?: string;
+      entries: Array<{
+        invoiceId?: string;
+        invoiceNumber?: string;
+        studentId?: string;
+        studentCode?: string;
+        amount: number;
+        method?: PaymentMethod;
+        reference?: string;
+        paidAt?: string;
+      }>;
+    }
+  ) {
+    return apiRequest<{
+      updatedInvoices: FeeInvoice[];
+      processedCount: number;
+      skippedCount: number;
+      totalCollected: number;
+    }>('/api/fees/payments/batch', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  createExpense(
+    tenantId: string,
+    payload: {
+      title: string;
+      category: ExpenseCategory;
+      vendor: string;
+      amount: number;
+      paymentMethod: PaymentMethod;
+      reference?: string;
+      expenseDate?: string;
+      status?: ExpenseStatus;
+      recordedBy?: string;
+      notes?: string;
+      attachments?: Array<{
+        fileName: string;
+        mimeType?: string;
+        fileSize?: number;
+        docType?: ExpenseAttachmentType;
+        dataUrl: string;
+        uploadedBy?: string;
+      }>;
+    }
+  ) {
+    return apiRequest<{ expense: SchoolExpense }>('/api/finance/expenses', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  addExpenseAttachment(
+    tenantId: string,
+    expenseId: string,
+    payload: {
+      fileName: string;
+      mimeType?: string;
+      fileSize?: number;
+      docType?: ExpenseAttachmentType;
+      dataUrl: string;
+      uploadedBy?: string;
+    }
+  ) {
+    return apiRequest<{ expense: SchoolExpense }>(
+      `/api/finance/expenses/${expenseId}/attachments`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  deleteExpenseAttachment(tenantId: string, expenseId: string, attachmentId: string) {
+    return apiRequest<{ expense: SchoolExpense }>(
+      `/api/finance/expenses/${expenseId}/attachments/${attachmentId}`,
+      {
+        method: 'DELETE',
+        tenantId,
+      }
+    );
+  },
+
+  updateExpenseStatus(tenantId: string, expenseId: string, status: ExpenseStatus) {
+    return apiRequest<{ expense: SchoolExpense }>(`/api/finance/expenses/${expenseId}`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  deleteExpense(tenantId: string, expenseId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/finance/expenses/${expenseId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  verifyEtimsReceipt(
+    tenantId: string,
+    payload: {
+      expenseId?: string;
+      supplierName: string;
+      supplierKraPin: string;
+      cuInvoiceNumber: string;
+      receiptDate?: string;
+      taxableAmount?: number;
+      vatAmount?: number;
+      totalAmount: number;
+      exemptVat?: boolean;
+      checkedBy?: string;
+    }
+  ) {
+    return apiRequest<{ record: EtimsVerificationRecord }>('/api/finance/etims/verify', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteEtimsCheck(tenantId: string, checkId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/finance/etims/${checkId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  importReconciliationLines(
+    tenantId: string,
+    lines: Array<{
+      channel: ReconciliationChannel;
+      accountName?: string;
+      transactionDate?: string;
+      statementRef: string;
+      narration: string;
+      direction: 'Credit' | 'Debit';
+      amount: number;
+      notes?: string;
+    }>
+  ) {
+    return apiRequest<{
+      imported: ReconciliationLine[];
+      matchedCount: number;
+      unmatchedCount: number;
+    }>('/api/finance/reconciliation/import', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify({ lines }),
+    });
+  },
+
+  autoMatchReconciliation(tenantId: string) {
+    return apiRequest<{ matchedCount: number }>('/api/finance/reconciliation/auto-match', {
+      method: 'POST',
+      tenantId,
+    });
+  },
+
+  updateReconciliationLine(
+    tenantId: string,
+    lineId: string,
+    payload: {
+      status: ReconciliationStatus;
+      matchedType?: 'Fee Payment' | 'Expense Voucher';
+      matchedRecordId?: string;
+      matchedLabel?: string;
+      notes?: string;
+    }
+  ) {
+    return apiRequest<{ line: ReconciliationLine }>(`/api/finance/reconciliation/${lineId}`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteReconciliationLine(tenantId: string, lineId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/finance/reconciliation/${lineId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  generatePayrollRun(tenantId: string, payPeriod: string) {
+    return apiRequest<{ entries: PayrollEntry[] }>('/api/finance/payroll/generate', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify({ payPeriod }),
+    });
+  },
+
+  upsertPayrollEntry(
+    tenantId: string,
+    payload: {
+      id?: string;
+      payPeriod: string;
+      staffId?: string;
+      staffName: string;
+      staffCategory: 'Teaching' | 'Non-Teaching';
+      designation: string;
+      basicSalary: number;
+      allowances: number;
+      saccoOrLoan?: number;
+      autoComputeStatutory?: boolean;
+      paye?: number;
+      nssf?: number;
+      shif?: number;
+      housingLevy?: number;
+      status?: PayrollStatus;
+    }
+  ) {
+    return apiRequest<{ entry: PayrollEntry }>('/api/finance/payroll', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updatePayrollStatus(tenantId: string, entryId: string, status: PayrollStatus) {
+    return apiRequest<{ entry: PayrollEntry }>(`/api/finance/payroll/${entryId}/status`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  deletePayrollEntry(tenantId: string, entryId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/finance/payroll/${entryId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  upsertBudgetAllocation(
+    tenantId: string,
+    payload: {
+      category: ExpenseCategory;
+      allocatedAmount: number;
+      fiscalYear?: string;
+      term?: string;
+      notes?: string;
+    }
+  ) {
+    return apiRequest<{ budget: BudgetAllocation }>('/api/finance/budgets', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  createApprovalRecord(
+    tenantId: string,
+    payload: {
+      committee: ApprovalCommittee;
+      subject: string;
+      linkedExpenseId?: string;
+      amount: number;
+      meetingDate?: string;
+      minuteReference: string;
+      chairpersonName: string;
+      secretaryName: string;
+      bursarName?: string;
+      decision?: ApprovalDecision;
+      remarks?: string;
+    }
+  ) {
+    return apiRequest<{ record: ApprovalSignOffRecord }>('/api/finance/approvals', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateApprovalDecision(
+    tenantId: string,
+    recordId: string,
+    payload: { decision: ApprovalDecision; remarks?: string }
+  ) {
+    return apiRequest<{ record: ApprovalSignOffRecord }>(`/api/finance/approvals/${recordId}`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteApprovalRecord(tenantId: string, recordId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/finance/approvals/${recordId}`, {
+      method: 'DELETE',
+      tenantId,
     });
   },
 
@@ -689,6 +1008,26 @@ export const saasApi = {
     payload: { channel: string; senderName: string; senderRole: UserRole; body: string }
   ) {
     return apiRequest<{ message: DirectMessage }>('/api/communications/messages', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  logWhatsAppDispatch(
+    tenantId: string,
+    payload: {
+      category: WhatsAppDispatchCategory;
+      studentId: string;
+      studentName: string;
+      guardianName: string;
+      guardianPhone: string;
+      referenceLabel: string;
+      messagePreview: string;
+      sentBy: string;
+    }
+  ) {
+    return apiRequest<{ record: WhatsAppDispatchRecord }>('/api/communications/whatsapp-log', {
       method: 'POST',
       tenantId,
       body: JSON.stringify(payload),
