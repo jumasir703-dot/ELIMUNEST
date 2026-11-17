@@ -8,6 +8,7 @@ import {
   createUserAuthMiddleware,
   createUserSessionToken,
   isDeveloperRole,
+  isSessionSecretConfigured,
   issueAdminSession,
   requireAdminAuth,
   requireDeveloperAuth,
@@ -151,7 +152,13 @@ const requireAuth = createUserAuthMiddleware(
 
 // Public Health & Auth Directory / Onboarding Routes
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', tenants: store.listTenants().length });
+  res.json({
+    status: 'ok',
+    tenants: store.listTenants().length,
+    sessionSecretConfigured: isSessionSecretConfigured(),
+    // On Vercel the JSON database lives in per-instance /tmp, so writes are not shared or durable.
+    persistentStorage: !IS_VERCEL || Boolean(process.env.DATA_DIR),
+  });
 });
 
 app.get('/api/auth/schools', (_req, res) => {

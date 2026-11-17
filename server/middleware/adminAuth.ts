@@ -15,10 +15,28 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const IMPERSONATION_TTL_MS = 60 * 60 * 1000; // 1 hour scoped support token
 const EPHEMERAL_BOOT_SECRET = randomBytes(32).toString('hex');
 
-function getSessionSecret(): string {
+function getConfiguredSecret(): string | null {
   const configured =
     process.env.AUTH_SESSION_SECRET?.trim() || process.env.ADMIN_SESSION_SECRET?.trim();
-  return configured && configured.length >= 16 ? configured : EPHEMERAL_BOOT_SECRET;
+  return configured && configured.length >= 16 ? configured : null;
+}
+
+export function isSessionSecretConfigured(): boolean {
+  return getConfiguredSecret() !== null;
+}
+
+function getSessionSecret(): string {
+  return getConfiguredSecret() ?? EPHEMERAL_BOOT_SECRET;
+}
+
+// Without a fixed secret every serverless instance signs tokens with its own random key,
+// so a token issued by one instance is rejected (401) by the next one and the client
+// bounces back to the sign-in screen. Make that impossible to miss in the logs.
+if (process.env.VERCEL && !isSessionSecretConfigured()) {
+  console.error(
+    '[elimuNest] AUTH_SESSION_SECRET is not set (min 16 chars). Sessions will be rejected ' +
+      'across serverless instances and the app will keep logging users out.'
+  );
 }
 
 export function hashPassword(password: string): string {
