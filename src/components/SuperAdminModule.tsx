@@ -66,6 +66,16 @@ const AUDIT_ACTION_BADGES: Record<AdminAuditAction, string> = {
     'border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200',
   DEPROVISION_TENANT:
     'border-red-200 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300',
+  UPDATE_SUBSCRIPTION:
+    'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300',
+  KILL_SWITCH_SUSPEND:
+    'border-red-200 bg-red-50 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300',
+  KILL_SWITCH_RESTORE:
+    'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300',
+  IMPERSONATE_START:
+    'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300',
+  IMPERSONATE_END:
+    'border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200',
 };
 
 const STATUS_BADGE_STYLES: Record<TenantStatus, string> = {
@@ -496,18 +506,20 @@ export function SuperAdminModule({
             <Palette className="h-3.5 w-3.5" />
             Theme & Logo
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('provision')}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              activeTab === 'provision'
-                ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
-                : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
-            }`}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Add Tenant
-          </button>
+          {currentRole === 'Super Admin' && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('provision')}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'provision'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add Tenant
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setActiveTab('audit')}

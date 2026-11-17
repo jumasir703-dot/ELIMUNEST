@@ -418,7 +418,11 @@
         "sidebarColor": "#1F160D",
         "logoDataUrl": "",
         "tagline": "Excellence & Integrity in CBC Learning"
-      }
+      },
+      "emailDomain": "oakridge.ac.ke",
+      "learnerCap": 2500,
+      "subscriptionCycle": "Annual",
+      "renewalDate": "2027-08-31"
     },
     {
       "id": "tenant-westfield",
@@ -800,7 +804,11 @@
         "sidebarColor": "#062C22",
         "logoDataUrl": "",
         "tagline": "STEM Innovation & Coastal Leadership"
-      }
+      },
+      "emailDomain": "westfield.ac.ke",
+      "learnerCap": 600,
+      "subscriptionCycle": "Annual",
+      "renewalDate": "2027-08-31"
     },
     {
       "id": "tenant-stjude",
@@ -1172,7 +1180,11 @@
         "sidebarColor": "#2A0B14",
         "logoDataUrl": "",
         "tagline": "Global Perspectives, Rooted Values"
-      }
+      },
+      "emailDomain": "stjude.ac.ke",
+      "learnerCap": 2500,
+      "subscriptionCycle": "Annual",
+      "renewalDate": "2027-08-31"
     }
   ],
   "students": [
@@ -8989,5 +9001,187 @@
       "createdAt": "2026-11-15T09:00:00Z"
     }
   ],
-  "whatsappDispatches": []
+  "whatsappDispatches": [],
+  "users": [
+    {
+      "id": "usr-platform-dev",
+      "tenantId": "platform",
+      "fullName": "Lead Platform Engineer",
+      "email": "developer@elimunest.platform",
+      "role": "Developer",
+      "passwordHash": "scrypt:4a15ae4302b4e34c297b92845d0f5f6a:92193fc3308c4b07dc4f9dea062eb7f1d115549e9d4957f6cb0e1174a5c9e40a5dc99ef6e0f0206d5f3fb1cb5fb93674340f915ae5ccc74e8d5b62b29d24f8ac",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "timetable",
+        "attendance",
+        "exams",
+        "fees",
+        "communications",
+        "settings"
+      ]
+    },
+    {
+      "id": "usr-platform-super",
+      "tenantId": "platform",
+      "fullName": "Platform Super Admin",
+      "email": "super.admin@elimunest.platform",
+      "role": "Super Admin",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "timetable",
+        "attendance",
+        "exams",
+        "fees",
+        "communications",
+        "settings"
+      ]
+    },
+    {
+      "id": "usr-oak-admin",
+      "tenantId": "tenant-oakridge",
+      "fullName": "Dr. Helena Vance",
+      "email": "helena.vance@oakridge.ac.ke",
+      "role": "Admin",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "timetable",
+        "attendance",
+        "exams",
+        "fees",
+        "communications",
+        "settings"
+      ]
+    },
+    {
+      "id": "usr-oak-bursar",
+      "tenantId": "tenant-oakridge",
+      "fullName": "Mary Wanjiru",
+      "email": "mary.wanjiru@oakridge.ac.ke",
+      "role": "Bursar",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "fees",
+        "communications"
+      ]
+    },
+    {
+      "id": "usr-oak-teacher",
+      "tenantId": "tenant-oakridge",
+      "fullName": "Kamau Njoroge",
+      "email": "kamau.njoroge@oakridge.ac.ke",
+      "role": "Teacher",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "timetable",
+        "attendance",
+        "exams",
+        "communications"
+      ]
+    },
+    {
+      "id": "usr-oak-registrar",
+      "tenantId": "tenant-oakridge",
+      "fullName": "Grace Admissions",
+      "email": "grace.admissions@oakridge.ac.ke",
+      "role": "Registrar",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "attendance",
+        "communications"
+      ]
+    },
+    {
+      "id": "usr-west-admin",
+      "tenantId": "tenant-westfield",
+      "fullName": "David Chen",
+      "email": "david.chen@westfield.ac.ke",
+      "role": "Admin",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "timetable",
+        "attendance",
+        "exams",
+        "fees",
+        "communications",
+        "settings"
+      ]
+    },
+    {
+      "id": "usr-west-bursar",
+      "tenantId": "tenant-westfield",
+      "fullName": "Elena Morales",
+      "email": "elena.morales@westfield.ac.ke",
+      "role": "Bursar",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "fees",
+        "communications"
+      ]
+    },
+    {
+      "id": "usr-sj-admin",
+      "tenantId": "tenant-stjude",
+      "fullName": "Arthur Pendelton",
+      "email": "arthur.pendelton@stjude.ac.ke",
+      "role": "Admin",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "timetable",
+        "attendance",
+        "exams",
+        "fees",
+        "communications",
+        "settings"
+      ]
+    },
+    {
+      "id": "usr-sj-teacher",
+      "tenantId": "tenant-stjude",
+      "fullName": "Priya Nair",
+      "email": "priya.nair@stjude.ac.ke",
+      "role": "Teacher",
+      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "status": "Active",
+      "createdAt": "2026-09-01T08:00:00Z",
+      "allowedModules": [
+        "analytics",
+        "timetable",
+        "attendance",
+        "exams",
+        "communications"
+      ]
+    }
+  ]
 }

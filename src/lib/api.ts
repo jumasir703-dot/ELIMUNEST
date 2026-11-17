@@ -10,10 +10,13 @@ import type {
   ApprovalSignOffRecord,
   AttendanceRecord,
   AttendanceStatus,
+  AuthSessionInfo,
   BudgetAllocation,
   CbcClusterId,
   CurrencyCode,
   DayOfWeek,
+  DevImpersonationTarget,
+  DevPlatformTelemetry,
   DirectMessage,
   EtimsVerificationRecord,
   ExamCycle,
@@ -23,12 +26,14 @@ import type {
   ExpenseStatus,
   FeeInvoice,
   FeeStructure,
+  ImpersonatorMeta,
   LeaveOutChit,
   NonTeachingStaffProfile,
   OnboardingChecklist,
   PaymentMethod,
   PayrollEntry,
   PayrollStatus,
+  PublicSchoolDirectoryItem,
   ReconciliationChannel,
   ReconciliationLine,
   ReconciliationStatus,
@@ -36,12 +41,16 @@ import type {
   StaffAttendanceRecord,
   StaffCategory,
   Student,
+  SubscriptionCycle,
   SuperAdminTenantSummary,
   TeacherClassAssignment,
   TeacherProfile,
   Tenant,
   TenantBranding,
+  TenantModulePermission,
+  TenantPlan,
   TenantStatus,
+  TenantUser,
   TenantWorkspaceData,
   TimetableSlot,
   UserRole,
@@ -50,12 +59,98 @@ import type {
   WsServerEvent,
 } from '../shared/types';
 
+const AUTH_SESSION_STORAGE_KEY = 'elimunest_auth_session_v1';
+const DEV_RESTORE_SESSION_STORAGE_KEY = 'elimunest_dev_restore_session_v1';
 const ADMIN_SESSION_STORAGE_KEY = 'elimunest_admin_session_v1';
+
+let memoryAuthSession: AuthSessionInfo | null = null;
 let memoryAdminSession: AdminSessionInfo | null = null;
-let activeAdminRole: UserRole = 'Admin';
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  unauthorizedHandler = fn;
+}
+
+function readStoredAuthSession(): AuthSessionInfo | null {
+  if (memoryAuthSession) {
+    if (Date.parse(memoryAuthSession.expiresAt) > Date.now()) {
+      return memoryAuthSession;
+    }
+    memoryAuthSession = null;
+  }
+  try {
+    const raw = window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthSessionInfo;
+    if (
+      parsed &&
+      typeof parsed.token === 'string' &&
+      parsed.expiresAt &&
+      Date.parse(parsed.expiresAt) > Date.now() &&
+      parsed.user
+    ) {
+      memoryAuthSession = parsed;
+      return parsed;
+    }
+    window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function writeStoredAuthSession(session: AuthSessionInfo | null) {
+  memoryAuthSession = session;
+  try {
+    if (session) {
+      window.localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
+    } else {
+      window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function isPrivilegedRole(role: UserRole): boolean {
-  return role === 'Super Admin' || role === 'Admin';
+  return role === 'Developer' || role === 'Super Admin' || role === 'Admin';
+}
+
+export function isDeveloperRoleClient(role?: UserRole): boolean {
+  return role === 'Developer' || role === 'Super Admin';
+}
+
+function readDevRestoreSession(): AuthSessionInfo | null {
+  try {
+    const raw = window.localStorage.getItem(DEV_RESTORE_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthSessionInfo;
+    if (
+      parsed &&
+      typeof parsed.token === 'string' &&
+      parsed.expiresAt &&
+      Date.parse(parsed.expiresAt) > Date.now() &&
+      parsed.user
+    ) {
+      return parsed;
+    }
+    window.localStorage.removeItem(DEV_RESTORE_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function writeDevRestoreSession(session: AuthSessionInfo | null) {
+  try {
+    if (session) {
+      window.localStorage.setItem(DEV_RESTORE_SESSION_STORAGE_KEY, JSON.stringify(session));
+    } else {
+      window.localStorage.removeItem(DEV_RESTORE_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
 }
 
 function readStoredAdminSession(): AdminSessionInfo | null {
@@ -87,40 +182,23 @@ function writeStoredAdminSession(session: AdminSessionInfo | null) {
   }
 }
 
-async function ensureAdminSession(role: UserRole = activeAdminRole): Promise<string> {
-  if (!isPrivilegedRole(role)) {
-    writeStoredAdminSession(null);
-    throw new Error(`Role "${role}" is not authorized for Platform Admin API access.`);
-  }
-
-  const existing = readStoredAdminSession();
-  if (
-    existing &&
-    existing.actor.role === role &&
-    Date.parse(existing.expiresAt) > Date.now() + 30_000
-  ) {
-    return existing.token;
-  }
-
-  const session = await apiRequest<AdminSessionInfo>('/api/admin/session', {
-    method: 'POST',
-    body: JSON.stringify({ role }),
-  });
-  writeStoredAdminSession(session);
-  return session.token;
-}
-
 async function apiRequest<T>(
   url: string,
-  options: RequestInit & { tenantId?: string } = {}
+  options: RequestInit & { tenantId?: string; skipAuth?: boolean } = {}
 ): Promise<T> {
-  const { tenantId, headers, ...rest } = options;
+  const { tenantId, headers, skipAuth, ...rest } = options;
   const mergedHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(headers as Record<string, string> | undefined),
   };
   if (tenantId) {
     mergedHeaders['x-tenant-id'] = tenantId;
+  }
+  if (!skipAuth && !mergedHeaders.Authorization && !mergedHeaders.authorization) {
+    const activeAuth = readStoredAuthSession();
+    if (activeAuth?.token) {
+      mergedHeaders.Authorization = `Bearer ${activeAuth.token}`;
+    }
   }
   const response = await fetch(url, {
     ...rest,
@@ -135,6 +213,11 @@ async function apiRequest<T>(
     } catch {
       // keep default message
     }
+    if (response.status === 401 && !skipAuth) {
+      writeStoredAuthSession(null);
+      writeStoredAdminSession(null);
+      unauthorizedHandler?.();
+    }
     throw new Error(message);
   }
   return (await response.json()) as T;
@@ -144,43 +227,224 @@ async function adminApiRequest<T>(
   url: string,
   options: RequestInit & { tenantId?: string } = {}
 ): Promise<T> {
-  const token = await ensureAdminSession(activeAdminRole);
-  try {
-    return await apiRequest<T>(url, {
-      ...options,
-      headers: {
-        ...(options.headers as Record<string, string> | undefined),
-        Authorization: `Bearer ${token}`,
-      },
-    });
-  } catch (err) {
-    if (err instanceof Error && /unauthorized|expired/i.test(err.message)) {
-      writeStoredAdminSession(null);
-      const refreshedToken = await ensureAdminSession(activeAdminRole);
-      return apiRequest<T>(url, {
-        ...options,
-        headers: {
-          ...(options.headers as Record<string, string> | undefined),
-          Authorization: `Bearer ${refreshedToken}`,
-        },
-      });
-    }
-    throw err;
+  const activeAuth = readStoredAuthSession();
+  if (!activeAuth) {
+    throw new Error('Authentication required. Please sign in.');
   }
+  if (!isPrivilegedRole(activeAuth.user.role)) {
+    throw new Error(`Role "${activeAuth.user.role}" is not authorized for Platform Admin API access.`);
+  }
+  return apiRequest<T>(url, options);
+}
+
+async function devApiRequest<T>(
+  url: string,
+  options: RequestInit & { tenantId?: string } = {}
+): Promise<T> {
+  const activeAuth = readStoredAuthSession();
+  if (!activeAuth) {
+    throw new Error('Developer authentication required.');
+  }
+  if (activeAuth.impersonator) {
+    throw new Error('Exit active support impersonation before accessing Developer Control Plane APIs.');
+  }
+  if (!isDeveloperRoleClient(activeAuth.user.role)) {
+    throw new Error(
+      `Forbidden: Role "${activeAuth.user.role}" lacks Developer Control Plane permissions.`
+    );
+  }
+  return apiRequest<T>(url, options);
 }
 
 export const saasApi = {
+  getPersistedAuthSession(): AuthSessionInfo | null {
+    return readStoredAuthSession();
+  },
+
+  hasDevRestoreSession(): boolean {
+    return Boolean(readDevRestoreSession());
+  },
+
+  clearAuthSession() {
+    writeStoredAuthSession(null);
+    writeDevRestoreSession(null);
+    writeStoredAdminSession(null);
+  },
+
+  getAuthSchools() {
+    return apiRequest<{ schools: PublicSchoolDirectoryItem[] }>('/api/auth/schools', {
+      skipAuth: true,
+    });
+  },
+
+  async login(payload: { email: string; password: string }): Promise<AuthSessionInfo> {
+    const session = await apiRequest<AuthSessionInfo>('/api/auth/login', {
+      method: 'POST',
+      skipAuth: true,
+      body: JSON.stringify(payload),
+    });
+    writeStoredAuthSession(session);
+    writeStoredAdminSession(null);
+    return session;
+  },
+
+  async registerAccount(payload: {
+    tenantId?: string;
+    fullName: string;
+    email: string;
+    role: UserRole;
+    password: string;
+  }): Promise<AuthSessionInfo> {
+    const session = await apiRequest<AuthSessionInfo>('/api/auth/register', {
+      method: 'POST',
+      skipAuth: true,
+      body: JSON.stringify(payload),
+    });
+    writeStoredAuthSession(session);
+    writeStoredAdminSession(null);
+    return session;
+  },
+
+  async registerTenantAndAdmin(payload: {
+    schoolName: string;
+    emailDomain: string;
+    location: string;
+    curriculum: string;
+    academicYear?: string;
+    currentTerm?: string;
+    currency: CurrencyCode;
+    plan?: 'Enterprise' | 'Growth';
+    fullName: string;
+    email: string;
+    password: string;
+    branding?: Partial<TenantBranding>;
+  }): Promise<AuthSessionInfo> {
+    const session = await apiRequest<AuthSessionInfo>('/api/auth/register-tenant', {
+      method: 'POST',
+      skipAuth: true,
+      body: JSON.stringify(payload),
+    });
+    writeStoredAuthSession(session);
+    writeStoredAdminSession(null);
+    return session;
+  },
+
+  async verifyAuthSession(): Promise<AuthSessionInfo | null> {
+    const current = readStoredAuthSession();
+    if (!current) return null;
+    try {
+      const refreshed = await apiRequest<{
+        user: TenantUser;
+        tenantName?: string;
+        emailDomain?: string;
+        impersonator?: ImpersonatorMeta;
+      }>('/api/auth/session');
+      const updated: AuthSessionInfo = {
+        ...current,
+        user: refreshed.user,
+        tenantName: refreshed.tenantName,
+        emailDomain: refreshed.emailDomain,
+        impersonator: refreshed.impersonator,
+      };
+      writeStoredAuthSession(updated);
+      return updated;
+    } catch {
+      writeStoredAuthSession(null);
+      writeStoredAdminSession(null);
+      return null;
+    }
+  },
+
+  async logout() {
+    try {
+      await apiRequest<{ ok: boolean }>('/api/auth/logout', { method: 'POST', skipAuth: true });
+    } catch {
+      // ignore offline logout failures
+    }
+    writeStoredAuthSession(null);
+    writeDevRestoreSession(null);
+    writeStoredAdminSession(null);
+  },
+
+  async changePassword(payload: {
+    currentPassword: string;
+    newPassword: string;
+  }): Promise<AuthSessionInfo> {
+    const session = await apiRequest<AuthSessionInfo>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    writeStoredAuthSession(session);
+    writeStoredAdminSession(null);
+    return session;
+  },
+
+  listTenantUsers(tenantId?: string) {
+    return apiRequest<{ users: TenantUser[] }>('/api/auth/users', { tenantId });
+  },
+
+  createTenantStaffUser(
+    tenantId: string,
+    payload: {
+      fullName: string;
+      email: string;
+      role: UserRole;
+      allowedModules?: TenantModulePermission[];
+    }
+  ) {
+    return apiRequest<{ user: TenantUser; oneTimePassword: string }>('/api/auth/users', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateTenantUserAccess(
+    tenantId: string,
+    userId: string,
+    payload: {
+      role?: UserRole;
+      allowedModules?: TenantModulePermission[];
+      status?: 'Active' | 'Disabled';
+      resetOneTimePassword?: boolean;
+    }
+  ) {
+    return apiRequest<{ user: TenantUser; oneTimePassword?: string }>(
+      `/api/auth/users/${userId}/access`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
   async syncRoleSession(role: UserRole): Promise<AdminSessionInfo | null> {
-    activeAdminRole = role;
     if (!isPrivilegedRole(role)) {
       writeStoredAdminSession(null);
       return null;
     }
-    await ensureAdminSession(role);
-    return readStoredAdminSession();
+    const auth = readStoredAuthSession();
+    if (!auth || !isPrivilegedRole(auth.user.role)) {
+      return null;
+    }
+    const existing = readStoredAdminSession();
+    if (existing && Date.parse(existing.expiresAt) > Date.now() + 30_000) {
+      return existing;
+    }
+    try {
+      const session = await apiRequest<AdminSessionInfo>('/api/admin/session', {
+        method: 'POST',
+        body: JSON.stringify({ role: auth.user.role }),
+      });
+      writeStoredAdminSession(session);
+      return session;
+    } catch {
+      return null;
+    }
   },
 
-  getWorkspace(tenantId: string) {
+  getWorkspace(tenantId?: string) {
     return apiRequest<TenantWorkspaceData>('/api/workspace', { tenantId });
   },
 
@@ -194,11 +458,12 @@ export const saasApi = {
 
   createTenant(payload: {
     name: string;
+    emailDomain?: string;
     curriculum: string;
     academicYear: string;
     currentTerm: string;
     currency: CurrencyCode;
-    plan: 'Enterprise' | 'Growth';
+    plan: TenantPlan;
     status?: TenantStatus;
     location: string;
     branding?: Partial<TenantBranding>;
@@ -219,7 +484,15 @@ export const saasApi = {
     patch: Partial<
       Pick<
         Tenant,
-        'name' | 'curriculum' | 'academicYear' | 'currentTerm' | 'currency' | 'location' | 'plan' | 'status'
+        | 'name'
+        | 'emailDomain'
+        | 'curriculum'
+        | 'academicYear'
+        | 'currentTerm'
+        | 'currency'
+        | 'location'
+        | 'plan'
+        | 'status'
       >
     > & {
       branding?: Partial<TenantBranding>;
@@ -249,12 +522,13 @@ export const saasApi = {
     tenantId: string,
     payload: {
       name?: string;
+      emailDomain?: string;
       location?: string;
       curriculum?: string;
       academicYear?: string;
       currentTerm?: string;
       currency?: CurrencyCode;
-      plan?: 'Enterprise' | 'Growth';
+      plan?: TenantPlan;
       status?: TenantStatus;
       branding?: Partial<TenantBranding>;
     }
@@ -1041,6 +1315,126 @@ export const saasApi = {
       body: JSON.stringify({ notificationId }),
     });
   },
+
+  // Isolated Developer Control Plane Endpoints (/api/dev/*)
+  getDevTelemetry() {
+    return devApiRequest<{ telemetry: DevPlatformTelemetry }>('/api/dev/telemetry');
+  },
+
+  devOnboardTenant(payload: {
+    name: string;
+    emailDomain?: string;
+    location?: string;
+    curriculum?: string;
+    academicYear?: string;
+    currentTerm?: string;
+    currency?: CurrencyCode;
+    plan?: TenantPlan;
+    status?: TenantStatus;
+    learnerCap?: number;
+    subscriptionCycle?: SubscriptionCycle;
+    renewalDate?: string;
+    branding?: Partial<TenantBranding>;
+    adminFullName: string;
+    adminEmail?: string;
+    adminPassword?: string;
+  }) {
+    return devApiRequest<{
+      tenant: Tenant;
+      adminUser: { fullName: string; email: string; oneTimePassword: string };
+      auditEntry: AdminAuditEntry;
+    }>('/api/dev/tenants', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  devUpdateSubscription(
+    tenantId: string,
+    payload: {
+      plan?: TenantPlan;
+      learnerCap?: number;
+      subscriptionCycle?: SubscriptionCycle;
+      renewalDate?: string;
+    }
+  ) {
+    return devApiRequest<{ tenant: Tenant; auditEntry: AdminAuditEntry }>(
+      `/api/dev/tenants/${tenantId}/subscription`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  devToggleKillSwitch(
+    tenantId: string,
+    payload: { status: TenantStatus; reason?: string }
+  ) {
+    return devApiRequest<{ tenant: Tenant; auditEntry: AdminAuditEntry }>(
+      `/api/dev/tenants/${tenantId}/kill-switch`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  getDevImpersonationTargets() {
+    return devApiRequest<{ targets: DevImpersonationTarget[] }>('/api/dev/impersonation/targets');
+  },
+
+  async devStartImpersonation(payload: {
+    tenantId: string;
+    userId?: string;
+    readOnly?: boolean;
+  }): Promise<{ session: AuthSessionInfo; auditEntry: AdminAuditEntry }> {
+    const currentDevSession = readStoredAuthSession();
+    if (!currentDevSession || !isDeveloperRoleClient(currentDevSession.user.role)) {
+      throw new Error('Developer authentication required to impersonate a school tenant.');
+    }
+    const result = await devApiRequest<{ session: AuthSessionInfo; auditEntry: AdminAuditEntry }>(
+      '/api/dev/impersonate',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+    writeDevRestoreSession(currentDevSession);
+    writeStoredAuthSession(result.session);
+    writeStoredAdminSession(null);
+    return result;
+  },
+
+  async devExitImpersonation(): Promise<AuthSessionInfo | null> {
+    const active = readStoredAuthSession();
+    const restore = readDevRestoreSession();
+    writeDevRestoreSession(null);
+    if (!restore) {
+      return active;
+    }
+    writeStoredAuthSession(restore);
+    writeStoredAdminSession(null);
+    try {
+      await apiRequest<{ auditEntry: AdminAuditEntry }>('/api/dev/impersonate/end', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${restore.token}`,
+        },
+        body: JSON.stringify({
+          tenantId: active?.user.tenantId,
+          targetEmail: active?.user.email,
+        }),
+      });
+    } catch {
+      // ignore offline audit termination errors
+    }
+    return restore;
+  },
+
+  getDevAuditLogs(limit = 80) {
+    return devApiRequest<{ logs: AdminAuditEntry[] }>(`/api/dev/audit-logs?limit=${limit}`);
+  },
 };
 
 export function useTenantSocket(
@@ -1053,12 +1447,16 @@ export function useTenantSocket(
   onEventRef.current = onEvent;
 
   useEffect(() => {
+    if (!tenantId) {
+      setConnected(false);
+      return;
+    }
     let active = true;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let retryDelay = 1000;
 
     function connect() {
-      if (!active) return;
+      if (!active || !tenantId) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const socket = new WebSocket(`${proto}//${window.location.host}/ws`);
       wsRef.current = socket;
@@ -1100,10 +1498,10 @@ export function useTenantSocket(
       if (reconnectTimer) clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
-  }, []);
+  }, [Boolean(tenantId)]);
 
   useEffect(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (tenantId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'subscribe', tenantId }));
     }
   }, [tenantId]);

@@ -7,6 +7,7 @@ import type {
   TeacherClassAssignment,
   Tenant,
   TenantBranding,
+  TenantPlan,
   TenantStatus,
 } from '../../src/shared/types.ts';
 import { DEFAULT_TENANT_BRANDING } from '../../src/shared/types.ts';
@@ -16,7 +17,7 @@ import { ConflictError, TenantStore } from '../store.ts';
 
 const HEX_COLOR_RE = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$/;
 const ALLOWED_CURRENCIES = new Set<CurrencyCode>(['KES', 'USD']);
-const ALLOWED_PLANS = new Set(['Enterprise', 'Growth']);
+const ALLOWED_PLANS = new Set<TenantPlan>(['Starter', 'Enterprise', 'Growth']);
 const ALLOWED_STATUSES = new Set<TenantStatus>(['Active', 'Trial', 'Suspended']);
 const LOGO_DATA_URI_RE =
   /^data:image\/(png|jpeg|jpg|webp|svg\+xml);base64,([A-Za-z0-9+/=]+)$/i;
@@ -24,11 +25,12 @@ const MAX_LOGO_DATA_URL_CHARS = 3 * 1024 * 1024;
 
 export interface ProvisionTenantPayload {
   name: string;
+  emailDomain?: string;
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
   currency?: CurrencyCode;
-  plan?: 'Enterprise' | 'Growth';
+  plan?: TenantPlan;
   status?: TenantStatus;
   location?: string;
   branding?: Partial<TenantBranding>;
@@ -41,12 +43,13 @@ export interface ProvisionTenantPayload {
 
 export interface UpdateTenantMetadataPayload {
   name?: string;
+  emailDomain?: string;
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
   currency?: CurrencyCode;
   location?: string;
-  plan?: 'Enterprise' | 'Growth';
+  plan?: TenantPlan;
   status?: TenantStatus;
   branding?: Partial<TenantBranding>;
   addTeacher?: {
@@ -63,12 +66,13 @@ export interface UpdateTenantMetadataPayload {
 
 export interface UpdateTenantBrandingPayload {
   name?: string;
+  emailDomain?: string;
   location?: string;
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
   currency?: CurrencyCode;
-  plan?: 'Enterprise' | 'Growth';
+  plan?: TenantPlan;
   status?: TenantStatus;
   branding?: Partial<TenantBranding>;
 }
@@ -165,6 +169,25 @@ export class PlatformAdminService {
     return actor;
   }
 
+  private assertTenantScope(actor: AdminActor, tenantId: string) {
+    if (actor.role === 'Super Admin' || actor.role === 'Developer') return;
+    if (actor.tenantId && actor.tenantId !== tenantId) {
+      throw new ConflictError(
+        'Forbidden: School Administrators may only manage their own school tenant.',
+        403
+      );
+    }
+  }
+
+  private assertSuperAdmin(actor: AdminActor) {
+    if (actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError(
+        'Forbidden: Platform Super Admin privileges are required for multi-tenant provisioning or deletion.',
+        403
+      );
+    }
+  }
+
   private recordAudit(
     actor: AdminActor,
     action: AdminAuditAction,
@@ -185,23 +208,36 @@ export class PlatformAdminService {
   }
 
   listTenantSummaries(actor: AdminActor): SuperAdminTenantSummary[] {
-    this.assertAuthorized(actor);
-    return this.repository.getSuperAdminOverview();
+    const verified = this.assertAuthorized(actor);
+    const all = this.repository.getSuperAdminOverview();
+    if (verified.role === 'Super Admin' || verified.role === 'Developer' || !verified.tenantId) {
+      return all;
+    }
+    return all.filter((s) => s.tenant.id === verified.tenantId);
   }
 
   listTenants(actor: AdminActor): Tenant[] {
-    this.assertAuthorized(actor);
-    return this.repository.listTenants();
+    const verified = this.assertAuthorized(actor);
+    const all = this.repository.listTenants();
+    if (verified.role === 'Super Admin' || verified.role === 'Developer' || !verified.tenantId) {
+      return all;
+    }
+    return all.filter((t) => t.id === verified.tenantId);
   }
 
   getTenantMetadata(actor: AdminActor, tenantId: string): Tenant {
-    this.assertAuthorized(actor);
+    const verified = this.assertAuthorized(actor);
+    this.assertTenantScope(verified, tenantId);
     return this.repository.getTenantById(tenantId);
   }
 
   listAuditLogs(actor: AdminActor, limit = 50): AdminAuditEntry[] {
-    this.assertAuthorized(actor);
-    return this.repository.listAdminAuditLogs(limit);
+    const verified = this.assertAuthorized(actor);
+    const logs = this.repository.listAdminAuditLogs(limit);
+    if (verified.role === 'Super Admin' || verified.role === 'Developer' || !verified.tenantId) {
+      return logs;
+    }
+    return logs.filter((entry) => entry.tenantId === verified.tenantId);
   }
 
   provisionTenant(
@@ -209,6 +245,7 @@ export class PlatformAdminService {
     rawInput: ProvisionTenantPayload
   ): { tenant: Tenant; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
+    this.assertSuperAdmin(verifiedActor);
     const name = typeof rawInput?.name === 'string' ? rawInput.name.trim() : '';
     if (name.length < 2) {
       throw new ConflictError('School / tenant name must be at least 2 characters.', 400);
@@ -252,6 +289,7 @@ export class PlatformAdminService {
 
     const tenant = this.repository.createTenant({
       name,
+      emailDomain: rawInput.emailDomain,
       curriculum: (rawInput.curriculum || '').trim() || 'Kenyan CBC (Playgroup – Grade 12)',
       academicYear: (rawInput.academicYear || '').trim() || '2026–2027',
       currentTerm: (rawInput.currentTerm || '').trim() || 'Term 1',
@@ -273,6 +311,12 @@ export class PlatformAdminService {
       leadTeacherEmail: (rawInput.leadTeacherEmail || '').trim() || 'principal@school.ac.ke',
     });
 
+    this.repository.provisionTenantAdminAccount(
+      tenant,
+      tenant.teachers[0]?.name || 'Principal Admin',
+      tenant.teachers[0]?.email || ''
+    );
+
     const auditEntry = this.recordAudit(
       verifiedActor,
       'PROVISION_TENANT',
@@ -290,6 +334,7 @@ export class PlatformAdminService {
     rawPatch: UpdateTenantMetadataPayload
   ): { tenant: Tenant; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
+    this.assertTenantScope(verifiedActor, tenantId);
     const existing = this.repository.getTenantById(tenantId);
 
     if (rawPatch.name !== undefined && !rawPatch.name.trim()) {
@@ -327,6 +372,7 @@ export class PlatformAdminService {
 
     const safePatch: UpdateTenantMetadataPayload = {
       name: rawPatch.name?.trim(),
+      emailDomain: rawPatch.emailDomain?.trim(),
       curriculum: rawPatch.curriculum?.trim(),
       academicYear: rawPatch.academicYear?.trim(),
       currentTerm: rawPatch.currentTerm?.trim(),
@@ -382,6 +428,7 @@ export class PlatformAdminService {
     rawInput: UpdateTenantBrandingPayload
   ): { tenant: Tenant; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
+    this.assertTenantScope(verifiedActor, tenantId);
     this.repository.getTenantById(tenantId);
 
     if (rawInput.name !== undefined && !rawInput.name.trim()) {
@@ -419,6 +466,7 @@ export class PlatformAdminService {
 
     const updated = this.repository.updateTenantBranding(tenantId, {
       name: rawInput.name?.trim(),
+      emailDomain: rawInput.emailDomain?.trim(),
       location: rawInput.location?.trim(),
       curriculum: rawInput.curriculum?.trim(),
       academicYear: rawInput.academicYear?.trim(),
@@ -446,6 +494,7 @@ export class PlatformAdminService {
     tenantId: string
   ): { deleted: boolean; remainingTenants: Tenant[]; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
+    this.assertSuperAdmin(verifiedActor);
     const target = this.repository.getTenantById(tenantId);
     const result = this.repository.deleteTenant(tenantId);
 

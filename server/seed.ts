@@ -30,9 +30,11 @@ import {
   type StaffAttendanceRecord,
   type Student,
   type Tenant,
+  type TenantUser,
   type TimetableSlot,
   type WhatsAppDispatchRecord,
 } from '../src/shared/types.ts';
+import { hashPassword } from './middleware/adminAuth.ts';
 
 export function buildDefaultNonTeachingStaff(
   slug: string,
@@ -90,8 +92,122 @@ export function buildDefaultNonTeachingStaff(
   ];
 }
 
+export interface StoredTenantUser extends TenantUser {
+  passwordHash: string;
+}
+
+export const DEFAULT_SEED_USER_PASSWORD = 'Elimu@2026';
+
+export function buildSeedUsers(): StoredTenantUser[] {
+  const defaultHash = hashPassword(DEFAULT_SEED_USER_PASSWORD);
+  const now = '2026-09-01T08:00:00Z';
+  return [
+    {
+      id: 'usr-platform-dev',
+      tenantId: 'platform',
+      fullName: 'Lead Platform Engineer',
+      email: 'developer@elimunest.platform',
+      role: 'Developer',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-platform-super',
+      tenantId: 'platform',
+      fullName: 'Platform Super Admin',
+      email: 'super.admin@elimunest.platform',
+      role: 'Super Admin',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-oak-admin',
+      tenantId: 'tenant-oakridge',
+      fullName: 'Dr. Helena Vance',
+      email: 'helena.vance@oakridge.ac.ke',
+      role: 'Admin',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-oak-bursar',
+      tenantId: 'tenant-oakridge',
+      fullName: 'Mary Wanjiru',
+      email: 'mary.wanjiru@oakridge.ac.ke',
+      role: 'Bursar',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-oak-teacher',
+      tenantId: 'tenant-oakridge',
+      fullName: 'Kamau Njoroge',
+      email: 'kamau.njoroge@oakridge.ac.ke',
+      role: 'Teacher',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-oak-registrar',
+      tenantId: 'tenant-oakridge',
+      fullName: 'Grace Admissions',
+      email: 'grace.admissions@oakridge.ac.ke',
+      role: 'Registrar',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-west-admin',
+      tenantId: 'tenant-westfield',
+      fullName: 'David Chen',
+      email: 'david.chen@westfield.ac.ke',
+      role: 'Admin',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-west-bursar',
+      tenantId: 'tenant-westfield',
+      fullName: 'Elena Morales',
+      email: 'elena.morales@westfield.ac.ke',
+      role: 'Bursar',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-sj-admin',
+      tenantId: 'tenant-stjude',
+      fullName: 'Arthur Pendelton',
+      email: 'arthur.pendelton@stjude.ac.ke',
+      role: 'Admin',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+    {
+      id: 'usr-sj-teacher',
+      tenantId: 'tenant-stjude',
+      fullName: 'Priya Nair',
+      email: 'priya.nair@stjude.ac.ke',
+      role: 'Teacher',
+      passwordHash: defaultHash,
+      status: 'Active',
+      createdAt: now,
+    },
+  ];
+}
+
 export interface DatabaseState {
   tenants: Tenant[];
+  users: StoredTenantUser[];
   students: Student[];
   admissions: AdmissionApplication[];
   timetable: TimetableSlot[];
@@ -517,12 +633,16 @@ export function createSeedDatabase(): DatabaseState {
       id: 'tenant-oakridge',
       name: 'Oakridge Preparatory Academy',
       slug: 'oakridge-prep',
+      emailDomain: 'oakridge.ac.ke',
       curriculum: 'Kenyan CBC (Playgroup – Grade 12)',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
       currency: 'KES',
       plan: 'Enterprise',
       status: 'Active',
+      learnerCap: 2500,
+      subscriptionCycle: 'Annual',
+      renewalDate: '2027-08-12',
       location: 'Nairobi, KE',
       branding: {
         primaryColor: '#2563EB',
@@ -623,12 +743,16 @@ export function createSeedDatabase(): DatabaseState {
       id: 'tenant-westfield',
       name: 'Westfield STEM High',
       slug: 'westfield-stem',
+      emailDomain: 'westfield.ac.ke',
       curriculum: 'Kenyan CBC STEM Track',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
       currency: 'KES',
       plan: 'Growth',
       status: 'Active',
+      learnerCap: 600,
+      subscriptionCycle: 'Annual',
+      renewalDate: '2027-01-18',
       location: 'Mombasa, KE',
       branding: {
         primaryColor: '#059669',
@@ -664,12 +788,16 @@ export function createSeedDatabase(): DatabaseState {
       id: 'tenant-stjude',
       name: 'St. Jude International School',
       slug: 'st-jude-intl',
+      emailDomain: 'stjude.ac.ke',
       curriculum: 'Cambridge & CBC Hybrid',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
       currency: 'USD',
       plan: 'Enterprise',
       status: 'Active',
+      learnerCap: 2500,
+      subscriptionCycle: 'Monthly',
+      renewalDate: '2026-12-15',
       location: 'Kisumu, KE',
       branding: {
         primaryColor: '#9F1239',
@@ -2013,6 +2141,7 @@ export function createSeedDatabase(): DatabaseState {
 
   return {
     tenants,
+    users: buildSeedUsers(),
     students,
     admissions,
     timetable,

@@ -5,11 +5,17 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { WebSocketServer, WebSocket } from 'ws';
 import { ConflictError, TenantStore } from './server/store.ts';
 import {
+  createUserAuthMiddleware,
+  createUserSessionToken,
+  isDeveloperRole,
   issueAdminSession,
   requireAdminAuth,
+  requireDeveloperAuth,
   type AdminAuthenticatedRequest,
+  type AuthenticatedRequest,
 } from './server/middleware/adminAuth.ts';
 import { PlatformAdminService } from './server/services/adminService.ts';
+import { PlatformDeveloperService } from './server/services/developerService.ts';
 import type { WsServerEvent } from './src/shared/types.ts';
 
 function resolveServerPort(): number {
@@ -45,6 +51,7 @@ const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
 const store = new TenantStore();
 const adminService = new PlatformAdminService(store);
+const developerService = new PlatformDeveloperService(store);
 
 function broadcastToTenant(tenantId: string, eventType: WsServerEvent['type'], payload: unknown) {
   const envelope: WsServerEvent = { type: eventType, tenantId, payload };
@@ -98,19 +105,325 @@ if (!IS_VERCEL) {
   wss.on('close', () => clearInterval(heartbeatInterval));
 }
 
-function getTenantId(req: Request): string {
-  const headerTenant = req.header('x-tenant-id');
-  const queryTenant = typeof req.query.tenantId === 'string' ? req.query.tenantId : undefined;
-  return headerTenant || queryTenant || 'tenant-oakridge';
+function getTenantId(req: AuthenticatedRequest): string {
+  const headerTenant = req.header('x-tenant-id')?.trim();
+  const queryTenant = typeof req.query.tenantId === 'string' ? req.query.tenantId.trim() : undefined;
+  const requested = headerTenant || queryTenant;
+
+  const authUser = req.authUser;
+  if (!authUser) {
+    throw new ConflictError('Authentication required.', 401);
+  }
+
+  if (isDeveloperRole(authUser.role) && !req.impersonation) {
+    if (requested) return requested;
+    const first = store.listTenants()[0];
+    return first ? first.id : 'tenant-oakridge';
+  }
+
+  if (requested && requested !== authUser.tenantId) {
+    throw new ConflictError(
+      'Forbidden: Your school account cannot access another school tenant workspace.',
+      403
+    );
+  }
+  return authUser.tenantId;
 }
 
-// REST API Routes
+function assertTenantParamAccess(req: AuthenticatedRequest, targetTenantId: string): string {
+  const authUser = req.authUser;
+  if (!authUser) {
+    throw new ConflictError('Authentication required.', 401);
+  }
+  if (!(isDeveloperRole(authUser.role) && !req.impersonation) && authUser.tenantId !== targetTenantId) {
+    throw new ConflictError(
+      'Forbidden: Cross-tenant modification is not permitted for your account.',
+      403
+    );
+  }
+  return targetTenantId;
+}
+
+const requireAuth = createUserAuthMiddleware(
+  (userId) => store.getUserById(userId),
+  (tenantId) => store.getTenantStatus(tenantId)
+);
+
+// Public Health & Auth Directory / Onboarding Routes
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', tenants: store.listTenants().length });
 });
 
+app.get('/api/auth/schools', (_req, res) => {
+  res.json({ schools: store.getPublicSchoolDirectory() });
+});
+
+app.post('/api/auth/login', (req, res, next) => {
+  try {
+    const { user, tenant, emailDomain } = store.authenticateUser(req.body || {});
+    const session = createUserSessionToken(user, {
+      tenantName: tenant ? tenant.name : 'elimuNest Platform Control',
+      emailDomain,
+    });
+    res.json(session);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/auth/register', (req, res, next) => {
+  try {
+    const { user, tenant } = store.registerUserAccount(req.body || {});
+    const session = createUserSessionToken(user, {
+      tenantName: tenant.name,
+      emailDomain: tenant.emailDomain,
+    });
+    res.status(201).json(session);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/auth/register-tenant', (req, res, next) => {
+  try {
+    const { user, tenant } = store.registerTenantWithAdmin(req.body || {});
+    const session = createUserSessionToken(user, {
+      tenantName: tenant.name,
+      emailDomain: tenant.emailDomain,
+    });
+    res.status(201).json(session);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/auth/logout', (_req, res) => {
+  res.json({ ok: true });
+});
+
+// Require authenticated user session for all protected API endpoints below
+app.use('/api', requireAuth);
+
+app.get('/api/auth/session', (req: AuthenticatedRequest, res) => {
+  const user = req.authUser!;
+  const tenant =
+    user.tenantId !== 'platform'
+      ? store.listTenants().find((t) => t.id === user.tenantId)
+      : undefined;
+  res.json({
+    user,
+    tenantName: tenant ? tenant.name : 'elimuNest Platform Control',
+    emailDomain: tenant?.emailDomain,
+    ...(req.impersonation ? { impersonator: req.impersonation } : {}),
+  });
+});
+
+app.post('/api/auth/change-password', (req: AuthenticatedRequest, res, next) => {
+  try {
+    if (req.impersonation) {
+      throw new ConflictError(
+        'Cannot rotate user credentials while impersonating another account.',
+        403
+      );
+    }
+    const { currentPassword, newPassword } = (req.body || {}) as {
+      currentPassword?: string;
+      newPassword?: string;
+    };
+    const { user, tenant, emailDomain } = store.changeUserPassword(
+      req.authUser!.id,
+      currentPassword || '',
+      newPassword || ''
+    );
+    const session = createUserSessionToken(user, {
+      tenantName: tenant ? tenant.name : 'elimuNest Platform Control',
+      emailDomain,
+    });
+    res.json(session);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const authUser = req.authUser!;
+    if (!isDeveloperRole(authUser.role) && authUser.role !== 'Admin') {
+      throw new ConflictError('Forbidden: Only School Admins can view the staff user directory.', 403);
+    }
+    const targetTenantId = getTenantId(req);
+    const users = store.listUsersForTenant(targetTenantId);
+    res.json({ users });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const authUser = req.authUser!;
+    if (!isDeveloperRole(authUser.role) && authUser.role !== 'Admin') {
+      throw new ConflictError('Forbidden: Only School Admins can provision staff accounts.', 403);
+    }
+    const targetTenantId = getTenantId(req);
+    const result = store.createTenantStaffUser(authUser, targetTenantId, req.body || {});
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/auth/users/:userId/access', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const authUser = req.authUser!;
+    if (!isDeveloperRole(authUser.role) && authUser.role !== 'Admin') {
+      throw new ConflictError('Forbidden: Only School Admins can assign staff access rights.', 403);
+    }
+    const targetTenantId = getTenantId(req);
+    const result = store.updateTenantUserAccess(
+      authUser,
+      targetTenantId,
+      String(req.params.userId),
+      req.body || {}
+    );
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Isolated Developer Control Plane Routes (/api/dev/*) with Role & Permission Middleware Protection
+app.get(
+  '/api/dev/telemetry',
+  requireDeveloperAuth('dev:telemetry'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const telemetry = developerService.getGlobalTelemetry(req.authUser!, wss.clients.size);
+      res.json({ telemetry });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/dev/tenants',
+  requireDeveloperAuth('dev:tenants'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const telemetry = developerService.getGlobalTelemetry(req.authUser!, wss.clients.size);
+      res.json({ tenants: telemetry.tenantRows });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/tenants',
+  requireDeveloperAuth('dev:tenants'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.onboardTenant(req.authUser!, req.body || {});
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/dev/tenants/:id/subscription',
+  requireDeveloperAuth('dev:subscriptions'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.updateSubscriptionLifecycle(
+        req.authUser!,
+        String(req.params.id),
+        req.body || {}
+      );
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/dev/tenants/:id/kill-switch',
+  requireDeveloperAuth('dev:subscriptions'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.toggleKillSwitch(
+        req.authUser!,
+        String(req.params.id),
+        req.body || {}
+      );
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/dev/impersonation/targets',
+  requireDeveloperAuth('dev:impersonate'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const targets = developerService.listImpersonationTargets(req.authUser!);
+      res.json({ targets });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/impersonate',
+  requireDeveloperAuth('dev:impersonate'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.startImpersonation(req.authUser!, req.body || {});
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/impersonate/end',
+  requireDeveloperAuth('dev:impersonate'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.stopImpersonation(req.authUser!, req.body || {});
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/dev/audit-logs',
+  requireDeveloperAuth('dev:telemetry'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 80;
+      const logs = developerService.listAuditLogs(
+        req.authUser!,
+        Number.isFinite(limit) ? limit : 80
+      );
+      res.json({ logs });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Admin Auth & Service Layer Endpoints
-const adminGuard = requireAdminAuth(['Super Admin', 'Admin']);
+const adminGuard = requireAdminAuth(['Developer', 'Super Admin', 'Admin']);
 
 app.post('/api/admin/session', issueAdminSession);
 
@@ -236,8 +549,9 @@ app.delete('/api/tenants/:id', adminGuard, (req: AdminAuthenticatedRequest, res,
   }
 });
 
-app.put('/api/tenants/:id/streams', (req, res, next) => {
+app.put('/api/tenants/:id/streams', (req: AuthenticatedRequest, res, next) => {
   try {
+    assertTenantParamAccess(req, req.params.id);
     const tenant = store.updateStreams(req.params.id, req.body);
     res.json({ tenant });
   } catch (err) {
@@ -245,8 +559,9 @@ app.put('/api/tenants/:id/streams', (req, res, next) => {
   }
 });
 
-app.put('/api/tenants/:id/subjects', (req, res, next) => {
+app.put('/api/tenants/:id/subjects', (req: AuthenticatedRequest, res, next) => {
   try {
+    assertTenantParamAccess(req, req.params.id);
     const tenant = store.updateSubjects(req.params.id, req.body);
     res.json({ tenant });
   } catch (err) {
@@ -254,8 +569,9 @@ app.put('/api/tenants/:id/subjects', (req, res, next) => {
   }
 });
 
-app.post('/api/tenants/:id/teachers', (req, res, next) => {
+app.post('/api/tenants/:id/teachers', (req: AuthenticatedRequest, res, next) => {
   try {
+    assertTenantParamAccess(req, req.params.id);
     const result = store.addTeacher(req.params.id, req.body);
     res.status(201).json(result);
   } catch (err) {
@@ -263,8 +579,9 @@ app.post('/api/tenants/:id/teachers', (req, res, next) => {
   }
 });
 
-app.put('/api/tenants/:id/teachers/:teacherId', (req, res, next) => {
+app.put('/api/tenants/:id/teachers/:teacherId', (req: AuthenticatedRequest, res, next) => {
   try {
+    assertTenantParamAccess(req, req.params.id);
     const result = store.updateTeacher(req.params.id, req.params.teacherId, req.body);
     res.json(result);
   } catch (err) {
@@ -272,8 +589,9 @@ app.put('/api/tenants/:id/teachers/:teacherId', (req, res, next) => {
   }
 });
 
-app.delete('/api/tenants/:id/teachers/:teacherId', (req, res, next) => {
+app.delete('/api/tenants/:id/teachers/:teacherId', (req: AuthenticatedRequest, res, next) => {
   try {
+    assertTenantParamAccess(req, req.params.id);
     const result = store.deleteTeacher(req.params.id, req.params.teacherId);
     res.json(result);
   } catch (err) {
@@ -281,8 +599,9 @@ app.delete('/api/tenants/:id/teachers/:teacherId', (req, res, next) => {
   }
 });
 
-app.post('/api/tenants/:id/non-teaching-staff', (req, res, next) => {
+app.post('/api/tenants/:id/non-teaching-staff', (req: AuthenticatedRequest, res, next) => {
   try {
+    assertTenantParamAccess(req, req.params.id);
     const result = store.addNonTeachingStaff(req.params.id, req.body);
     res.status(201).json(result);
   } catch (err) {
@@ -290,10 +609,13 @@ app.post('/api/tenants/:id/non-teaching-staff', (req, res, next) => {
   }
 });
 
-app.get('/api/workspace', (req, res, next) => {
+app.get('/api/workspace', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const workspace = store.getWorkspace(tenantId);
+    if (!(isDeveloperRole(req.authUser?.role) && !req.impersonation)) {
+      workspace.tenants = [workspace.tenant];
+    }
     res.json(workspace);
   } catch (err) {
     next(err);

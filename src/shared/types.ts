@@ -332,6 +332,7 @@ export const KENYAN_BELL_SCHEDULE: KenyanBellRow[] = [
 ];
 
 export type UserRole =
+  | 'Developer'
   | 'Super Admin'
   | 'Admin'
   | 'Registrar'
@@ -339,7 +340,106 @@ export type UserRole =
   | 'Bursar'
   | 'Parent';
 
+export type TenantModulePermission =
+  | 'analytics'
+  | 'admissions'
+  | 'timetable'
+  | 'attendance'
+  | 'exams'
+  | 'fees'
+  | 'communications'
+  | 'settings';
+
+export const ALL_TENANT_MODULES: Array<{
+  id: TenantModulePermission;
+  label: string;
+}> = [
+  { id: 'analytics', label: 'Analytics' },
+  { id: 'admissions', label: 'Admissions' },
+  { id: 'timetable', label: 'Timetable' },
+  { id: 'attendance', label: 'Attendance' },
+  { id: 'exams', label: 'Exams & Grades' },
+  { id: 'fees', label: 'Finance & Accounting' },
+  { id: 'communications', label: 'Communications' },
+  { id: 'settings', label: 'School Settings' },
+];
+
+const ALL_MODULE_IDS: TenantModulePermission[] = ALL_TENANT_MODULES.map((m) => m.id);
+
+export const DEFAULT_ROLE_MODULES: Record<UserRole, TenantModulePermission[]> = {
+  Developer: [...ALL_MODULE_IDS],
+  'Super Admin': [...ALL_MODULE_IDS],
+  Admin: [...ALL_MODULE_IDS],
+  Registrar: ['analytics', 'admissions', 'attendance', 'communications'],
+  Teacher: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
+  Bursar: ['analytics', 'fees', 'communications'],
+  Parent: ['analytics', 'exams', 'fees', 'communications'],
+};
+
+export function getEffectiveUserModules(
+  user?: Pick<TenantUser, 'role' | 'allowedModules'> | null
+): TenantModulePermission[] {
+  if (!user) return [];
+  if (user.role === 'Developer' || user.role === 'Super Admin') {
+    return [...ALL_MODULE_IDS];
+  }
+  if (Array.isArray(user.allowedModules)) {
+    if (user.role === 'Admin') {
+      const set = new Set<TenantModulePermission>(user.allowedModules);
+      set.add('settings');
+      return Array.from(set);
+    }
+    return user.allowedModules;
+  }
+  return [...(DEFAULT_ROLE_MODULES[user.role] || ['analytics'])];
+}
+
 export type TenantStatus = 'Active' | 'Trial' | 'Suspended';
+export type TenantPlan = 'Starter' | 'Growth' | 'Enterprise';
+export type SubscriptionCycle = 'Monthly' | 'Annual';
+
+export const DEFAULT_TIER_LEARNER_CAPS: Record<TenantPlan, number> = {
+  Starter: 150,
+  Growth: 600,
+  Enterprise: 2500,
+};
+
+export const TIER_SUBSCRIPTION_CATALOG: Record<
+  TenantPlan,
+  {
+    audience: string;
+    defaultCap: number;
+    monthlyKes: number;
+    annualKes: number;
+    monthlyUsd: number;
+    annualUsd: number;
+  }
+> = {
+  Starter: {
+    audience: 'Early-stage academies & single-stream campuses',
+    defaultCap: 150,
+    monthlyKes: 12000,
+    annualKes: 120000,
+    monthlyUsd: 95,
+    annualUsd: 950,
+  },
+  Growth: {
+    audience: 'Scaling CBC & secondary schools',
+    defaultCap: 600,
+    monthlyKes: 32000,
+    annualKes: 320000,
+    monthlyUsd: 250,
+    annualUsd: 2500,
+  },
+  Enterprise: {
+    audience: 'Multi-stream & international school networks',
+    defaultCap: 2500,
+    monthlyKes: 75000,
+    annualKes: 750000,
+    monthlyUsd: 590,
+    annualUsd: 5900,
+  },
+};
 
 export interface TenantBranding {
   primaryColor: string;
@@ -436,16 +536,74 @@ export type NotificationCategory =
 
 export type CurrencyCode = 'KES' | 'USD';
 
+export const PUBLIC_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'yahoo.com',
+  'yahoo.co.uk',
+  'hotmail.com',
+  'outlook.com',
+  'live.com',
+  'msn.com',
+  'icloud.com',
+  'me.com',
+  'aol.com',
+  'proton.me',
+  'protonmail.com',
+]);
+
+export function sanitizeSchoolEmailDomain(raw: string): string {
+  const cleaned = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, '')
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/[^a-z0-9.-]+/g, '');
+  return cleaned.replace(/^[.-]+|[.-]+$/g, '');
+}
+
+export function deriveSchoolEmailDomain(nameOrSlug: string): string {
+  const base = nameOrSlug
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .slice(0, 24);
+  const safeBase = base || 'school';
+  return `${safeBase}.ac.ke`;
+}
+
+export function suggestNameEmailLocalPart(fullName: string): string {
+  const tokens = fullName
+    .trim()
+    .toLowerCase()
+    .replace(/\b(dr|prof|mr|mrs|ms|miss|sir|madam)\.?\s+/gi, '')
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) return '';
+  if (tokens.length === 1) return tokens[0].slice(0, 32);
+  return `${tokens[0]}.${tokens[tokens.length - 1]}`.slice(0, 48);
+}
+
 export interface Tenant {
   id: string;
   name: string;
   slug: string;
+  emailDomain?: string;
   curriculum: string;
   academicYear: string;
   currentTerm: string;
   currency: CurrencyCode;
-  plan: 'Enterprise' | 'Growth';
+  plan: TenantPlan;
   status?: TenantStatus;
+  learnerCap?: number;
+  subscriptionCycle?: SubscriptionCycle;
+  renewalDate?: string;
+  suspensionReason?: string;
+  suspendedAt?: string;
+  suspendedBy?: string;
   location: string;
   branding?: TenantBranding;
   grades: string[];
@@ -459,6 +617,48 @@ export interface Tenant {
   teachers: TeacherProfile[];
   nonTeachingStaff?: NonTeachingStaffProfile[];
   createdAt: string;
+}
+
+export interface TenantUser {
+  id: string;
+  tenantId: string;
+  fullName: string;
+  email: string;
+  role: UserRole;
+  status: 'Active' | 'Disabled';
+  mustChangePassword?: boolean;
+  allowedModules?: TenantModulePermission[];
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface ImpersonatorMeta {
+  id: string;
+  fullName: string;
+  email: string;
+  role: UserRole;
+  readOnly: boolean;
+  startedAt: string;
+}
+
+export interface AuthSessionInfo {
+  token: string;
+  expiresAt: string;
+  user: TenantUser;
+  tenantName?: string;
+  emailDomain?: string;
+  impersonator?: ImpersonatorMeta;
+}
+
+export interface PublicSchoolDirectoryItem {
+  id: string;
+  name: string;
+  slug: string;
+  emailDomain: string;
+  location: string;
+  curriculum: string;
+  status: TenantStatus;
+  branding?: TenantBranding;
 }
 
 export interface SuperAdminTenantSummary {
@@ -478,7 +678,12 @@ export type AdminAuditAction =
   | 'CHANGE_STATUS'
   | 'UPDATE_BRANDING'
   | 'UPDATE_RESOURCES'
-  | 'DEPROVISION_TENANT';
+  | 'DEPROVISION_TENANT'
+  | 'UPDATE_SUBSCRIPTION'
+  | 'KILL_SWITCH_SUSPEND'
+  | 'KILL_SWITCH_RESTORE'
+  | 'IMPERSONATE_START'
+  | 'IMPERSONATE_END';
 
 export interface AdminAuditEntry {
   id: string;
@@ -500,6 +705,75 @@ export interface AdminSessionInfo {
     email: string;
     name: string;
   };
+}
+
+export interface DevCollectionStorageStat {
+  collection: string;
+  records: number;
+  bytes: number;
+}
+
+export interface DevTenantTelemetryRow {
+  tenant: Tenant;
+  totalLearners: number;
+  activeLearners: number;
+  learnerCap: number;
+  utilizationPct: number;
+  staffUsersCount: number;
+  teachersCount: number;
+  nonTeachingCount: number;
+  admissionsPending: number;
+  invoiceCount: number;
+  totalBilled: number;
+  totalCollected: number;
+  estimatedDataBytes: number;
+}
+
+export interface DevPlatformTelemetry {
+  generatedAt: string;
+  tenants: {
+    total: number;
+    active: number;
+    trial: number;
+    suspended: number;
+    byPlan: Record<TenantPlan, number>;
+  };
+  learners: {
+    totalEnrolled: number;
+    activeLearners: number;
+    totalCapacity: number;
+    globalUtilizationPct: number;
+    pendingAdmissions: number;
+    totalStaffAccounts: number;
+    totalTeachers: number;
+  };
+  database: {
+    engine: string;
+    filePathName: string;
+    diskBytes: number;
+    serializedBytes: number;
+    totalRecords: number;
+    collections: DevCollectionStorageStat[];
+  };
+  runtime: {
+    nodeVersion: string;
+    uptimeSeconds: number;
+    rssBytes: number;
+    heapUsedBytes: number;
+    heapTotalBytes: number;
+    wsConnectedClients: number;
+  };
+  tenantRows: DevTenantTelemetryRow[];
+}
+
+export interface DevImpersonationTarget {
+  tenantId: string;
+  tenantName: string;
+  emailDomain: string;
+  status: TenantStatus;
+  plan: TenantPlan;
+  location: string;
+  users: TenantUser[];
 }
 
 export function getSubjectsForLevel(

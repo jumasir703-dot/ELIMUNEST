@@ -3,16 +3,22 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   addDaysIso,
+  ALL_TENANT_MODULES,
   buildDefaultLevelSubjectsMap,
   buildDefaultLevelWeeklyLessonsMap,
   CLASS_TEACHER_SUBJECT_TOKEN,
   computeAssessmentGrade,
+  DEFAULT_ROLE_MODULES,
   DEFAULT_SUBJECT_WEEKLY_LESSONS,
   DEFAULT_TENANT_BRANDING,
+  DEFAULT_TIER_LEARNER_CAPS,
   APPROVAL_COMMITTEES,
   EXPENSE_ATTACHMENT_TYPES,
   EXPENSE_CATEGORIES,
+  deriveSchoolEmailDomain,
   getClusterForGrade,
+  PUBLIC_EMAIL_DOMAINS,
+  sanitizeSchoolEmailDomain,
   getLessonsPerWeekForSubject,
   getStreamsForGrade,
   getSubjectsForLevel,
@@ -37,6 +43,9 @@ import {
   type CbcClusterId,
   type CurrencyCode,
   type DayOfWeek,
+  type DevCollectionStorageStat,
+  type DevPlatformTelemetry,
+  type DevTenantTelemetryRow,
   type DirectMessage,
   type EtimsVerificationRecord,
   type EtimsVerificationStatus,
@@ -57,6 +66,7 @@ import {
   type PaymentMethod,
   type PayrollEntry,
   type PayrollStatus,
+  type PublicSchoolDirectoryItem,
   type ReconciliationChannel,
   type ReconciliationLine,
   type ReconciliationStatus,
@@ -64,12 +74,16 @@ import {
   type StaffAttendanceRecord,
   type StaffCategory,
   type Student,
+  type SubscriptionCycle,
   type SuperAdminTenantSummary,
   type TeacherClassAssignment,
   type TeacherProfile,
   type Tenant,
   type TenantBranding,
+  type TenantModulePermission,
+  type TenantPlan,
   type TenantStatus,
+  type TenantUser,
   type TenantWorkspaceData,
   type TimetableSlot,
   type UserRole,
@@ -84,12 +98,20 @@ import {
   buildDefaultNonTeachingStaff,
   buildDefaultPayrollForTenant,
   buildDefaultReconciliationForTenant,
+  buildSeedUsers,
   computeLetterGrade,
   computeStatutoryDeductions,
   createSeedDatabase,
+  DEFAULT_SEED_USER_PASSWORD,
   PERIOD_TIMES,
   type DatabaseState,
+  type StoredTenantUser,
 } from './seed.ts';
+import {
+  generateOneTimePassword,
+  hashPassword,
+  verifyPassword,
+} from './middleware/adminAuth.ts';
 
 // Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
 // On Vercel the filesystem is read-only except /tmp, which is per-instance and
@@ -292,6 +314,27 @@ export class TenantStore {
 
             if (!t.status) {
               t.status = 'Active';
+              dirty = true;
+            }
+            if (typeof t.learnerCap !== 'number' || !Number.isFinite(t.learnerCap) || t.learnerCap <= 0) {
+              t.learnerCap = DEFAULT_TIER_LEARNER_CAPS[t.plan] || 600;
+              dirty = true;
+            }
+            if (!t.subscriptionCycle) {
+              t.subscriptionCycle = 'Annual';
+              dirty = true;
+            }
+            if (!t.renewalDate) {
+              t.renewalDate = '2027-08-31';
+              dirty = true;
+            }
+            if (!t.emailDomain) {
+              const seededDomains: Record<string, string> = {
+                'tenant-oakridge': 'oakridge.ac.ke',
+                'tenant-westfield': 'westfield.ac.ke',
+                'tenant-stjude': 'stjude.ac.ke',
+              };
+              t.emailDomain = seededDomains[t.id] || deriveSchoolEmailDomain(t.slug || t.name);
               dirty = true;
             }
             if (t.currency !== 'KES' && t.currency !== 'USD') {
@@ -534,6 +577,28 @@ export class TenantStore {
             parsed.whatsappDispatches = [];
             dirty = true;
           }
+          if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
+            parsed.users = buildSeedUsers();
+            dirty = true;
+          } else {
+            const seedUsers = buildSeedUsers();
+            const devUser = seedUsers.find((u) => u.role === 'Developer');
+            if (
+              devUser &&
+              !parsed.users.some(
+                (u) => u.role === 'Developer' || u.email.toLowerCase() === devUser.email.toLowerCase()
+              )
+            ) {
+              parsed.users.unshift(devUser);
+              dirty = true;
+            }
+            parsed.users.forEach((u) => {
+              if (!Array.isArray(u.allowedModules)) {
+                u.allowedModules = [...(DEFAULT_ROLE_MODULES[u.role] || ['analytics'])];
+                dirty = true;
+              }
+            });
+          }
 
           if (dirty) {
             this.persist(parsed);
@@ -607,8 +672,242 @@ export class TenantStore {
     return this.requireTenant(tenantId);
   }
 
+  getTenantStatus(tenantId: string): TenantStatus | null {
+    const found = this.state.tenants.find((t) => t.id === tenantId);
+    return found ? found.status || 'Active' : null;
+  }
+
   listTenants(): Tenant[] {
     return this.state.tenants;
+  }
+
+  listAllUsers(): TenantUser[] {
+    return (this.state.users || []).map((u) => this.toPublicUser(u));
+  }
+
+  updateTenantLifecycle(
+    tenantId: string,
+    patch: {
+      plan?: TenantPlan;
+      learnerCap?: number;
+      subscriptionCycle?: SubscriptionCycle;
+      renewalDate?: string;
+      status?: TenantStatus;
+      suspensionReason?: string;
+      suspendedAt?: string;
+      suspendedBy?: string;
+    }
+  ): Tenant {
+    const tenant = this.requireTenant(tenantId);
+    if (patch.plan) tenant.plan = patch.plan;
+    if (typeof patch.learnerCap === 'number' && Number.isFinite(patch.learnerCap) && patch.learnerCap > 0) {
+      tenant.learnerCap = Math.round(patch.learnerCap);
+    }
+    if (patch.subscriptionCycle) tenant.subscriptionCycle = patch.subscriptionCycle;
+    if (patch.renewalDate !== undefined && patch.renewalDate.trim()) {
+      tenant.renewalDate = patch.renewalDate.trim();
+    }
+    if (patch.status) {
+      tenant.status = patch.status;
+      if (patch.status === 'Suspended') {
+        tenant.suspensionReason =
+          (patch.suspensionReason || '').trim() || 'Platform kill switch engaged by Developer Control Plane.';
+        tenant.suspendedAt = patch.suspendedAt || new Date().toISOString();
+        tenant.suspendedBy = patch.suspendedBy || 'developer@elimunest.platform';
+      } else {
+        tenant.suspensionReason = undefined;
+        tenant.suspendedAt = undefined;
+        tenant.suspendedBy = undefined;
+      }
+    }
+    this.persist();
+    this.syncTenant(tenantId, 'tenant:lifecycle-updated');
+    return tenant;
+  }
+
+  getPlatformTelemetrySnapshot(wsConnectedClients = 0): DevPlatformTelemetry {
+    let diskBytes = 0;
+    try {
+      if (fs.existsSync(DB_FILE)) {
+        diskBytes = fs.statSync(DB_FILE).size;
+      }
+    } catch {
+      diskBytes = 0;
+    }
+
+    const collectionMap: Array<[string, unknown[]]> = [
+      ['tenants', this.state.tenants],
+      ['users', this.state.users || []],
+      ['students', this.state.students],
+      ['admissions', this.state.admissions],
+      ['timetable', this.state.timetable],
+      ['attendance', this.state.attendance],
+      ['staffAttendance', this.state.staffAttendance],
+      ['leaveOutChits', this.state.leaveOutChits],
+      ['examCycles', this.state.examCycles],
+      ['examResults', this.state.examResults],
+      ['feeStructures', this.state.feeStructures],
+      ['invoices', this.state.invoices],
+      ['expenses', this.state.expenses],
+      ['etimsChecks', this.state.etimsChecks || []],
+      ['reconciliationLines', this.state.reconciliationLines || []],
+      ['payrollEntries', this.state.payrollEntries || []],
+      ['budgets', this.state.budgets || []],
+      ['approvalRecords', this.state.approvalRecords || []],
+      ['announcements', this.state.announcements],
+      ['messages', this.state.messages],
+      ['whatsappDispatches', this.state.whatsappDispatches || []],
+      ['notifications', this.state.notifications],
+      ['adminAuditLogs', this.state.adminAuditLogs || []],
+    ];
+
+    const collections: DevCollectionStorageStat[] = collectionMap.map(([collection, arr]) => ({
+      collection,
+      records: Array.isArray(arr) ? arr.length : 0,
+      bytes: Buffer.byteLength(JSON.stringify(arr ?? []), 'utf-8'),
+    }));
+
+    collections.sort((a, b) => b.bytes - a.bytes);
+    const totalRecords = collections.reduce((sum, c) => sum + c.records, 0);
+    const serializedBytes = Buffer.byteLength(JSON.stringify(this.state), 'utf-8');
+    if (diskBytes === 0) diskBytes = serializedBytes;
+
+    const byPlan: Record<TenantPlan, number> = {
+      Starter: 0,
+      Growth: 0,
+      Enterprise: 0,
+    };
+    let activeTenants = 0;
+    let trialTenants = 0;
+    let suspendedTenants = 0;
+    let totalCapacity = 0;
+    let totalEnrolled = 0;
+    let totalActiveLearners = 0;
+    let totalTeachers = 0;
+
+    const tenantRows: DevTenantTelemetryRow[] = this.state.tenants.map((tenant) => {
+      const status = tenant.status || 'Active';
+      if (status === 'Suspended') suspendedTenants += 1;
+      else if (status === 'Trial') trialTenants += 1;
+      else activeTenants += 1;
+
+      const plan: TenantPlan =
+        tenant.plan === 'Starter' || tenant.plan === 'Growth' || tenant.plan === 'Enterprise'
+          ? tenant.plan
+          : 'Growth';
+      byPlan[plan] += 1;
+
+      const tenantStudents = this.state.students.filter((s) => s.tenantId === tenant.id);
+      const activeLearners = tenantStudents.filter((s) => s.status === 'Active').length;
+      const cap =
+        typeof tenant.learnerCap === 'number' && tenant.learnerCap > 0
+          ? tenant.learnerCap
+          : DEFAULT_TIER_LEARNER_CAPS[plan];
+      const utilizationPct = cap > 0 ? Math.min(999, Math.round((tenantStudents.length / cap) * 1000) / 10) : 0;
+
+      totalCapacity += cap;
+      totalEnrolled += tenantStudents.length;
+      totalActiveLearners += activeLearners;
+      totalTeachers += tenant.teachers.length;
+
+      const staffUsersCount = (this.state.users || []).filter(
+        (u) => u.tenantId === tenant.id
+      ).length;
+      const admissionsPending = this.state.admissions.filter(
+        (a) => a.tenantId === tenant.id && a.stage !== 'Enrolled'
+      ).length;
+      const tenantInvoices = this.state.invoices.filter((i) => i.tenantId === tenant.id);
+      const totalBilled = tenantInvoices.reduce((s, i) => s + i.totalAmount, 0);
+      const totalCollected = tenantInvoices.reduce((s, i) => s + i.paidAmount, 0);
+
+      const estimatedDataBytes = Buffer.byteLength(
+        JSON.stringify({
+          tenant,
+          students: tenantStudents,
+          admissions: this.state.admissions.filter((a) => a.tenantId === tenant.id),
+          timetable: this.state.timetable.filter((t) => t.tenantId === tenant.id),
+          attendance: this.state.attendance.filter((a) => a.tenantId === tenant.id),
+          examResults: this.state.examResults.filter((r) => r.tenantId === tenant.id),
+          invoices: tenantInvoices,
+          expenses: this.state.expenses.filter((e) => e.tenantId === tenant.id),
+        }),
+        'utf-8'
+      );
+
+      return {
+        tenant,
+        totalLearners: tenantStudents.length,
+        activeLearners,
+        learnerCap: cap,
+        utilizationPct,
+        staffUsersCount,
+        teachersCount: tenant.teachers.length,
+        nonTeachingCount: (tenant.nonTeachingStaff || []).length,
+        admissionsPending,
+        invoiceCount: tenantInvoices.length,
+        totalBilled,
+        totalCollected,
+        estimatedDataBytes,
+      };
+    });
+
+    const pendingAdmissions = this.state.admissions.filter((a) => a.stage !== 'Enrolled').length;
+    const totalStaffAccounts = (this.state.users || []).filter(
+      (u) => u.tenantId !== 'platform'
+    ).length;
+    const mem = process.memoryUsage();
+
+    return {
+      generatedAt: new Date().toISOString(),
+      tenants: {
+        total: this.state.tenants.length,
+        active: activeTenants,
+        trial: trialTenants,
+        suspended: suspendedTenants,
+        byPlan,
+      },
+      learners: {
+        totalEnrolled,
+        activeLearners: totalActiveLearners,
+        totalCapacity,
+        globalUtilizationPct:
+          totalCapacity > 0 ? Math.round((totalEnrolled / totalCapacity) * 1000) / 10 : 0,
+        pendingAdmissions,
+        totalStaffAccounts,
+        totalTeachers,
+      },
+      database: {
+        engine: 'JSON File Store (Atomic Write)',
+        filePathName: path.basename(DB_FILE),
+        diskBytes,
+        serializedBytes,
+        totalRecords,
+        collections,
+      },
+      runtime: {
+        nodeVersion: process.version,
+        uptimeSeconds: Math.round(process.uptime()),
+        rssBytes: mem.rss,
+        heapUsedBytes: mem.heapUsed,
+        heapTotalBytes: mem.heapTotal,
+        wsConnectedClients,
+      },
+      tenantRows,
+    };
+  }
+
+  private assertLearnerCap(tenant: Tenant) {
+    const cap =
+      typeof tenant.learnerCap === 'number' && tenant.learnerCap > 0
+        ? tenant.learnerCap
+        : DEFAULT_TIER_LEARNER_CAPS[tenant.plan] || 600;
+    const currentCount = this.state.students.filter((s) => s.tenantId === tenant.id).length;
+    if (currentCount >= cap) {
+      throw new ConflictError(
+        `Learner cap reached (${currentCount}/${cap}) for ${tenant.name} (${tenant.plan} tier). Raise learner cap or upgrade subscription in the Developer Panel.`,
+        409
+      );
+    }
   }
 
   listAdminAuditLogs(limit = 50): AdminAuditEntry[] {
@@ -690,12 +989,16 @@ export class TenantStore {
 
   createTenant(input: {
     name: string;
+    emailDomain?: string;
     curriculum: string;
     academicYear: string;
     currentTerm: string;
     currency: CurrencyCode;
-    plan: 'Enterprise' | 'Growth';
+    plan: TenantPlan;
     status?: TenantStatus;
+    learnerCap?: number;
+    subscriptionCycle?: SubscriptionCycle;
+    renewalDate?: string;
     location: string;
     branding?: Partial<TenantBranding>;
     grades: string[];
@@ -703,12 +1006,16 @@ export class TenantStore {
     rooms: string[];
     leadTeacherName: string;
     leadTeacherEmail: string;
+    initialAdminPassword?: string;
   }): Tenant {
     const slug = input.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
       .slice(0, 32) || `school-${Date.now()}`;
+
+    const resolvedDomain =
+      sanitizeSchoolEmailDomain(input.emailDomain || '') || deriveSchoolEmailDomain(slug || input.name);
 
     const id = `tenant-${slug}-${randomUUID().slice(0, 4)}`;
     const teacherId = `t-${randomUUID().slice(0, 6)}`;
@@ -720,16 +1027,28 @@ export class TenantStore {
       logoDataUrl: input.branding?.logoDataUrl || '',
       tagline: input.branding?.tagline?.trim() || '',
     };
+    const resolvedPlan: TenantPlan = input.plan || 'Growth';
+    const resolvedCap =
+      typeof input.learnerCap === 'number' && Number.isFinite(input.learnerCap) && input.learnerCap > 0
+        ? Math.round(input.learnerCap)
+        : DEFAULT_TIER_LEARNER_CAPS[resolvedPlan];
+    const defaultRenewal = new Date();
+    defaultRenewal.setFullYear(defaultRenewal.getFullYear() + 1);
+
     const tenant: Tenant = {
       id,
       name: input.name.trim(),
       slug,
+      emailDomain: resolvedDomain,
       curriculum: input.curriculum.trim() || 'Standard Curriculum',
       academicYear: input.academicYear.trim() || '2026–2027',
       currentTerm: input.currentTerm.trim() || 'Term 1',
       currency: input.currency || 'KES',
-      plan: input.plan || 'Growth',
+      plan: resolvedPlan,
       status: input.status || 'Active',
+      learnerCap: resolvedCap,
+      subscriptionCycle: input.subscriptionCycle || 'Annual',
+      renewalDate: (input.renewalDate || '').trim() || defaultRenewal.toISOString().slice(0, 10),
       location: input.location.trim() || 'Campus Main',
       branding: resolvedBranding,
       grades: resolvedGrades,
@@ -879,7 +1198,15 @@ export class TenantStore {
     patch: Partial<
       Pick<
         Tenant,
-        'name' | 'curriculum' | 'academicYear' | 'currentTerm' | 'currency' | 'location' | 'plan' | 'status'
+        | 'name'
+        | 'emailDomain'
+        | 'curriculum'
+        | 'academicYear'
+        | 'currentTerm'
+        | 'currency'
+        | 'location'
+        | 'plan'
+        | 'status'
       >
     > & {
       branding?: Partial<TenantBranding>;
@@ -897,6 +1224,10 @@ export class TenantStore {
   ): Tenant {
     const tenant = this.requireTenant(tenantId);
     if (patch.name && patch.name.trim()) tenant.name = patch.name.trim();
+    if (patch.emailDomain !== undefined) {
+      const cleanedDomain = sanitizeSchoolEmailDomain(patch.emailDomain);
+      if (cleanedDomain) tenant.emailDomain = cleanedDomain;
+    }
     if (patch.curriculum && patch.curriculum.trim()) tenant.curriculum = patch.curriculum.trim();
     if (patch.academicYear && patch.academicYear.trim()) tenant.academicYear = patch.academicYear.trim();
     if (patch.currentTerm && patch.currentTerm.trim()) tenant.currentTerm = patch.currentTerm.trim();
@@ -965,12 +1296,13 @@ export class TenantStore {
     tenantId: string,
     input: {
       name?: string;
+      emailDomain?: string;
       location?: string;
       curriculum?: string;
       academicYear?: string;
       currentTerm?: string;
       currency?: CurrencyCode;
-      plan?: 'Enterprise' | 'Growth';
+      plan?: TenantPlan;
       status?: TenantStatus;
       branding?: Partial<TenantBranding>;
     }
@@ -1021,6 +1353,7 @@ export class TenantStore {
       (w) => w.tenantId !== tenantId
     );
     this.state.notifications = this.state.notifications.filter((n) => n.tenantId !== tenantId);
+    this.state.users = (this.state.users || []).filter((u) => u.tenantId !== tenantId);
 
     this.persist();
     this.onBroadcast?.(tenant.id, 'workspace:sync', {
@@ -1028,6 +1361,621 @@ export class TenantStore {
       timestamp: new Date().toISOString(),
     });
     return { deleted: true, remainingTenants: this.state.tenants };
+  }
+
+  private toPublicUser(user: StoredTenantUser): TenantUser {
+    const { passwordHash: _omitted, ...publicUser } = user;
+    return {
+      ...publicUser,
+      mustChangePassword: Boolean(publicUser.mustChangePassword),
+      allowedModules: Array.isArray(publicUser.allowedModules)
+        ? publicUser.allowedModules
+        : [...(DEFAULT_ROLE_MODULES[publicUser.role] || ['analytics'])],
+    };
+  }
+
+  private resolveTenantEmailDomain(tenant: Tenant): string {
+    return (
+      sanitizeSchoolEmailDomain(tenant.emailDomain || '') ||
+      deriveSchoolEmailDomain(tenant.slug || tenant.name)
+    );
+  }
+
+  private validateInstitutionalEmailDomain(domain: string) {
+    if (!domain || domain.length < 2 || !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(domain)) {
+      throw new ConflictError(
+        'Provide a valid school email domain (e.g., oakridge.ac.ke or riverside).',
+        400
+      );
+    }
+    if (PUBLIC_EMAIL_DOMAINS.has(domain)) {
+      throw new ConflictError(
+        `Public email domain "@${domain}" is not allowed. Use your school domain (@yourschool).`,
+        400
+      );
+    }
+  }
+
+  private validateEmailLocalPart(localPart: string) {
+    if (!localPart || localPart.length < 2 || !/^[a-z0-9][a-z0-9._-]{0,46}[a-z0-9]$/.test(localPart)) {
+      throw new ConflictError(
+        'Email name before @ must be 2–48 characters using letters, numbers, dots, or hyphens (e.g. jane.wanjiku).',
+        400
+      );
+    }
+  }
+
+  getPublicSchoolDirectory(): PublicSchoolDirectoryItem[] {
+    return this.state.tenants.map((t) => ({
+      id: t.id,
+      name: t.name,
+      slug: t.slug,
+      emailDomain: this.resolveTenantEmailDomain(t),
+      location: t.location,
+      curriculum: t.curriculum,
+      status: t.status || 'Active',
+      branding: t.branding,
+    }));
+  }
+
+  getUserById(userId: string): TenantUser | null {
+    const found = (this.state.users || []).find((u) => u.id === userId);
+    return found ? this.toPublicUser(found) : null;
+  }
+
+  listUsersForTenant(tenantId: string): TenantUser[] {
+    return (this.state.users || [])
+      .filter((u) => u.tenantId === tenantId)
+      .map((u) => this.toPublicUser(u));
+  }
+
+  registerUserAccount(input: {
+    tenantId?: string;
+    fullName: string;
+    email: string;
+    role?: UserRole;
+    password: string;
+  }): { user: TenantUser; tenant: Tenant } {
+    const fullName = (input.fullName || '').trim();
+    if (fullName.length < 2) {
+      throw new ConflictError('Full name must be at least 2 characters.', 400);
+    }
+
+    const password = input.password || '';
+    if (password.length < 6) {
+      throw new ConflictError('Password must be at least 6 characters.', 400);
+    }
+
+    const allowedSignupRoles = new Set<UserRole>([
+      'Admin',
+      'Registrar',
+      'Teacher',
+      'Bursar',
+      'Parent',
+    ]);
+    const requestedRole: UserRole = input.role || 'Teacher';
+    if (!allowedSignupRoles.has(requestedRole)) {
+      throw new ConflictError(
+        'Self-registration is restricted to Admin, Registrar, Teacher, Bursar, or Parent accounts.',
+        403
+      );
+    }
+
+    const rawEmail = (input.email || '').trim().toLowerCase();
+    const atIndex = rawEmail.indexOf('@');
+    if (atIndex === -1 || atIndex !== rawEmail.lastIndexOf('@')) {
+      throw new ConflictError(
+        'Sign up with your institutional email formatted as yourname@theirschool.',
+        400
+      );
+    }
+    const localPart = rawEmail.slice(0, atIndex);
+    const emailDomain = rawEmail.slice(atIndex + 1);
+    this.validateEmailLocalPart(localPart);
+    this.validateInstitutionalEmailDomain(emailDomain);
+
+    let tenant: Tenant | undefined;
+    if (input.tenantId) {
+      tenant = this.requireTenant(input.tenantId);
+      const expectedDomain = this.resolveTenantEmailDomain(tenant);
+      if (emailDomain !== expectedDomain) {
+        throw new ConflictError(
+          `Account email for ${tenant.name} must end with "@${expectedDomain}" (yourname@${expectedDomain}).`,
+          400
+        );
+      }
+    } else {
+      tenant = this.state.tenants.find((t) => this.resolveTenantEmailDomain(t) === emailDomain);
+      if (!tenant) {
+        throw new ConflictError(
+          `No registered school uses "@${emailDomain}". Select a school or register a new school tenant first.`,
+          404
+        );
+      }
+    }
+
+    if (tenant.status === 'Suspended') {
+      throw new ConflictError(
+        `${tenant.name} workspace is currently suspended. Contact platform administration.`,
+        403
+      );
+    }
+
+    const duplicate = (this.state.users || []).some((u) => u.email.toLowerCase() === rawEmail);
+    if (duplicate) {
+      throw new ConflictError(
+        `An account for "${rawEmail}" already exists. Sign in instead.`,
+        409
+      );
+    }
+
+    const now = new Date().toISOString();
+    const newUser: StoredTenantUser = {
+      id: `usr-${randomUUID().slice(0, 8)}`,
+      tenantId: tenant.id,
+      fullName,
+      email: rawEmail,
+      role: requestedRole,
+      passwordHash: hashPassword(password),
+      status: 'Active',
+      createdAt: now,
+      lastLoginAt: now,
+    };
+
+    if (!Array.isArray(this.state.users)) this.state.users = [];
+    this.state.users.push(newUser);
+    this.persist();
+
+    this.pushNotification(
+      tenant.id,
+      'announcement',
+      `New ${requestedRole} Account Created`,
+      `${fullName} (${rawEmail}) joined ${tenant.name}.`,
+      'settings'
+    );
+
+    return { user: this.toPublicUser(newUser), tenant };
+  }
+
+  registerTenantWithAdmin(input: {
+    schoolName: string;
+    emailDomain: string;
+    location?: string;
+    curriculum?: string;
+    academicYear?: string;
+    currentTerm?: string;
+    currency?: CurrencyCode;
+    plan?: 'Enterprise' | 'Growth';
+    fullName: string;
+    email: string;
+    password: string;
+    branding?: Partial<TenantBranding>;
+  }): { user: TenantUser; tenant: Tenant } {
+    const schoolName = (input.schoolName || '').trim();
+    if (schoolName.length < 2) {
+      throw new ConflictError('School name must be at least 2 characters.', 400);
+    }
+
+    const existingName = this.state.tenants.some(
+      (t) => t.name.trim().toLowerCase() === schoolName.toLowerCase()
+    );
+    if (existingName) {
+      throw new ConflictError(`A school tenant named "${schoolName}" already exists.`, 409);
+    }
+
+    const normalizedDomain = sanitizeSchoolEmailDomain(
+      input.emailDomain || deriveSchoolEmailDomain(schoolName)
+    );
+    this.validateInstitutionalEmailDomain(normalizedDomain);
+
+    const existingDomainTenant = this.state.tenants.find(
+      (t) => this.resolveTenantEmailDomain(t) === normalizedDomain
+    );
+    if (existingDomainTenant) {
+      throw new ConflictError(
+        `School domain "@${normalizedDomain}" is already registered to ${existingDomainTenant.name}. Sign in or create a user under that school instead.`,
+        409
+      );
+    }
+
+    const fullName = (input.fullName || '').trim();
+    if (fullName.length < 2) {
+      throw new ConflictError('Administrator full name must be at least 2 characters.', 400);
+    }
+
+    const password = input.password || '';
+    if (password.length < 6) {
+      throw new ConflictError('Password must be at least 6 characters.', 400);
+    }
+
+    const rawEmail = (input.email || '').trim().toLowerCase();
+    const atIndex = rawEmail.indexOf('@');
+    if (atIndex === -1 || atIndex !== rawEmail.lastIndexOf('@')) {
+      throw new ConflictError(
+        `Administrator email must be formatted as yourname@${normalizedDomain}.`,
+        400
+      );
+    }
+    const localPart = rawEmail.slice(0, atIndex);
+    const submittedDomain = rawEmail.slice(atIndex + 1);
+    this.validateEmailLocalPart(localPart);
+
+    if (submittedDomain !== normalizedDomain) {
+      throw new ConflictError(
+        `Your account email domain "@${submittedDomain}" must match your school domain "@${normalizedDomain}".`,
+        400
+      );
+    }
+
+    const duplicateEmail = (this.state.users || []).some((u) => u.email.toLowerCase() === rawEmail);
+    if (duplicateEmail) {
+      throw new ConflictError(`An account for "${rawEmail}" already exists.`, 409);
+    }
+
+    const tenant = this.createTenant({
+      name: schoolName,
+      emailDomain: normalizedDomain,
+      curriculum: (input.curriculum || '').trim() || 'Kenyan CBC (Playgroup – Grade 12)',
+      academicYear: (input.academicYear || '').trim() || '2026–2027',
+      currentTerm: (input.currentTerm || '').trim() || 'Term 1',
+      currency: input.currency === 'USD' ? 'USD' : 'KES',
+      plan: input.plan === 'Growth' ? 'Growth' : 'Enterprise',
+      status: 'Active',
+      location: (input.location || '').trim() || 'Nairobi, KE',
+      branding: input.branding,
+      grades: [],
+      subjects: [],
+      rooms: [],
+      leadTeacherName: fullName,
+      leadTeacherEmail: rawEmail,
+    });
+
+    const now = new Date().toISOString();
+    const adminUser: StoredTenantUser = {
+      id: `usr-${randomUUID().slice(0, 8)}`,
+      tenantId: tenant.id,
+      fullName,
+      email: rawEmail,
+      role: 'Admin',
+      passwordHash: hashPassword(password),
+      status: 'Active',
+      createdAt: now,
+      lastLoginAt: now,
+    };
+
+    if (!Array.isArray(this.state.users)) this.state.users = [];
+    this.state.users.push(adminUser);
+    this.persist();
+
+    return { user: this.toPublicUser(adminUser), tenant };
+  }
+
+  provisionTenantAdminAccount(
+    tenant: Tenant,
+    adminName: string,
+    adminEmail: string,
+    password?: string,
+    mustChangePassword = false
+  ): { user: TenantUser; oneTimePassword: string } {
+    const domain = this.resolveTenantEmailDomain(tenant);
+    const cleanedEmail = (adminEmail || '').trim().toLowerCase();
+    const fallbackLocal =
+      adminName
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '.')
+        .replace(/^\.|\.$/g, '') || 'admin';
+    const email = cleanedEmail.includes('@') ? cleanedEmail : `${fallbackLocal}@${domain}`;
+    const existing = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
+    if (existing) {
+      return {
+        user: this.toPublicUser(existing),
+        oneTimePassword: password || '',
+      };
+    }
+    const assignedPassword =
+      password && password.length >= 6
+        ? password
+        : mustChangePassword
+        ? generateOneTimePassword()
+        : DEFAULT_SEED_USER_PASSWORD;
+    const now = new Date().toISOString();
+    const created: StoredTenantUser = {
+      id: `usr-${randomUUID().slice(0, 8)}`,
+      tenantId: tenant.id,
+      fullName: adminName.trim() || 'School Administrator',
+      email,
+      role: 'Admin',
+      passwordHash: hashPassword(assignedPassword),
+      status: 'Active',
+      mustChangePassword: Boolean(mustChangePassword),
+      allowedModules: [...DEFAULT_ROLE_MODULES.Admin],
+      createdAt: now,
+    };
+    this.state.users.push(created);
+    this.persist();
+    return { user: this.toPublicUser(created), oneTimePassword: assignedPassword };
+  }
+
+  changeUserPassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string
+  ): { user: TenantUser; tenant?: Tenant; emailDomain?: string } {
+    const stored = (this.state.users || []).find((u) => u.id === userId);
+    if (!stored || stored.status !== 'Active') {
+      throw new ConflictError('Account not found or no longer active.', 404);
+    }
+    if (!currentPassword || !verifyPassword(currentPassword, stored.passwordHash)) {
+      throw new ConflictError('Current password is incorrect.', 400);
+    }
+    const trimmedNew = newPassword || '';
+    if (trimmedNew.length < 8) {
+      throw new ConflictError('New password must be at least 8 characters.', 400);
+    }
+    if (trimmedNew === currentPassword) {
+      throw new ConflictError(
+        'Choose a new password that differs from your temporary 1-time password.',
+        400
+      );
+    }
+
+    stored.passwordHash = hashPassword(trimmedNew);
+    stored.mustChangePassword = false;
+    stored.lastLoginAt = new Date().toISOString();
+    this.persist();
+
+    let tenant: Tenant | undefined;
+    let emailDomain: string | undefined;
+    if (stored.tenantId !== 'platform') {
+      tenant = this.state.tenants.find((t) => t.id === stored.tenantId);
+      if (tenant) {
+        emailDomain = this.resolveTenantEmailDomain(tenant);
+      }
+    }
+    return {
+      user: this.toPublicUser(stored),
+      tenant,
+      emailDomain,
+    };
+  }
+
+  private normalizeAllowedModules(
+    role: UserRole,
+    rawModules?: unknown
+  ): TenantModulePermission[] {
+    const validSet = new Set<TenantModulePermission>(ALL_TENANT_MODULES.map((m) => m.id));
+    if (!Array.isArray(rawModules)) {
+      return [...(DEFAULT_ROLE_MODULES[role] || ['analytics'])];
+    }
+    const filtered = Array.from(
+      new Set(
+        rawModules.filter(
+          (item): item is TenantModulePermission =>
+            typeof item === 'string' && validSet.has(item as TenantModulePermission)
+        )
+      )
+    );
+    if (role === 'Admin' && !filtered.includes('settings')) {
+      filtered.push('settings');
+    }
+    return filtered;
+  }
+
+  createTenantStaffUser(
+    actor: TenantUser,
+    tenantId: string,
+    input: {
+      fullName: string;
+      email: string;
+      role: UserRole;
+      allowedModules?: TenantModulePermission[];
+    }
+  ): { user: TenantUser; oneTimePassword: string } {
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Forbidden: Only School Admins can provision staff accounts.', 403);
+    }
+    const tenant = this.requireTenant(tenantId);
+    const fullName = (input.fullName || '').trim();
+    if (fullName.length < 2) {
+      throw new ConflictError('Staff full name must be at least 2 characters.', 400);
+    }
+
+    const allowedSchoolRoles = new Set<UserRole>([
+      'Admin',
+      'Registrar',
+      'Teacher',
+      'Bursar',
+      'Parent',
+    ]);
+    const role: UserRole = input.role || 'Teacher';
+    if (!allowedSchoolRoles.has(role)) {
+      throw new ConflictError(
+        'Staff role must be Admin, Registrar, Teacher, Bursar, or Parent.',
+        400
+      );
+    }
+
+    const domain = this.resolveTenantEmailDomain(tenant);
+    const rawEmailInput = (input.email || '').trim().toLowerCase();
+    let finalEmail: string;
+    if (rawEmailInput.includes('@')) {
+      const atIndex = rawEmailInput.indexOf('@');
+      if (atIndex !== rawEmailInput.lastIndexOf('@')) {
+        throw new ConflictError('Provide a valid @school email address.', 400);
+      }
+      const localPart = rawEmailInput.slice(0, atIndex);
+      const emailDomain = rawEmailInput.slice(atIndex + 1);
+      this.validateEmailLocalPart(localPart);
+      if (emailDomain !== domain) {
+        throw new ConflictError(
+          `Staff email for ${tenant.name} must end with "@${domain}".`,
+          400
+        );
+      }
+      finalEmail = `${localPart}@${domain}`;
+    } else {
+      this.validateEmailLocalPart(rawEmailInput);
+      finalEmail = `${rawEmailInput}@${domain}`;
+    }
+
+    if ((this.state.users || []).some((u) => u.email.toLowerCase() === finalEmail)) {
+      throw new ConflictError(`An account with email "${finalEmail}" already exists.`, 409);
+    }
+
+    const allowedModules = this.normalizeAllowedModules(role, input.allowedModules);
+    const oneTimePassword = generateOneTimePassword();
+    const now = new Date().toISOString();
+    const created: StoredTenantUser = {
+      id: `usr-${randomUUID().slice(0, 8)}`,
+      tenantId: tenant.id,
+      fullName,
+      email: finalEmail,
+      role,
+      passwordHash: hashPassword(oneTimePassword),
+      status: 'Active',
+      mustChangePassword: true,
+      allowedModules,
+      createdAt: now,
+    };
+
+    if (!Array.isArray(this.state.users)) this.state.users = [];
+    this.state.users.push(created);
+    this.persist();
+
+    this.pushNotification(
+      tenant.id,
+      'announcement',
+      `Staff Account Provisioned (${role})`,
+      `${actor.fullName} added ${fullName} (${finalEmail}) with access to ${allowedModules.length} module(s).`,
+      'settings'
+    );
+
+    return { user: this.toPublicUser(created), oneTimePassword };
+  }
+
+  updateTenantUserAccess(
+    actor: TenantUser,
+    tenantId: string,
+    targetUserId: string,
+    patch: {
+      role?: UserRole;
+      allowedModules?: TenantModulePermission[];
+      status?: 'Active' | 'Disabled';
+      resetOneTimePassword?: boolean;
+    }
+  ): { user: TenantUser; oneTimePassword?: string } {
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Forbidden: Only School Admins can assign staff access rights.', 403);
+    }
+    const tenant = this.requireTenant(tenantId);
+    const target = (this.state.users || []).find(
+      (u) => u.id === targetUserId && u.tenantId === tenant.id
+    );
+    if (!target) {
+      throw new ConflictError('Staff account not found in this school tenant.', 404);
+    }
+    if (target.role === 'Developer' || target.role === 'Super Admin') {
+      throw new ConflictError('Platform engineering accounts cannot be modified here.', 403);
+    }
+
+    const allowedSchoolRoles = new Set<UserRole>([
+      'Admin',
+      'Registrar',
+      'Teacher',
+      'Bursar',
+      'Parent',
+    ]);
+    if (patch.role !== undefined) {
+      if (!allowedSchoolRoles.has(patch.role)) {
+        throw new ConflictError('Invalid staff role specified.', 400);
+      }
+      if (target.id === actor.id && patch.role !== 'Admin') {
+        throw new ConflictError('You cannot remove your own School Admin role.', 400);
+      }
+      target.role = patch.role;
+    }
+
+    if (patch.allowedModules !== undefined) {
+      target.allowedModules = this.normalizeAllowedModules(target.role, patch.allowedModules);
+    }
+
+    if (patch.status !== undefined) {
+      if (patch.status !== 'Active' && patch.status !== 'Disabled') {
+        throw new ConflictError('Status must be Active or Disabled.', 400);
+      }
+      if (target.id === actor.id && patch.status === 'Disabled') {
+        throw new ConflictError('You cannot disable your own active Admin account.', 400);
+      }
+      target.status = patch.status;
+    }
+
+    let oneTimePassword: string | undefined;
+    if (patch.resetOneTimePassword) {
+      oneTimePassword = generateOneTimePassword();
+      target.passwordHash = hashPassword(oneTimePassword);
+      target.mustChangePassword = true;
+    }
+
+    this.persist();
+    this.pushNotification(
+      tenant.id,
+      'announcement',
+      'Staff Access Rights Updated',
+      `${actor.fullName} updated permissions for ${target.fullName} (${target.role}, ${target.status}).`,
+      'settings'
+    );
+
+    return {
+      user: this.toPublicUser(target),
+      ...(oneTimePassword ? { oneTimePassword } : {}),
+    };
+  }
+
+  authenticateUser(input: { email: string; password: string }): {
+    user: TenantUser;
+    tenant?: Tenant;
+    emailDomain?: string;
+  } {
+    const email = (input.email || '').trim().toLowerCase();
+    const password = input.password || '';
+    if (!email || !password) {
+      throw new ConflictError('Enter both your email and password.', 400);
+    }
+
+    const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
+    if (!stored || !verifyPassword(password, stored.passwordHash)) {
+      throw new ConflictError('Invalid email or password.', 401);
+    }
+
+    if (stored.status !== 'Active') {
+      throw new ConflictError('This user account has been disabled by your school administrator.', 403);
+    }
+
+    let tenant: Tenant | undefined;
+    let emailDomain: string | undefined;
+    if (stored.tenantId !== 'platform') {
+      tenant = this.state.tenants.find((t) => t.id === stored.tenantId);
+      if (!tenant) {
+        throw new ConflictError('Associated school tenant no longer exists.', 404);
+      }
+      if (tenant.status === 'Suspended') {
+        throw new ConflictError(
+          `${tenant.name} workspace is currently suspended. Contact platform administration.`,
+          403
+        );
+      }
+      emailDomain = this.resolveTenantEmailDomain(tenant);
+    }
+
+    stored.lastLoginAt = new Date().toISOString();
+    this.persist();
+
+    return {
+      user: this.toPublicUser(stored),
+      tenant,
+      emailDomain,
+    };
   }
 
   private normalizeClassAssignments(
@@ -1697,6 +2645,7 @@ export class TenantStore {
 
     // Auto-onboard student & initial fee invoice when transitioning to Enrolled
     if (app.stage === 'Enrolled' && previousStage !== 'Enrolled') {
+      this.assertLearnerCap(tenant);
       const stuCount = this.state.students.filter((s) => s.tenantId === tenantId).length;
       const prefix = tenant.slug.slice(0, 3).toUpperCase();
       enrolledStudent = {
@@ -1781,6 +2730,7 @@ export class TenantStore {
     }
   ): { student: Student; invoice: FeeInvoice } {
     const tenant = this.requireTenant(tenantId);
+    this.assertLearnerCap(tenant);
     const stuCount = this.state.students.filter((s) => s.tenantId === tenantId).length;
     const prefix = tenant.slug.slice(0, 3).toUpperCase();
 
