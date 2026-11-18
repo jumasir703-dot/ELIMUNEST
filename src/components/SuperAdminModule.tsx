@@ -95,9 +95,12 @@ export function SuperAdminModule({
   onSwitchTenant,
   onNotify,
 }: SuperAdminModuleProps) {
-  const [activeTab, setActiveTab] = useState<SuperAdminTab>('directory');
+  const isDeveloper = currentRole === 'Developer';
+  const [activeTab, setActiveTab] = useState<SuperAdminTab>(
+    isDeveloper ? 'directory' : 'branding'
+  );
   const [summaries, setSummaries] = useState<SuperAdminTenantSummary[]>([]);
-  const [loadingDirectory, setLoadingDirectory] = useState(true);
+  const [loadingDirectory, setLoadingDirectory] = useState(isDeveloper);
   const [auditLogs, setAuditLogs] = useState<AdminAuditEntry[]>([]);
   const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
   const [previewFullScreen, setPreviewFullScreen] = useState(false);
@@ -112,6 +115,9 @@ export function SuperAdminModule({
   const [editProfile, setEditProfile] = useState({
     name: workspace.tenant.name,
     location: workspace.tenant.location,
+    contactEmail: workspace.tenant.contactEmail || '',
+    contactPhone: workspace.tenant.contactPhone || '',
+    postalAddress: workspace.tenant.postalAddress || '',
     curriculum: workspace.tenant.curriculum,
     academicYear: workspace.tenant.academicYear,
     currentTerm: workspace.tenant.currentTerm,
@@ -139,6 +145,9 @@ export function SuperAdminModule({
     plan: 'Enterprise' as 'Enterprise' | 'Growth',
     status: 'Active' as TenantStatus,
     location: '',
+    contactEmail: '',
+    contactPhone: '',
+    postalAddress: '',
     gradesText: KENYAN_CBC_GRADES.join(', '),
     subjectsText: KENYAN_CBC_SUBJECTS.join(', '),
     roomsText: 'Room 101, Room 102, Science Lab, ICT Lab, Library',
@@ -155,6 +164,11 @@ export function SuperAdminModule({
   const provisionLogoInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadDirectory = useCallback(async () => {
+    if (!isDeveloper) {
+      setSummaries([]);
+      setLoadingDirectory(false);
+      return;
+    }
     setLoadingDirectory(true);
     try {
       const { summaries: list } = await saasApi.getSuperAdminTenants();
@@ -167,7 +181,7 @@ export function SuperAdminModule({
     } finally {
       setLoadingDirectory(false);
     }
-  }, [onNotify]);
+  }, [isDeveloper, onNotify]);
 
   const loadAuditLogs = useCallback(async () => {
     setLoadingAuditLogs(true);
@@ -187,6 +201,12 @@ export function SuperAdminModule({
   useEffect(() => {
     loadDirectory();
   }, [loadDirectory, workspace.tenants.length, currentRole]);
+
+  useEffect(() => {
+    if (!isDeveloper && (activeTab === 'directory' || activeTab === 'provision')) {
+      setActiveTab('branding');
+    }
+  }, [isDeveloper, activeTab]);
 
   useEffect(() => {
     if (activeTab === 'audit') {
@@ -221,6 +241,9 @@ export function SuperAdminModule({
     setEditProfile({
       name: target.name,
       location: target.location,
+      contactEmail: target.contactEmail || '',
+      contactPhone: target.contactPhone || '',
+      postalAddress: target.postalAddress || '',
       curriculum: target.curriculum,
       academicYear: target.academicYear,
       currentTerm: target.currentTerm,
@@ -239,6 +262,13 @@ export function SuperAdminModule({
 
   // Sync selected tenant into editor when tenant list refreshes or user changes selection
   useEffect(() => {
+    if (!isDeveloper) {
+      if (editingTenantId !== workspace.tenant.id) {
+        setEditingTenantId(workspace.tenant.id);
+      }
+      populateEditorFromTenant(workspace.tenant);
+      return;
+    }
     const found =
       summaries.find((s) => s.tenant.id === editingTenantId)?.tenant ||
       workspace.tenants.find((t) => t.id === editingTenantId) ||
@@ -247,7 +277,7 @@ export function SuperAdminModule({
       if (found.id !== editingTenantId) setEditingTenantId(found.id);
       populateEditorFromTenant(found);
     }
-  }, [editingTenantId, summaries, workspace.tenants, workspace.tenant, populateEditorFromTenant]);
+  }, [isDeveloper, editingTenantId, summaries, workspace.tenants, workspace.tenant, populateEditorFromTenant]);
 
   const platformMetrics = useMemo(() => {
     const totalTenants = summaries.length;
@@ -327,12 +357,14 @@ export function SuperAdminModule({
       await saasApi.updateTenantBranding(editingTenantId, {
         name: editProfile.name.trim(),
         location: editProfile.location.trim(),
+        contactEmail: editProfile.contactEmail.trim() || undefined,
+        contactPhone: editProfile.contactPhone.trim() || undefined,
+        postalAddress: editProfile.postalAddress.trim() || undefined,
         curriculum: editProfile.curriculum.trim(),
         academicYear: editProfile.academicYear.trim(),
         currentTerm: editProfile.currentTerm.trim(),
         currency: editProfile.currency,
-        plan: editProfile.plan,
-        status: editProfile.status,
+        ...(isDeveloper ? { plan: editProfile.plan, status: editProfile.status } : {}),
         branding: {
           primaryColor,
           accentColor,
@@ -400,6 +432,9 @@ export function SuperAdminModule({
         plan: provisionForm.plan,
         status: provisionForm.status,
         location: provisionForm.location.trim() || 'Nairobi, KE',
+        contactEmail: provisionForm.contactEmail.trim() || undefined,
+        contactPhone: provisionForm.contactPhone.trim() || undefined,
+        postalAddress: provisionForm.postalAddress.trim() || undefined,
         branding: {
           primaryColor: normalizeHex(provisionForm.primaryColor, '#2563EB'),
           accentColor: normalizeHex(provisionForm.accentColor, '#0284C7'),
@@ -432,6 +467,9 @@ export function SuperAdminModule({
         ...prev,
         name: '',
         location: '',
+        contactEmail: '',
+        contactPhone: '',
+        postalAddress: '',
         leadTeacherName: '',
         leadTeacherEmail: '',
         logoDataUrl: '',
@@ -470,30 +508,36 @@ export function SuperAdminModule({
         <div>
           <div className="flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
             <ShieldCheck className="h-3.5 w-3.5" />
-            <span>Multi-Tenant Platform Console</span>
+            <span>{isDeveloper ? 'Multi-Tenant Platform Console' : 'School Identity & Branding Console'}</span>
             <span aria-hidden="true">·</span>
-            <span className="tabular-nums">{platformMetrics.totalTenants} Schools</span>
+            <span className="tabular-nums">
+              {isDeveloper ? `${platformMetrics.totalTenants} Schools` : workspace.tenant.name}
+            </span>
           </div>
           <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-            Super Admin Panel
+            {isDeveloper ? 'Multi-Tenant Quick Admin' : 'School Theme & Administration'}
           </h1>
           <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-400">
-            Add school tenants, manage plans & status, customize platform colour themes, and upload school logos.
+            {isDeveloper
+              ? 'Add school tenants, manage plans & status, customize platform colour themes, and upload school logos.'
+              : `Customize ${workspace.tenant.name} theme colours, logo, letterhead contacts, and review your school audit trail.`}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
-          <button
-            type="button"
-            onClick={() => setActiveTab('directory')}
-            className={`whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              activeTab === 'directory'
-                ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
-                : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
-            }`}
-          >
-            Tenants Directory
-          </button>
+          {isDeveloper && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('directory')}
+              className={`whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'directory'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              Tenants Directory
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setActiveTab('branding')}
@@ -506,7 +550,7 @@ export function SuperAdminModule({
             <Palette className="h-3.5 w-3.5" />
             Theme & Logo
           </button>
-          {currentRole === 'Super Admin' && (
+          {isDeveloper && (
             <button
               type="button"
               onClick={() => setActiveTab('provision')}
@@ -530,63 +574,65 @@ export function SuperAdminModule({
             }`}
           >
             <History className="h-3.5 w-3.5" />
-            Service Audit Log
+            {isDeveloper ? 'Service Audit Log' : 'School Audit Log'}
           </button>
         </div>
       </div>
 
-      {/* Platform KPI Strip */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Total Tenants
-          </p>
-          <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
-            {platformMetrics.totalTenants}
-          </p>
-          <p className="mt-1 text-xs text-slate-500 tabular-nums dark:text-slate-400">
-            {platformMetrics.activeTenants} Active schools
-          </p>
-        </div>
+      {/* Platform KPI Strip (Developer Multi-Tenant Overview Only) */}
+      {isDeveloper && (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Total Tenants
+            </p>
+            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
+              {platformMetrics.totalTenants}
+            </p>
+            <p className="mt-1 text-xs text-slate-500 tabular-nums dark:text-slate-400">
+              {platformMetrics.activeTenants} Active schools
+            </p>
+          </div>
 
-        <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Platform Learners
-          </p>
-          <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
-            {platformMetrics.totalStudents}
-          </p>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Across all school workspaces
-          </p>
-        </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Platform Learners
+            </p>
+            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
+              {platformMetrics.totalStudents}
+            </p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Across all school workspaces
+            </p>
+          </div>
 
-        <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Total Faculty & Staff
-          </p>
-          <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
-            {platformMetrics.totalStaff}
-          </p>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Teaching & non-teaching
-          </p>
-        </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Total Faculty & Staff
+            </p>
+            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
+              {platformMetrics.totalStaff}
+            </p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Teaching & non-teaching
+            </p>
+          </div>
 
-        <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Custom Branded Schools
-          </p>
-          <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
-            {platformMetrics.customBrandedCount}
-          </p>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Custom themes or uploaded logos
-          </p>
+          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Custom Branded Schools
+            </p>
+            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
+              {platformMetrics.customBrandedCount}
+            </p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Custom themes or uploaded logos
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
-      {activeTab === 'directory' ? (
+      {isDeveloper && activeTab === 'directory' ? (
         <div className="space-y-4">
           {/* Search & Filters */}
           <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
@@ -864,38 +910,40 @@ export function SuperAdminModule({
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           {/* Left Column: Tenant Profile, Logo Upload, & Colour Theme Controls */}
           <div className="space-y-6 lg:col-span-7">
-            {/* Target Tenant Selector */}
-            <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    Select Tenant to Customize
-                  </h2>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Changes update the selected school&apos;s workspace logo, theme palette, and configuration.
-                  </p>
+            {/* Target Tenant Selector (Platform Developer Only) */}
+            {isDeveloper && (
+              <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                      Select Tenant to Customize
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Changes update the selected school&apos;s workspace logo, theme palette, and configuration.
+                    </p>
+                  </div>
+                  <select
+                    aria-label="Select tenant to customize"
+                    value={editingTenantId}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setEditingTenantId(nextId);
+                      const found =
+                        summaries.find((s) => s.tenant.id === nextId)?.tenant ||
+                        workspace.tenants.find((t) => t.id === nextId);
+                      if (found) populateEditorFromTenant(found);
+                    }}
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {workspace.tenants.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.location})
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <select
-                  aria-label="Select tenant to customize"
-                  value={editingTenantId}
-                  onChange={(e) => {
-                    const nextId = e.target.value;
-                    setEditingTenantId(nextId);
-                    const found =
-                      summaries.find((s) => s.tenant.id === nextId)?.tenant ||
-                      workspace.tenants.find((t) => t.id === nextId);
-                    if (found) populateEditorFromTenant(found);
-                  }}
-                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                >
-                  {workspace.tenants.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name} ({t.location})
-                    </option>
-                  ))}
-                </select>
               </div>
-            </div>
+            )}
 
             {/* Logo Uploader */}
             <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
@@ -1226,43 +1274,57 @@ export function SuperAdminModule({
                     className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                    SaaS Plan
-                  </label>
-                  <select
-                    value={editProfile.plan}
-                    onChange={(e) =>
-                      setEditProfile((prev) => ({
-                        ...prev,
-                        plan: e.target.value as 'Enterprise' | 'Growth',
-                      }))
-                    }
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    <option value="Enterprise">Enterprise</option>
-                    <option value="Growth">Growth</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                    Tenant Status
-                  </label>
-                  <select
-                    value={editProfile.status}
-                    onChange={(e) =>
-                      setEditProfile((prev) => ({
-                        ...prev,
-                        status: e.target.value as TenantStatus,
-                      }))
-                    }
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    <option value="Active">Active</option>
-                    <option value="Trial">Trial</option>
-                    <option value="Suspended">Suspended</option>
-                  </select>
-                </div>
+                {isDeveloper ? (
+                  <>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        SaaS Plan
+                      </label>
+                      <select
+                        value={editProfile.plan}
+                        onChange={(e) =>
+                          setEditProfile((prev) => ({
+                            ...prev,
+                            plan: e.target.value as 'Enterprise' | 'Growth',
+                          }))
+                        }
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      >
+                        <option value="Enterprise">Enterprise</option>
+                        <option value="Growth">Growth</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        Tenant Status
+                      </label>
+                      <select
+                        value={editProfile.status}
+                        onChange={(e) =>
+                          setEditProfile((prev) => ({
+                            ...prev,
+                            status: e.target.value as TenantStatus,
+                          }))
+                        }
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      >
+                        <option value="Active">Active</option>
+                        <option value="Trial">Trial</option>
+                        <option value="Suspended">Suspended</option>
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Subscription Plan &amp; Status
+                    </label>
+                    <div className="mt-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300">
+                      <span className="font-semibold">{editProfile.plan}</span> ·{' '}
+                      <span className="font-mono text-xs">{editProfile.status}</span>
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
                     Academic Year
@@ -1303,6 +1365,48 @@ export function SuperAdminModule({
                       <option value="USD">USD ($)</option>
                     </select>
                   </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Contact Phone (Printed Docs)
+                  </label>
+                  <input
+                    type="tel"
+                    value={editProfile.contactPhone}
+                    onChange={(e) =>
+                      setEditProfile((prev) => ({ ...prev, contactPhone: e.target.value }))
+                    }
+                    placeholder="+254 712 408 100"
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Official Contact Email
+                  </label>
+                  <input
+                    type="email"
+                    value={editProfile.contactEmail}
+                    onChange={(e) =>
+                      setEditProfile((prev) => ({ ...prev, contactEmail: e.target.value }))
+                    }
+                    placeholder="info@school.ac.ke"
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Postal Address (Letterhead)
+                  </label>
+                  <input
+                    type="text"
+                    value={editProfile.postalAddress}
+                    onChange={(e) =>
+                      setEditProfile((prev) => ({ ...prev, postalAddress: e.target.value }))
+                    }
+                    placeholder="P.O. Box 14820-00800, Westlands, Nairobi"
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
                 </div>
               </div>
 
@@ -1540,7 +1644,7 @@ export function SuperAdminModule({
             </div>
           </div>
         </div>
-      ) : activeTab === 'provision' ? (
+      ) : isDeveloper && activeTab === 'provision' ? (
         <form
           onSubmit={handleProvisionNewTenant}
           className="grid grid-cols-1 gap-6 lg:grid-cols-12"
@@ -1722,6 +1826,51 @@ export function SuperAdminModule({
                     }))
                   }
                   placeholder="principal@school.ac.ke"
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  School Phone (Printed Docs)
+                </label>
+                <input
+                  type="tel"
+                  value={provisionForm.contactPhone}
+                  onChange={(e) =>
+                    setProvisionForm((prev) => ({ ...prev, contactPhone: e.target.value }))
+                  }
+                  placeholder="+254 712 000 000"
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  School Contact Email
+                </label>
+                <input
+                  type="email"
+                  value={provisionForm.contactEmail}
+                  onChange={(e) =>
+                    setProvisionForm((prev) => ({ ...prev, contactEmail: e.target.value }))
+                  }
+                  placeholder="info@school.ac.ke"
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Postal Address (Printed Statements)
+                </label>
+                <input
+                  type="text"
+                  value={provisionForm.postalAddress}
+                  onChange={(e) =>
+                    setProvisionForm((prev) => ({ ...prev, postalAddress: e.target.value }))
+                  }
+                  placeholder="P.O. Box 450, Nakuru"
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                 />
               </div>

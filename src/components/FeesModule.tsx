@@ -15,10 +15,18 @@ import {
   Printer,
   Receipt,
   Search,
+  Share2,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
+import { TenantDocumentHeader } from './TenantDocumentHeader';
+import {
+  createBrandedAoaWorksheet,
+  createBrandedWorksheetFromObjects,
+  parseExcelSheetRowsSmart,
+  resolveTenantDocumentMeta,
+} from '../lib/documentBranding';
 import { saasApi } from '../lib/api';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import {
@@ -27,11 +35,13 @@ import {
   resolveStudentGuardianContact,
 } from '../lib/whatsapp';
 import {
+  INDEPENDENT_VOTELINE_PRESETS,
   MAX_FEE_VOTELINES,
   type CurrencyCode,
   type FeeInvoice,
   type FeeStructure,
   type FeeVoteline,
+  type IndependentVotelineItem,
   type InvoiceStatus,
   type PaymentMethod,
   type TenantWorkspaceData,
@@ -69,6 +79,71 @@ function getStructureVotelines(fs: FeeStructure): FeeVoteline[] {
     { id: 'vl-tech', name: 'Technology & ICT', amount: fs.technologyFee || 0 },
     { id: 'vl-act', name: 'Co-Curricular & Activities', amount: fs.activitiesFee || 0 },
   ];
+}
+
+function termsMatchForFeeStructure(a: string, b: string): boolean {
+  const normA = (a || '').trim().toLowerCase();
+  const normB = (b || '').trim().toLowerCase();
+  if (!normA || !normB) return true;
+  if (normA === normB) return true;
+  const matchA = normA.match(/\bterm\s*(\d+)\b/i);
+  const matchB = normB.match(/\bterm\s*(\d+)\b/i);
+  if (matchA && matchB) {
+    return matchA[1] === matchB[1];
+  }
+  return normA.includes(normB) || normB.includes(normA);
+}
+
+interface StructureIndependentLine {
+  key: string;
+  name: string;
+  unitAmount: number;
+  learnerCount: number;
+  totalBilled: number;
+  note: string;
+}
+
+function summarizeIndependentVotelinesForStructure(
+  fs: FeeStructure,
+  items: IndependentVotelineItem[]
+): {
+  lines: StructureIndependentLine[];
+  separateScheduleTotal: number;
+  separateCohortTotal: number;
+} {
+  const matching = items.filter(
+    (item) =>
+      item.grade.trim().toLowerCase() === fs.grade.trim().toLowerCase() &&
+      termsMatchForFeeStructure(item.term, fs.term)
+  );
+
+  const grouped = new Map<string, StructureIndependentLine>();
+  for (const item of matching) {
+    const cleanName = item.name.trim();
+    const key = `${cleanName.toLowerCase()}::${item.amount}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.learnerCount += 1;
+      existing.totalBilled += item.amount;
+      if (!existing.note && item.note) {
+        existing.note = item.note;
+      }
+    } else {
+      grouped.set(key, {
+        key,
+        name: cleanName,
+        unitAmount: item.amount,
+        learnerCount: 1,
+        totalBilled: item.amount,
+        note: (item.note || '').trim(),
+      });
+    }
+  }
+
+  const lines = Array.from(grouped.values());
+  const separateScheduleTotal = lines.reduce((sum, l) => sum + l.unitAmount, 0);
+  const separateCohortTotal = lines.reduce((sum, l) => sum + l.totalBilled, 0);
+  return { lines, separateScheduleTotal, separateCohortTotal };
 }
 
 /**
@@ -190,10 +265,13 @@ export function FeesModule({
   onNotify,
 }: FeesModuleProps) {
   const { tenant, students, admissions, invoices, feeStructures } = workspace;
+  const independentVotelines = workspace.independentVotelines || [];
   const whatsappDispatches = workspace.whatsappDispatches || [];
   const canSwitchCurrency = currentRole === 'Admin' || currentRole === 'Super Admin';
 
-  const [activeTab, setActiveTab] = useState<'invoices' | 'payments' | 'structures'>('invoices');
+  const [activeTab, setActiveTab] = useState<'invoices' | 'payments' | 'structures' | 'independent'>(
+    'invoices'
+  );
   const [entryMode, setEntryMode] = useState<'manual' | 'excel'>('manual');
   const [statusFilter, setStatusFilter] = useState<'All' | InvoiceStatus>('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -204,6 +282,27 @@ export function FeesModule({
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [updatingCurrency, setUpdatingCurrency] = useState(false);
+  const [lastSavedStructureKey, setLastSavedStructureKey] = useState<string | null>(null);
+  const [shareStructureModal, setShareStructureModal] = useState<FeeStructure | null>(null);
+  const [copiedStructureId, setCopiedStructureId] = useState<string | null>(null);
+
+  // Independent Votelines (alongside fee, never alters Fee Structure or Invoice Totals)
+  const [ivlName, setIvlName] = useState('Transport Fee');
+  const [ivlAmount, setIvlAmount] = useState(tenant.currency === 'KES' ? '8500' : '150');
+  const [ivlTerm, setIvlTerm] = useState(tenant.currentTerm);
+  const [ivlScope, setIvlScope] = useState<'student' | 'grade' | 'all'>('student');
+  const [ivlStudentId, setIvlStudentId] = useState(students[0]?.id || '');
+  const [ivlGrade, setIvlGrade] = useState(tenant.grades[0] || '');
+  const [ivlNote, setIvlNote] = useState('');
+  const [ivlSearch, setIvlSearch] = useState('');
+  const [ivlStatusFilter, setIvlStatusFilter] = useState<'All' | InvoiceStatus>('All');
+  const [ivlPayModalItem, setIvlPayModalItem] = useState<IndependentVotelineItem | null>(null);
+  const [ivlPayForm, setIvlPayForm] = useState({
+    amount: '',
+    method: 'Mobile Money' as PaymentMethod,
+    reference: '',
+    paidAt: todayIsoDate(),
+  });
 
   // Fee Balance Reminder modal state
   const [reminderModalOpen, setReminderModalOpen] = useState(false);
@@ -437,6 +536,10 @@ export function FeesModule({
       setStructureTerm(tenant.currentTerm);
       setVotelineDrafts(buildDefaultVotelineDrafts(tenant.currency));
     }
+    setIvlTerm(tenant.currentTerm);
+    setIvlStudentId(students[0]?.id || '');
+    setIvlGrade(tenant.grades[0] || '');
+    setIvlAmount(tenant.currency === 'KES' ? '8500' : '150');
   }, [tenant.id]);
 
   // Keep manual invoice selector synchronized when tenant or open invoices change
@@ -543,6 +646,46 @@ export function FeesModule({
       );
     });
   }, [invoices, statusFilter, searchQuery]);
+
+  const independentMetrics = useMemo(() => {
+    const totalCharged = independentVotelines.reduce((sum, v) => sum + v.amount, 0);
+    const totalPaid = independentVotelines.reduce((sum, v) => sum + v.paidAmount, 0);
+    const totalBalance = independentVotelines.reduce((sum, v) => sum + v.balance, 0);
+    return {
+      count: independentVotelines.length,
+      totalCharged,
+      totalPaid,
+      totalBalance,
+    };
+  }, [independentVotelines]);
+
+  const filteredIndependentVotelines = useMemo(() => {
+    const q = ivlSearch.trim().toLowerCase();
+    return independentVotelines.filter((item) => {
+      if (ivlStatusFilter !== 'All' && item.status !== ivlStatusFilter) return false;
+      if (!q) return true;
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.studentName.toLowerCase().includes(q) ||
+        item.studentCode.toLowerCase().includes(q) ||
+        item.grade.toLowerCase().includes(q) ||
+        (item.note || '').toLowerCase().includes(q)
+      );
+    });
+  }, [independentVotelines, ivlSearch, ivlStatusFilter]);
+
+  function getInvoiceIndependentVotelines(inv: FeeInvoice): IndependentVotelineItem[] {
+    return independentVotelines.filter((v) =>
+      v.invoiceId ? v.invoiceId === inv.id : v.studentId === inv.studentId && v.term === inv.term
+    );
+  }
+
+  function jumpToAddIndependentForInvoice(inv: FeeInvoice) {
+    setIvlScope('student');
+    setIvlStudentId(inv.studentId);
+    setIvlTerm(inv.term || tenant.currentTerm);
+    setActiveTab('independent');
+  }
 
   const excelBatchSummary = useMemo(() => {
     const validSelected = parsedExcelRows.filter((r) => r.include && r.status === 'valid');
@@ -657,7 +800,7 @@ export function FeesModule({
   }
 
   function handleDownloadTemplate() {
-    const sourceRows =
+    const sourceRows: Array<Record<string, string | number>> =
       openInvoices.length > 0
         ? openInvoices.map((inv) => ({
             'Invoice Number': inv.invoiceNumber,
@@ -686,24 +829,28 @@ export function FeesModule({
             'Paid Date': todayIsoDate(),
           }));
 
-    const sheet = XLSX.utils.json_to_sheet(sourceRows);
-    sheet['!cols'] = [
-      { wch: 16 },
-      { wch: 14 },
-      { wch: 24 },
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 18 },
-      { wch: 16 },
-      { wch: 16 },
-      { wch: 22 },
-      { wch: 14 },
-    ];
+    const sheet = createBrandedWorksheetFromObjects(
+      tenant,
+      `Fee Payments Import Template (${tenant.academicYear} ${tenant.currentTerm})`,
+      sourceRows,
+      [
+        { wch: 16 },
+        { wch: 14 },
+        { wch: 24 },
+        { wch: 12 },
+        { wch: 10 },
+        { wch: 10 },
+        { wch: 18 },
+        { wch: 16 },
+        { wch: 16 },
+        { wch: 22 },
+        { wch: 14 },
+      ]
+    );
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, sheet, 'Fee Payments');
     XLSX.writeFile(workbook, `${tenant.slug}-fee-payments-template.xlsx`);
-    onNotify('Downloaded Excel fee payment template.');
+    onNotify('Downloaded branded Excel fee payment template.');
   }
 
   async function handleExcelFileUpload(file: File | undefined) {
@@ -717,10 +864,15 @@ export function FeesModule({
         return;
       }
 
-      const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(
-        workbook.Sheets[firstSheetName],
-        { defval: '' }
-      );
+      const rawRows = parseExcelSheetRowsSmart(workbook.Sheets[firstSheetName], [
+        'invoice',
+        'student',
+        'code',
+        'name',
+        'amount',
+        'method',
+        'reference',
+      ]);
       if (rawRows.length === 0) {
         onNotify('No payment rows detected in the first sheet.', 'error');
         return;
@@ -996,6 +1148,120 @@ export function FeesModule({
     );
   }
 
+  function buildFeeStructureShareText(fs: FeeStructure): string {
+    const meta = resolveTenantDocumentMeta(tenant);
+    const lines = getStructureVotelines(fs);
+    const independentSummary = summarizeIndependentVotelinesForStructure(
+      fs,
+      independentVotelines
+    );
+    const headerLines = [
+      `*${meta.schoolName}*`,
+      `${meta.location} | ${meta.postalAddress}`,
+      `Tel: ${meta.contactPhone} | Email: ${meta.contactEmail}`,
+      ``,
+      `*OFFICIAL FEE STRUCTURE — ${fs.grade.toUpperCase()} (${fs.term})*`,
+      `Academic Year: ${tenant.academicYear} | Currency: ${tenant.currency}`,
+      ``,
+      ...lines.map(
+        (line, idx) =>
+          `${idx + 1}. ${line.name}: ${formatCurrency(line.amount, tenant.currency)}`
+      ),
+      ``,
+      `*TOTAL TERM FEE (MAIN STRUCTURE): ${formatCurrency(fs.totalFee, tenant.currency)}*`,
+    ];
+
+    if (independentSummary.lines.length > 0) {
+      headerLines.push(
+        ``,
+        `*INDEPENDENT VOTELINES (SEPARATE FROM MAIN FEE STRUCTURE):*`,
+        ...independentSummary.lines.map(
+          (item, idx) =>
+            `${idx + 1}. ${item.name}${item.note ? ` (${item.note})` : ''}: ${formatCurrency(
+              item.unitAmount,
+              tenant.currency
+            )}`
+        ),
+        `*INDEPENDENT VOTELINES TOTAL (SEPARATE): ${formatCurrency(
+          independentSummary.separateScheduleTotal,
+          tenant.currency
+        )}*`
+      );
+    }
+
+    if (tenant.mpesaConfig?.enabled) {
+      headerLines.push(
+        ``,
+        `M-Pesa Paybill: ${tenant.mpesaConfig.paybillNumber} (${tenant.mpesaConfig.accountName})`,
+        `Account No.: Learner Admission Code`
+      );
+    }
+    return headerLines.join('\n');
+  }
+
+  function buildFeeStructureWhatsAppHref(fs: FeeStructure): string {
+    return `https://wa.me/?text=${encodeURIComponent(buildFeeStructureShareText(fs))}`;
+  }
+
+  async function handleCopyFeeStructureText(fs: FeeStructure) {
+    try {
+      await navigator.clipboard?.writeText(buildFeeStructureShareText(fs));
+      setCopiedStructureId(fs.id);
+      onNotify(`Copied ${fs.grade} (${fs.term}) fee structure summary.`);
+      setTimeout(() => setCopiedStructureId(null), 2500);
+    } catch {
+      onNotify('Copy the fee structure details manually from the preview box.', 'error');
+    }
+  }
+
+  function handleExportStructureExcel(fs: FeeStructure) {
+    const lines = getStructureVotelines(fs);
+    const total = Math.max(1, fs.totalFee);
+    const independentSummary = summarizeIndependentVotelinesForStructure(
+      fs,
+      independentVotelines
+    );
+    const bodyAoa: Array<Array<string | number>> = [
+      ['#', 'Votehead / Voteline', `Amount (${tenant.currency})`, 'Share (%)'],
+      ...lines.map((line, idx) => [
+        idx + 1,
+        line.name,
+        line.amount,
+        `${((line.amount / total) * 100).toFixed(1)}%`,
+      ]),
+      ['', `TOTAL TERM FEE (${fs.grade} · ${fs.term})`, fs.totalFee, '100.0%'],
+      [],
+      ['', 'INDEPENDENT VOTELINES (SEPARATE FROM MAIN FEE STRUCTURE)', '', ''],
+      ['#', 'Independent Voteline', `Amount (${tenant.currency})`, 'Scope / Notes'],
+      ...(independentSummary.lines.length > 0
+        ? independentSummary.lines.map((item, idx) => [
+            idx + 1,
+            item.name,
+            item.unitAmount,
+            item.note || `${item.learnerCount} learner(s) assigned`,
+          ])
+        : [['—', 'No independent votelines assigned for this grade & term', 0, 'Optional / Separate']]),
+      [
+        '',
+        `INDEPENDENT VOTELINES TOTAL (SEPARATE · ${fs.grade})`,
+        independentSummary.separateScheduleTotal,
+        'Not added to Main Fee Total',
+      ],
+    ];
+    const ws = createBrandedAoaWorksheet(
+      tenant,
+      `Official Fee Structure — ${fs.grade} (${fs.term})`,
+      bodyAoa,
+      [{ wch: 8 }, { wch: 42 }, { wch: 20 }, { wch: 28 }],
+      [`Academic Year: ${tenant.academicYear}`]
+    );
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `${fs.grade}`.slice(0, 31));
+    const safeGrade = fs.grade.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    XLSX.writeFile(wb, `${tenant.slug}-${safeGrade}-fee-structure.xlsx`);
+    onNotify(`Downloaded branded Excel fee structure for ${fs.grade} (${fs.term}).`);
+  }
+
   async function handleSaveStructure(e: React.FormEvent) {
     e.preventDefault();
     if (votelineDrafts.length === 0 || votelineDrafts.length > MAX_FEE_VOTELINES) {
@@ -1027,14 +1293,112 @@ export function FeesModule({
         votelines: cleaned,
       });
       await onRefresh();
+      setLastSavedStructureKey(`${structureGrade}::${structureTerm}`);
       onNotify(
         `Saved ${structureGrade} (${structureTerm}) with ${cleaned.length} votelines (${formatCurrency(
           cleaned.reduce((s, v) => s + v.amount, 0),
           tenant.currency
-        )}).`
+        )}). Ready to download or share.`
       );
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Failed to save fee structure', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCreateIndependentVoteline(e: React.FormEvent) {
+    e.preventDefault();
+    const cleanName = ivlName.trim();
+    const numericAmt = Math.round(Number(ivlAmount));
+    if (!cleanName) {
+      onNotify('Enter an independent voteline name (e.g. Transport Fee or Academic Trip Fee).', 'error');
+      return;
+    }
+    if (!Number.isFinite(numericAmt) || numericAmt <= 0) {
+      onNotify('Enter a valid positive amount for the independent voteline.', 'error');
+      return;
+    }
+    if (ivlScope === 'student' && !ivlStudentId) {
+      onNotify('Select a learner to assign the independent voteline alongside their fee.', 'error');
+      return;
+    }
+    if (ivlScope === 'grade' && !ivlGrade) {
+      onNotify('Select a target grade/class.', 'error');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const res = await saasApi.createIndependentVoteline(tenant.id, {
+        name: cleanName,
+        amount: numericAmt,
+        term: ivlTerm.trim() || tenant.currentTerm,
+        note: ivlNote.trim() || undefined,
+        targetScope: ivlScope,
+        studentId: ivlScope === 'student' ? ivlStudentId : undefined,
+        grade: ivlScope === 'grade' ? ivlGrade : undefined,
+        recordedBy: `${currentRole} Office`,
+      });
+      await onRefresh();
+      setIvlNote('');
+      onNotify(
+        `Added ${cleanName} (${formatCurrency(numericAmt, tenant.currency)}) for ${res.items.length} learner(s) alongside fees — Core Fee Total unchanged.`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to add independent voteline', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openIndependentPayModal(item: IndependentVotelineItem) {
+    setIvlPayModalItem(item);
+    setIvlPayForm({
+      amount: String(item.balance),
+      method: 'Mobile Money',
+      reference: '',
+      paidAt: todayIsoDate(),
+    });
+  }
+
+  async function handleRecordIndependentPayment(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ivlPayModalItem) return;
+    const amt = Math.round(Number(ivlPayForm.amount));
+    if (!Number.isFinite(amt) || amt <= 0) {
+      onNotify('Enter a positive payment amount.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      await saasApi.recordIndependentVotelinePayment(tenant.id, ivlPayModalItem.id, {
+        amount: amt,
+        method: ivlPayForm.method,
+        reference: ivlPayForm.reference,
+        recordedBy: `${currentRole} Office`,
+        paidAt: ivlPayForm.paidAt,
+      });
+      await onRefresh();
+      setIvlPayModalItem(null);
+      onNotify(
+        `Recorded ${formatCurrency(Math.min(amt, ivlPayModalItem.balance), tenant.currency)} toward ${ivlPayModalItem.name} (${ivlPayModalItem.studentName}).`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to record payment', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDeleteIndependentVoteline(item: IndependentVotelineItem) {
+    setSaving(true);
+    try {
+      await saasApi.deleteIndependentVoteline(tenant.id, item.id);
+      await onRefresh();
+      onNotify(`Removed ${item.name} (${item.studentName}).`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to remove independent voteline', 'error');
     } finally {
       setSaving(false);
     }
@@ -1130,6 +1494,21 @@ export function FeesModule({
               }`}
             >
               Fee Structures
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('independent')}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'independent'
+                  ? 'bg-white text-blue-700 shadow-sm dark:bg-slate-700 dark:text-blue-300'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Independent Votelines
+              <span className="font-mono text-[10px] font-semibold text-slate-500 dark:text-slate-300">
+                ({independentVotelines.length})
+              </span>
             </button>
           </div>
 
@@ -1239,6 +1618,7 @@ export function FeesModule({
                     <th className="px-4 py-3 text-right">Billed</th>
                     <th className="px-4 py-3 text-right">Paid</th>
                     <th className="px-4 py-3 text-right">Balance</th>
+                    <th className="px-4 py-3">Alongside Fee (Independent)</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3 text-right">Action</th>
                   </tr>
@@ -1246,12 +1626,14 @@ export function FeesModule({
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {filteredInvoices.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
+                      <td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                         No invoices match your filter.
                       </td>
                     </tr>
                   ) : (
-                    filteredInvoices.map((inv) => (
+                    filteredInvoices.map((inv) => {
+                      const rowIndependent = getInvoiceIndependentVotelines(inv);
+                      return (
                       <tr key={inv.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
                         <td className="px-4 py-3">
                           <p className="font-mono text-xs font-medium text-slate-900 tabular-nums dark:text-slate-100">
@@ -1276,6 +1658,64 @@ export function FeesModule({
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-xs font-semibold text-slate-900 tabular-nums dark:text-slate-100">
                           {formatCurrency(inv.balance, tenant.currency)}
+                        </td>
+                        <td className="px-4 py-3 align-top">
+                          {rowIndependent.length === 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => jumpToAddIndependentForInvoice(inv)}
+                              className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-500 hover:border-blue-400 hover:text-blue-600 dark:border-slate-700 dark:text-slate-400 dark:hover:text-blue-400"
+                            >
+                              <Plus className="h-3 w-3" />
+                              Add Optional
+                            </button>
+                          ) : (
+                            <div className="space-y-1">
+                              {rowIndependent.map((ivl) => (
+                                <div
+                                  key={ivl.id}
+                                  className="flex items-center justify-between gap-2 rounded border border-slate-200 bg-slate-50/70 px-2 py-1 text-[11px] dark:border-slate-700 dark:bg-slate-800/60"
+                                >
+                                  <span className="truncate font-medium text-slate-800 dark:text-slate-200">
+                                    {ivl.name}
+                                  </span>
+                                  <div className="flex shrink-0 items-center gap-1.5">
+                                    <span
+                                      className={`font-mono tabular-nums font-semibold ${
+                                        ivl.balance === 0
+                                          ? 'text-emerald-700 dark:text-emerald-400'
+                                          : 'text-slate-900 dark:text-slate-100'
+                                      }`}
+                                    >
+                                      {formatCurrency(ivl.amount, tenant.currency)}
+                                      {ivl.balance > 0 && ivl.paidAmount > 0
+                                        ? ` (Bal ${formatCurrency(ivl.balance, tenant.currency)})`
+                                        : ivl.balance === 0
+                                        ? ' · Paid'
+                                        : ''}
+                                    </span>
+                                    {ivl.balance > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => openIndependentPayModal(ivl)}
+                                        className="font-semibold text-blue-600 hover:underline dark:text-blue-400"
+                                      >
+                                        Pay
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                              <button
+                                type="button"
+                                onClick={() => jumpToAddIndependentForInvoice(inv)}
+                                className="inline-flex items-center gap-0.5 text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                              >
+                                <Plus className="h-3 w-3" />
+                                Add Another
+                              </button>
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-xs font-semibold">
                           <span
@@ -1338,7 +1778,8 @@ export function FeesModule({
                           </div>
                         </td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1790,8 +2231,85 @@ export function FeesModule({
             </div>
           )}
         </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+      ) : activeTab === 'structures' ? (
+        <div className="space-y-5">
+          {lastSavedStructureKey &&
+            (() => {
+              const savedFs = feeStructures.find(
+                (f) => `${f.grade}::${f.term}` === lastSavedStructureKey
+              );
+              if (!savedFs) return null;
+              return (
+                <div className="flex flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50/70 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between dark:border-emerald-900/60 dark:bg-emerald-950/30">
+                  <div className="flex items-start gap-2.5 text-xs">
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
+                    <div>
+                      <p className="font-semibold text-emerald-950 dark:text-emerald-200">
+                        Fee structure saved for {savedFs.grade} ({savedFs.term}) —{' '}
+                        <span className="font-mono">
+                          {formatCurrency(savedFs.totalFee, tenant.currency)}
+                        </span>
+                      </p>
+                      <p className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+                        Download the branded PDF/Excel schedule or share it with parents &amp; staff.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShareStructureModal(savedFs)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
+                    >
+                      <Printer className="h-3.5 w-3.5" />
+                      Download / Print Fee Structure
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportStructureExcel(savedFs)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-300"
+                    >
+                      <FileSpreadsheet className="h-3.5 w-3.5" />
+                      Excel (.xlsx)
+                    </button>
+                    <a
+                      href={buildFeeStructureWhatsAppHref(savedFs)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-300"
+                    >
+                      <Share2 className="h-3.5 w-3.5" />
+                      Share WhatsApp
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => setLastSavedStructureKey(null)}
+                      aria-label="Dismiss saved fee structure banner"
+                      className="rounded p-1 text-emerald-700 hover:bg-emerald-100 dark:text-emerald-400 dark:hover:bg-emerald-900/50"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900">
+            <div className="text-xs text-slate-600 dark:text-slate-300">
+              <strong className="text-slate-900 dark:text-slate-100">
+                Optional / Auxiliary Votelines (e.g. Transport Fee, Academic Trip Fee):
+              </strong>{' '}
+              Enter them under <strong className="text-blue-700 dark:text-blue-400">Independent Votelines</strong> so they appear alongside student fees without changing any Grade Fee Structure Total.
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('independent')}
+              className="inline-flex shrink-0 items-center gap-1.5 self-start rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 whitespace-nowrap hover:bg-blue-100 sm:self-auto dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Manage Independent Votelines ({independentVotelines.length})
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           {/* Existing Configured Fee Templates */}
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white lg:col-span-6 dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
@@ -1800,7 +2318,7 @@ export function FeesModule({
                   Configured Fee Templates ({tenant.currency})
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  Each grade supports up to {MAX_FEE_VOTELINES} custom votelines. Click Edit to customize.
+                  Each grade supports up to {MAX_FEE_VOTELINES} custom votelines. Edit, download, or share any saved template.
                 </p>
               </div>
             </div>
@@ -1813,6 +2331,10 @@ export function FeesModule({
                 feeStructures.map((fs) => {
                   const lines = getStructureVotelines(fs);
                   const isEditingThis = fs.grade === structureGrade && fs.term === structureTerm;
+                  const indSummary = summarizeIndependentVotelinesForStructure(
+                    fs,
+                    independentVotelines
+                  );
                   return (
                     <div
                       key={fs.id}
@@ -1822,7 +2344,7 @@ export function FeesModule({
                           : 'hover:bg-slate-50/70 dark:hover:bg-slate-800/30'
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
                           <div className="flex items-center gap-2">
                             <span className="font-semibold text-slate-900 dark:text-slate-100">
@@ -1835,8 +2357,8 @@ export function FeesModule({
                           <p className="text-xs text-slate-500 dark:text-slate-400">{fs.term}</p>
                         </div>
 
-                        <div className="flex items-center gap-3">
-                          <div className="text-right">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="mr-1 text-right">
                             <span className="block text-[11px] text-slate-500 dark:text-slate-400">
                               Total Term Fee
                             </span>
@@ -1851,6 +2373,33 @@ export function FeesModule({
                           >
                             <Pencil className="h-3 w-3" />
                             Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShareStructureModal(fs)}
+                            title="Print / Download Fee Structure with School Logo & Contacts"
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                          >
+                            <Download className="h-3 w-3" />
+                            PDF / Print
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportStructureExcel(fs)}
+                            title="Export Fee Structure to Excel (.xlsx)"
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                          >
+                            <FileSpreadsheet className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                            Excel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShareStructureModal(fs)}
+                            title="Share Fee Structure via WhatsApp or Copy Text"
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300"
+                          >
+                            <Share2 className="h-3 w-3" />
+                            Share
                           </button>
                         </div>
                       </div>
@@ -1873,6 +2422,20 @@ export function FeesModule({
                           </div>
                         ))}
                       </div>
+
+                      {indSummary.lines.length > 0 && (
+                        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/80 bg-slate-50/70 px-3 py-1.5 text-[11px] dark:border-slate-800 dark:bg-slate-800/40">
+                          <span className="truncate text-slate-600 dark:text-slate-300">
+                            <strong className="text-slate-800 dark:text-slate-100">
+                              Independent (Separate):
+                            </strong>{' '}
+                            {indSummary.lines.map((l) => l.name).join(', ')}
+                          </span>
+                          <span className="shrink-0 font-mono font-semibold text-slate-800 tabular-nums dark:text-slate-200">
+                            {formatCurrency(indSummary.separateScheduleTotal, tenant.currency)}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -2060,6 +2623,341 @@ export function FeesModule({
             </button>
           </form>
         </div>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {/* Independent Votelines KPI Summary Strip */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Independent Votelines Charged
+              </p>
+              <p className="mt-1.5 font-mono text-xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
+                {formatCurrency(independentMetrics.totalCharged, tenant.currency)}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                {independentMetrics.count} item(s) · Excluded from Fee Total
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Independent Collections
+              </p>
+              <p className="mt-1.5 font-mono text-xl font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
+                {formatCurrency(independentMetrics.totalPaid, tenant.currency)}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                Tracked separately from tuition invoices
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Independent Balance
+              </p>
+              <p className="mt-1.5 font-mono text-xl font-bold text-amber-700 tabular-nums dark:text-amber-400">
+                {formatCurrency(independentMetrics.totalBalance, tenant.currency)}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                Appears alongside fees on ledger &amp; receipts
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
+            {/* Left: Create Independent Voteline Form */}
+            <form
+              onSubmit={handleCreateIndependentVoteline}
+              className="rounded-xl border border-slate-200 bg-white p-5 xl:col-span-4 dark:border-slate-800 dark:bg-slate-900"
+            >
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Add Independent Voteline
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                Add charges such as Transport Fee or Academic Trip Fee. They never alter Fee Structure totals and appear alongside the learner&apos;s fee.
+              </p>
+
+              {/* Quick Preset Chips */}
+              <div className="mt-3">
+                <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  Quick Presets
+                </span>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {INDEPENDENT_VOTELINE_PRESETS.map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setIvlName(preset)}
+                      className={`rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${
+                        ivlName.trim().toLowerCase() === preset.toLowerCase()
+                          ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500 dark:bg-blue-950/50 dark:text-blue-300'
+                          : 'border-slate-200 text-slate-600 hover:border-blue-400 hover:text-blue-600 dark:border-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Voteline Name *
+                  </label>
+                  <input
+                    required
+                    type="text"
+                    value={ivlName}
+                    onChange={(e) => setIvlName(e.target.value)}
+                    placeholder="e.g. Transport Fee or Academic Trip Fee"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Amount ({tenant.currency}) *
+                    </label>
+                    <input
+                      required
+                      type="number"
+                      min={1}
+                      value={ivlAmount}
+                      onChange={(e) => setIvlAmount(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Academic Term
+                    </label>
+                    <input
+                      type="text"
+                      value={ivlTerm}
+                      onChange={(e) => setIvlTerm(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Assign To
+                  </label>
+                  <select
+                    value={ivlScope}
+                    onChange={(e) =>
+                      setIvlScope(e.target.value as 'student' | 'grade' | 'all')
+                    }
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    <option value="student">Specific Learner</option>
+                    <option value="grade">Whole Grade / Class</option>
+                    <option value="all">All Active Learners ({students.filter((s) => s.status === 'Active').length})</option>
+                  </select>
+                </div>
+
+                {ivlScope === 'student' && (
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Learner *
+                    </label>
+                    <select
+                      value={ivlStudentId}
+                      onChange={(e) => setIvlStudentId(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      {students.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.fullName} ({s.studentCode} · {s.grade})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {ivlScope === 'grade' && (
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Target Grade *
+                    </label>
+                    <select
+                      value={ivlGrade}
+                      onChange={(e) => setIvlGrade(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      {tenant.grades.map((g) => (
+                        <option key={g} value={g}>
+                          {g} ({students.filter((s) => s.grade === g).length} learners)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Description / Route / Trip Note (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={ivlNote}
+                    onChange={(e) => setIvlNote(e.target.value)}
+                    placeholder="e.g. Route B — Kilimani or Naivasha Science Trip"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+                  Core Tuition / Grade Fee Total remains strictly unaffected.
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={saving || students.length === 0}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {saving ? 'Adding...' : 'Add Independent Voteline'}
+                </button>
+              </div>
+            </form>
+
+            {/* Right: Independent Votelines Ledger */}
+            <div className="rounded-xl border border-slate-200 bg-white xl:col-span-8 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex flex-col gap-3 border-b border-slate-200 p-4 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                    Independent Votelines Alongside Fees ({filteredIndependentVotelines.length})
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Billed and collected alongside student fees without altering Grade Fee Totals.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative w-full sm:w-52">
+                    <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={ivlSearch}
+                      onChange={(e) => setIvlSearch(e.target.value)}
+                      placeholder="Filter learner or voteline..."
+                      className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pr-2.5 pl-8 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                  <select
+                    value={ivlStatusFilter}
+                    onChange={(e) => setIvlStatusFilter(e.target.value as 'All' | InvoiceStatus)}
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  >
+                    <option value="All">All Statuses</option>
+                    <option value="Pending">Pending</option>
+                    <option value="Partial">Partial</option>
+                    <option value="Paid">Paid</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[680px] text-left text-xs">
+                  <thead className="border-b border-slate-200 bg-slate-50/70 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">Learner</th>
+                      <th className="px-4 py-3">Independent Voteline</th>
+                      <th className="px-4 py-3 text-right">Charged</th>
+                      <th className="px-4 py-3 text-right">Paid</th>
+                      <th className="px-4 py-3 text-right">Balance</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {filteredIndependentVotelines.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-10 text-center text-xs text-slate-500 dark:text-slate-400">
+                          No independent votelines match your filters. Add Transport Fee, Academic Trip Fee, or optional levies on the left.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredIndependentVotelines.map((item) => (
+                        <tr key={item.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
+                          <td className="px-4 py-3 align-top">
+                            <p className="font-semibold text-slate-900 dark:text-slate-100">
+                              {item.studentName}
+                            </p>
+                            <p className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                              {item.studentCode} · {item.grade}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3 align-top">
+                            <p className="font-semibold text-slate-900 dark:text-slate-100">
+                              {item.name}
+                            </p>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                              {item.term}
+                              {item.invoiceNumber ? ` · Alongside ${item.invoiceNumber}` : ''}
+                            </p>
+                            {item.note && (
+                              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                {item.note}
+                              </p>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right align-top font-mono text-slate-700 tabular-nums dark:text-slate-300">
+                            {formatCurrency(item.amount, tenant.currency)}
+                          </td>
+                          <td className="px-4 py-3 text-right align-top font-mono text-emerald-700 tabular-nums dark:text-emerald-400">
+                            {formatCurrency(item.paidAmount, tenant.currency)}
+                          </td>
+                          <td className="px-4 py-3 text-right align-top font-mono font-bold text-slate-900 tabular-nums dark:text-slate-100">
+                            {formatCurrency(item.balance, tenant.currency)}
+                          </td>
+                          <td className="px-4 py-3 align-top">
+                            <span
+                              className={`inline-block rounded border px-2 py-0.5 text-[11px] font-semibold ${
+                                item.status === 'Paid'
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                  : item.status === 'Partial'
+                                  ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300'
+                                  : 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
+                              }`}
+                            >
+                              {item.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right align-top">
+                            <div className="inline-flex items-center gap-2">
+                              {item.balance > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => openIndependentPayModal(item)}
+                                  className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:underline dark:text-blue-400"
+                                >
+                                  <CreditCard className="h-3.5 w-3.5" />
+                                  Collect
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={saving}
+                                onClick={() => handleDeleteIndependentVoteline(item)}
+                                aria-label={`Delete ${item.name}`}
+                                className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Record Payment Modal */}
@@ -2168,70 +3066,57 @@ export function FeesModule({
 
       {/* Printable Official Fee Receipt Modal (Proportional Voteline Allocation + Fee Balance) */}
       {receiptInvoice && receiptBreakdown && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
-          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
-            {/* Official School Receipt Header */}
-            <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-800">
-              <div>
-                <p className="text-[11px] font-semibold tracking-wide text-blue-600 uppercase dark:text-blue-400">
-                  Official Fee Receipt
-                </p>
-                <h2 className="mt-0.5 text-lg font-bold text-slate-900 dark:text-slate-100">
-                  {tenant.name}
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {tenant.location} · Invoice{' '}
-                  <span className="font-mono font-semibold text-slate-700 dark:text-slate-200">
-                    {receiptInvoice.invoiceNumber}
-                  </span>
-                  {receiptBreakdown.activePayment && (
-                    <>
-                      {' '}
-                      · Receipt{' '}
-                      <span className="font-mono font-semibold text-emerald-700 dark:text-emerald-400">
-                        {receiptBreakdown.activePayment.receiptNumber}
-                      </span>
-                    </>
-                  )}
-                </p>
-              </div>
-              <div className="flex items-center gap-2 no-print">
-                {receiptInvoice.balance > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const targetInv = receiptInvoice;
-                      setReceiptInvoice(null);
-                      setSelectedReceiptPaymentId('LATEST');
-                      openReminderModalForInvoice(targetInv);
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300"
-                  >
-                    <MessageCircle className="h-3.5 w-3.5" />
-                    Remind Balance
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => window.print()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                >
-                  <Printer className="h-3.5 w-3.5" />
-                  Print Receipt
-                </button>
+        <div className="print-modal-root fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="print-modal-sheet max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="mb-3 flex flex-wrap items-center justify-end gap-2 no-print">
+              {receiptInvoice.balance > 0 && (
                 <button
                   type="button"
                   onClick={() => {
+                    const targetInv = receiptInvoice;
                     setReceiptInvoice(null);
                     setSelectedReceiptPaymentId('LATEST');
+                    openReminderModalForInvoice(targetInv);
                   }}
-                  aria-label="Close receipt"
-                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300"
                 >
-                  <X className="h-4 w-4" />
+                  <MessageCircle className="h-3.5 w-3.5" />
+                  Remind Balance
                 </button>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Print Receipt
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setReceiptInvoice(null);
+                  setSelectedReceiptPaymentId('LATEST');
+                }}
+                aria-label="Close receipt"
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
+
+            <TenantDocumentHeader
+              tenant={tenant}
+              documentTitle="Official Fee Receipt"
+              subtitle={`${tenant.academicYear} · ${receiptInvoice.term}`}
+              rightMeta={[
+                { label: 'Invoice', value: receiptInvoice.invoiceNumber },
+                ...(receiptBreakdown.activePayment
+                  ? [{ label: 'Receipt', value: receiptBreakdown.activePayment.receiptNumber }]
+                  : []),
+              ]}
+              compact
+            />
 
             {/* Student & Payment Metadata */}
             <div className="mt-4 grid grid-cols-2 gap-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 text-xs sm:grid-cols-4 dark:border-slate-800 dark:bg-slate-800/40">
@@ -2460,6 +3345,76 @@ export function FeesModule({
                 </span>
               </div>
             </div>
+
+            {/* Independent Votelines Appearing Alongside Fee (Excluded from Fee Total) */}
+            {(() => {
+              const receiptIndependent = getInvoiceIndependentVotelines(receiptInvoice);
+              if (receiptIndependent.length === 0) return null;
+              return (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Independent Votelines (Alongside Fee · Excluded from Fee Total)
+                    </h3>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Does not alter Tuition / Fee Total
+                    </span>
+                  </div>
+                  <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400">
+                        <tr>
+                          <th className="px-3 py-2">Independent Voteline</th>
+                          <th className="px-3 py-2">Notes</th>
+                          <th className="px-3 py-2 text-right">Charged</th>
+                          <th className="px-3 py-2 text-right">Paid</th>
+                          <th className="px-3 py-2 text-right">Balance</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {receiptIndependent.map((ivl) => (
+                          <tr key={ivl.id}>
+                            <td className="px-3 py-2 font-medium text-slate-900 dark:text-slate-100">
+                              {ivl.name}
+                            </td>
+                            <td className="px-3 py-2 text-slate-500 dark:text-slate-400">
+                              {ivl.note || ivl.term}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                              {formatCurrency(ivl.amount, tenant.currency)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono tabular-nums text-emerald-700 dark:text-emerald-400">
+                              {formatCurrency(ivl.paidAmount, tenant.currency)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                              {formatCurrency(ivl.balance, tenant.currency)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {tenant.mpesaConfig?.enabled && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-400">
+                <span>
+                  M-Pesa Paybill:{' '}
+                  <strong className="font-mono text-slate-900 dark:text-slate-100">
+                    {tenant.mpesaConfig.paybillNumber}
+                  </strong>{' '}
+                  ({tenant.mpesaConfig.accountName})
+                </span>
+                <span>
+                  Account No:{' '}
+                  <strong className="font-mono text-slate-900 dark:text-slate-100">
+                    {receiptInvoice.studentCode}
+                  </strong>
+                </span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2784,7 +3739,9 @@ export function FeesModule({
                             type="text"
                             value={reminderCustomNote}
                             onChange={(e) => setReminderCustomNote(e.target.value)}
-                            placeholder="e.g. Kindly clear before end-of-term exams via Paybill 522522."
+                            placeholder={`e.g. Kindly clear before end-of-term exams via Paybill ${
+                              tenant.mpesaConfig?.paybillNumber || '522522'
+                            }.`}
                             className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                           />
                         </div>
@@ -2857,6 +3814,362 @@ export function FeesModule({
           </div>
         </div>
       )}
+
+      {/* Record Independent Voteline Payment Modal */}
+      {ivlPayModalItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  Collect Independent Voteline
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  {ivlPayModalItem.name} · {ivlPayModalItem.studentName} ({ivlPayModalItem.studentCode})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIvlPayModalItem(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRecordIndependentPayment} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Payment Amount (Balance: {formatCurrency(ivlPayModalItem.balance, tenant.currency)})
+                </label>
+                <input
+                  required
+                  type="number"
+                  min={1}
+                  max={ivlPayModalItem.balance}
+                  value={ivlPayForm.amount}
+                  onChange={(e) => setIvlPayForm({ ...ivlPayForm, amount: e.target.value })}
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Payment Method
+                  </label>
+                  <select
+                    value={ivlPayForm.method}
+                    onChange={(e) =>
+                      setIvlPayForm({ ...ivlPayForm, method: e.target.value as PaymentMethod })
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {PAYMENT_METHODS.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Payment Date
+                  </label>
+                  <input
+                    type="date"
+                    value={ivlPayForm.paidAt}
+                    onChange={(e) => setIvlPayForm({ ...ivlPayForm, paidAt: e.target.value })}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Transaction Reference
+                </label>
+                <input
+                  type="text"
+                  value={ivlPayForm.reference}
+                  onChange={(e) => setIvlPayForm({ ...ivlPayForm, reference: e.target.value })}
+                  placeholder="e.g. MPESA-TRN882 or CASH-102"
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Settles this independent voteline only — core Tuition Fee Invoice Totals remain unchanged.
+              </p>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIvlPayModalItem(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {saving ? 'Recording...' : 'Confirm Payment'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Printable & Shareable Fee Structure Modal */}
+      {shareStructureModal &&
+        (() => {
+          const modalLines = getStructureVotelines(shareStructureModal);
+          const safeTotal = Math.max(1, shareStructureModal.totalFee);
+          const independentSummary = summarizeIndependentVotelinesForStructure(
+            shareStructureModal,
+            independentVotelines
+          );
+          return (
+            <div className="print-modal-root fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4">
+              <div className="print-modal-sheet my-6 max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 no-print">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => window.print()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                    >
+                      <Printer className="h-3.5 w-3.5" />
+                      Print / Save PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportStructureExcel(shareStructureModal)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                      Download Excel (.xlsx)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyFeeStructureText(shareStructureModal)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      {copiedStructureId === shareStructureModal.id ? 'Copied' : 'Copy Text'}
+                    </button>
+                    <a
+                      href={buildFeeStructureWhatsAppHref(shareStructureModal)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                    >
+                      <MessageCircle className="h-3.5 w-3.5" />
+                      Share WhatsApp
+                    </a>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShareStructureModal(null)}
+                    aria-label="Close fee structure preview"
+                    className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+
+                <TenantDocumentHeader
+                  tenant={tenant}
+                  documentTitle="Official Fee Structure"
+                  subtitle={`${shareStructureModal.grade} · ${shareStructureModal.term}`}
+                  rightMeta={[
+                    { label: 'Academic Year', value: tenant.academicYear },
+                    { label: 'Currency', value: tenant.currency },
+                  ]}
+                />
+
+                {/* Main Fee Structure Votelines */}
+                <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+                  <table className="w-full text-left text-xs">
+                    <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400">
+                      <tr>
+                        <th className="w-10 px-3.5 py-2.5">#</th>
+                        <th className="px-3.5 py-2.5">Votehead / Voteline Description</th>
+                        <th className="px-3.5 py-2.5 text-right">Share</th>
+                        <th className="px-3.5 py-2.5 text-right">
+                          Amount ({tenant.currency})
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {modalLines.map((line, idx) => (
+                        <tr key={line.id}>
+                          <td className="px-3.5 py-2 font-mono text-slate-400 tabular-nums">
+                            {idx + 1}
+                          </td>
+                          <td className="px-3.5 py-2 font-medium text-slate-900 dark:text-slate-100">
+                            {line.name}
+                          </td>
+                          <td className="px-3.5 py-2 text-right font-mono text-slate-500 tabular-nums dark:text-slate-400">
+                            {((line.amount / safeTotal) * 100).toFixed(1)}%
+                          </td>
+                          <td className="px-3.5 py-2 text-right font-mono font-semibold text-slate-900 tabular-nums dark:text-slate-100">
+                            {formatCurrency(line.amount, tenant.currency)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="border-t border-slate-200 bg-slate-50/80 font-bold dark:border-slate-800 dark:bg-slate-800/60">
+                      <tr>
+                        <td colSpan={3} className="px-3.5 py-3 text-slate-900 dark:text-slate-100">
+                          Total Term Fee ({shareStructureModal.grade} · {shareStructureModal.term})
+                        </td>
+                        <td className="px-3.5 py-3 text-right font-mono text-sm text-blue-700 tabular-nums dark:text-blue-400">
+                          {formatCurrency(shareStructureModal.totalFee, tenant.currency)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {/* Independent Votelines Section (Strictly Separate Totals from Main Fee Structure) */}
+                <div className="mt-5 break-inside-avoid">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                        Independent / Auxiliary Votelines (Separate from Main Fee Structure)
+                      </h3>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Optional or route-specific charges (e.g. Transport Fee, Academic Trip Fee) billed separately with an independent subtotal.
+                      </p>
+                    </div>
+                    {independentSummary.lines.length === 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIvlScope('grade');
+                          setIvlGrade(shareStructureModal.grade);
+                          setIvlTerm(shareStructureModal.term);
+                          setShareStructureModal(null);
+                          setActiveTab('independent');
+                        }}
+                        className="no-print inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300"
+                      >
+                        <Plus className="h-3 w-3" />
+                        Add Independent Voteline
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400">
+                        <tr>
+                          <th className="w-10 px-3.5 py-2">#</th>
+                          <th className="px-3.5 py-2">Independent Voteline</th>
+                          <th className="px-3.5 py-2">Scope / Description</th>
+                          <th className="px-3.5 py-2 text-right">
+                            Amount ({tenant.currency})
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {independentSummary.lines.length === 0 ? (
+                          <tr>
+                            <td
+                              colSpan={4}
+                              className="px-3.5 py-3 text-center text-[11px] text-slate-500 dark:text-slate-400"
+                            >
+                              No independent votelines assigned for {shareStructureModal.grade} ({shareStructureModal.term}).
+                            </td>
+                          </tr>
+                        ) : (
+                          independentSummary.lines.map((item, idx) => (
+                            <tr key={item.key}>
+                              <td className="px-3.5 py-2 font-mono text-slate-400 tabular-nums">
+                                {idx + 1}
+                              </td>
+                              <td className="px-3.5 py-2 font-medium text-slate-900 dark:text-slate-100">
+                                {item.name}
+                              </td>
+                              <td className="px-3.5 py-2 text-[11px] text-slate-500 dark:text-slate-400">
+                                {item.note ||
+                                  `${item.learnerCount} ${
+                                    item.learnerCount === 1 ? 'learner' : 'learners'
+                                  } assigned`}
+                              </td>
+                              <td className="px-3.5 py-2 text-right font-mono font-semibold text-slate-900 tabular-nums dark:text-slate-100">
+                                {formatCurrency(item.unitAmount, tenant.currency)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      <tfoot className="border-t border-slate-200 bg-slate-50/80 font-bold dark:border-slate-800 dark:bg-slate-800/60">
+                        <tr>
+                          <td colSpan={3} className="px-3.5 py-2.5 text-slate-900 dark:text-slate-100">
+                            Independent Votelines Total (Separate · Excluded from Main Fee Structure)
+                          </td>
+                          <td className="px-3.5 py-2.5 text-right font-mono text-sm text-emerald-700 tabular-nums dark:text-emerald-400">
+                            {formatCurrency(
+                              independentSummary.separateScheduleTotal,
+                              tenant.currency
+                            )}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  {/* Clear Side-by-Side Totals Separation Strip */}
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3.5 py-2.5 dark:border-slate-800 dark:bg-slate-800/40">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Main Fee Structure Total
+                      </span>
+                      <span className="mt-0.5 block font-mono text-sm font-bold text-blue-700 tabular-nums dark:text-blue-400">
+                        {formatCurrency(shareStructureModal.totalFee, tenant.currency)}
+                      </span>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3.5 py-2.5 dark:border-slate-800 dark:bg-slate-800/40">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Independent Votelines Total (Separate)
+                      </span>
+                      <span className="mt-0.5 block font-mono text-sm font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
+                        {formatCurrency(
+                          independentSummary.separateScheduleTotal,
+                          tenant.currency
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {tenant.mpesaConfig?.enabled && (
+                  <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/80 px-4 py-3 text-xs dark:border-slate-800 dark:bg-slate-800/50">
+                    <p className="font-semibold text-slate-900 dark:text-slate-100">
+                      Settlement Instructions
+                    </p>
+                    <p className="mt-1 text-slate-600 dark:text-slate-300">
+                      Lipa na M-Pesa Paybill:{' '}
+                      <strong className="font-mono text-slate-900 dark:text-slate-100">
+                        {tenant.mpesaConfig.paybillNumber}
+                      </strong>{' '}
+                      ({tenant.mpesaConfig.accountName}) · Account Number:{' '}
+                      <strong className="font-mono text-slate-900 dark:text-slate-100">
+                        Learner Admission Code
+                      </strong>
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }

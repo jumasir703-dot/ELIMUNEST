@@ -33,6 +33,9 @@ export interface ProvisionTenantPayload {
   plan?: TenantPlan;
   status?: TenantStatus;
   location?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  postalAddress?: string;
   branding?: Partial<TenantBranding>;
   grades?: string[];
   subjects?: string[];
@@ -49,6 +52,9 @@ export interface UpdateTenantMetadataPayload {
   currentTerm?: string;
   currency?: CurrencyCode;
   location?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  postalAddress?: string;
   plan?: TenantPlan;
   status?: TenantStatus;
   branding?: Partial<TenantBranding>;
@@ -68,6 +74,9 @@ export interface UpdateTenantBrandingPayload {
   name?: string;
   emailDomain?: string;
   location?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  postalAddress?: string;
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
@@ -170,19 +179,19 @@ export class PlatformAdminService {
   }
 
   private assertTenantScope(actor: AdminActor, tenantId: string) {
-    if (actor.role === 'Super Admin' || actor.role === 'Developer') return;
-    if (actor.tenantId && actor.tenantId !== tenantId) {
+    if (actor.role === 'Developer') return;
+    if (!actor.tenantId || actor.tenantId === 'platform' || actor.tenantId !== tenantId) {
       throw new ConflictError(
-        'Forbidden: School Administrators may only manage their own school tenant.',
+        'Forbidden: Super Admin and School Administrators may only view and modify their own school.',
         403
       );
     }
   }
 
-  private assertSuperAdmin(actor: AdminActor) {
-    if (actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+  private assertPlatformDeveloper(actor: AdminActor) {
+    if (actor.role !== 'Developer') {
       throw new ConflictError(
-        'Forbidden: Platform Super Admin privileges are required for multi-tenant provisioning or deletion.',
+        'Forbidden: Only Platform Developers may add, delete, or view the multi-tenant directory.',
         403
       );
     }
@@ -210,8 +219,11 @@ export class PlatformAdminService {
   listTenantSummaries(actor: AdminActor): SuperAdminTenantSummary[] {
     const verified = this.assertAuthorized(actor);
     const all = this.repository.getSuperAdminOverview();
-    if (verified.role === 'Super Admin' || verified.role === 'Developer' || !verified.tenantId) {
+    if (verified.role === 'Developer') {
       return all;
+    }
+    if (!verified.tenantId || verified.tenantId === 'platform') {
+      return [];
     }
     return all.filter((s) => s.tenant.id === verified.tenantId);
   }
@@ -219,8 +231,11 @@ export class PlatformAdminService {
   listTenants(actor: AdminActor): Tenant[] {
     const verified = this.assertAuthorized(actor);
     const all = this.repository.listTenants();
-    if (verified.role === 'Super Admin' || verified.role === 'Developer' || !verified.tenantId) {
+    if (verified.role === 'Developer') {
       return all;
+    }
+    if (!verified.tenantId || verified.tenantId === 'platform') {
+      return [];
     }
     return all.filter((t) => t.id === verified.tenantId);
   }
@@ -234,8 +249,11 @@ export class PlatformAdminService {
   listAuditLogs(actor: AdminActor, limit = 50): AdminAuditEntry[] {
     const verified = this.assertAuthorized(actor);
     const logs = this.repository.listAdminAuditLogs(limit);
-    if (verified.role === 'Super Admin' || verified.role === 'Developer' || !verified.tenantId) {
+    if (verified.role === 'Developer') {
       return logs;
+    }
+    if (!verified.tenantId || verified.tenantId === 'platform') {
+      return [];
     }
     return logs.filter((entry) => entry.tenantId === verified.tenantId);
   }
@@ -245,7 +263,7 @@ export class PlatformAdminService {
     rawInput: ProvisionTenantPayload
   ): { tenant: Tenant; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
-    this.assertSuperAdmin(verifiedActor);
+    this.assertPlatformDeveloper(verifiedActor);
     const name = typeof rawInput?.name === 'string' ? rawInput.name.trim() : '';
     if (name.length < 2) {
       throw new ConflictError('School / tenant name must be at least 2 characters.', 400);
@@ -297,6 +315,9 @@ export class PlatformAdminService {
       plan,
       status,
       location: (rawInput.location || '').trim() || 'Nairobi, KE',
+      contactEmail: rawInput.contactEmail?.trim(),
+      contactPhone: rawInput.contactPhone?.trim(),
+      postalAddress: rawInput.postalAddress?.trim(),
       branding: {
         primaryColor,
         accentColor,
@@ -349,6 +370,16 @@ export class PlatformAdminService {
     if (rawPatch.status !== undefined && !ALLOWED_STATUSES.has(rawPatch.status)) {
       throw new ConflictError(`Unsupported status "${String(rawPatch.status)}".`, 400);
     }
+    if (
+      verifiedActor.role !== 'Developer' &&
+      ((rawPatch.plan !== undefined && rawPatch.plan !== existing.plan) ||
+        (rawPatch.status !== undefined && rawPatch.status !== (existing.status || 'Active')))
+    ) {
+      throw new ConflictError(
+        'Forbidden: Only Platform Developers may alter SaaS subscription tiers or tenant status.',
+        403
+      );
+    }
 
     let validatedBranding: Partial<TenantBranding> | undefined;
     if (rawPatch.branding) {
@@ -378,6 +409,9 @@ export class PlatformAdminService {
       currentTerm: rawPatch.currentTerm?.trim(),
       currency: rawPatch.currency,
       location: rawPatch.location?.trim(),
+      contactEmail: rawPatch.contactEmail?.trim(),
+      contactPhone: rawPatch.contactPhone?.trim(),
+      postalAddress: rawPatch.postalAddress?.trim(),
       plan: rawPatch.plan,
       status: rawPatch.status,
       branding: validatedBranding,
@@ -429,7 +463,7 @@ export class PlatformAdminService {
   ): { tenant: Tenant; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
     this.assertTenantScope(verifiedActor, tenantId);
-    this.repository.getTenantById(tenantId);
+    const existing = this.repository.getTenantById(tenantId);
 
     if (rawInput.name !== undefined && !rawInput.name.trim()) {
       throw new ConflictError('School name cannot be blank.', 400);
@@ -442,6 +476,16 @@ export class PlatformAdminService {
     }
     if (rawInput.status !== undefined && !ALLOWED_STATUSES.has(rawInput.status)) {
       throw new ConflictError(`Unsupported status "${String(rawInput.status)}".`, 400);
+    }
+    if (
+      verifiedActor.role !== 'Developer' &&
+      ((rawInput.plan !== undefined && rawInput.plan !== existing.plan) ||
+        (rawInput.status !== undefined && rawInput.status !== (existing.status || 'Active')))
+    ) {
+      throw new ConflictError(
+        'Forbidden: Only Platform Developers may alter SaaS subscription tiers or tenant status.',
+        403
+      );
     }
 
     let validatedBranding: Partial<TenantBranding> | undefined;
@@ -468,6 +512,9 @@ export class PlatformAdminService {
       name: rawInput.name?.trim(),
       emailDomain: rawInput.emailDomain?.trim(),
       location: rawInput.location?.trim(),
+      contactEmail: rawInput.contactEmail?.trim(),
+      contactPhone: rawInput.contactPhone?.trim(),
+      postalAddress: rawInput.postalAddress?.trim(),
       curriculum: rawInput.curriculum?.trim(),
       academicYear: rawInput.academicYear?.trim(),
       currentTerm: rawInput.currentTerm?.trim(),
@@ -494,7 +541,7 @@ export class PlatformAdminService {
     tenantId: string
   ): { deleted: boolean; remainingTenants: Tenant[]; auditEntry: AdminAuditEntry } {
     const verifiedActor = this.assertAuthorized(actor);
-    this.assertSuperAdmin(verifiedActor);
+    this.assertPlatformDeveloper(verifiedActor);
     const target = this.repository.getTenantById(tenantId);
     const result = this.repository.deleteTenant(tenantId);
 

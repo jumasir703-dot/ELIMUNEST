@@ -80,12 +80,7 @@ const DEVELOPER_ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<DeveloperPermissi
     'dev:impersonate',
     'dev:telemetry',
   ]),
-  'Super Admin': new Set<DeveloperPermission>([
-    'dev:tenants',
-    'dev:subscriptions',
-    'dev:impersonate',
-    'dev:telemetry',
-  ]),
+  'Super Admin': new Set<DeveloperPermission>(),
   Admin: new Set<DeveloperPermission>(),
   Registrar: new Set<DeveloperPermission>(),
   Teacher: new Set<DeveloperPermission>(),
@@ -135,7 +130,7 @@ const PRIVILEGED_ROLES: ReadonlySet<UserRole> = new Set<UserRole>([
   'Super Admin',
   'Admin',
 ]);
-const DEVELOPER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>(['Developer', 'Super Admin']);
+const DEVELOPER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>(['Developer']);
 
 export function isPrivilegedAdminRole(
   role: unknown
@@ -143,7 +138,7 @@ export function isPrivilegedAdminRole(
   return typeof role === 'string' && PRIVILEGED_ROLES.has(role as UserRole);
 }
 
-export function isDeveloperRole(role: unknown): role is 'Developer' | 'Super Admin' {
+export function isDeveloperRole(role: unknown): role is 'Developer' {
   return typeof role === 'string' && DEVELOPER_ROLES.has(role as UserRole);
 }
 

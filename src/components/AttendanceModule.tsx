@@ -12,6 +12,11 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { TenantDocumentHeader } from './TenantDocumentHeader';
+import {
+  loadLogoPngDataUrl,
+  resolveTenantDocumentMeta,
+} from '../lib/documentBranding';
 import { saasApi } from '../lib/api';
 import {
   addDaysIso,
@@ -789,7 +794,7 @@ export function AttendanceModule({
     };
   }, [noteSource, tenant.name]);
 
-  function handleDownloadOfficialNote() {
+  async function handleDownloadOfficialNote() {
     if (!officialNoteDetails) return;
     if (!officialNoteDetails.hasReason) {
       onNotify(
@@ -799,12 +804,15 @@ export function AttendanceModule({
       return;
     }
 
+    const meta = resolveTenantDocumentMeta(tenant);
+    const logoPng = await loadLogoPngDataUrl(meta.logoUrl, 128);
+
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const pageWidth = doc.internal.pageSize.getWidth();
     const centerX = pageWidth / 2;
-    const cardWidth = 152;
+    const cardWidth = 156;
     const cardX = (pageWidth - cardWidth) / 2;
-    const cardTop = 24;
+    const cardTop = 20;
     const innerWidth = cardWidth - 20;
 
     doc.setFont('helvetica', 'normal');
@@ -817,33 +825,56 @@ export function AttendanceModule({
       innerWidth
     ) as string[];
 
+    const logoBlockHeight = logoPng ? 18 : 0;
     const bodyLineHeight = 5.4;
     const reasonLineHeight = 4.8;
     const cardHeight =
-      36 +
+      46 +
+      logoBlockHeight +
       bodyLines.length * bodyLineHeight +
       28 +
       reasonLines.length * reasonLineHeight +
-      24;
+      26;
 
     doc.setFillColor(255, 255, 255);
     doc.setDrawColor(203, 213, 225);
     doc.roundedRect(cardX, cardTop, cardWidth, cardHeight, 3, 3, 'FD');
 
-    let y = cardTop + 12;
+    let y = cardTop + 10;
+
+    if (logoPng) {
+      try {
+        doc.addImage(logoPng, 'PNG', centerX - 8, y, 16, 16);
+        y += 20;
+      } catch {
+        // continue without image if canvas conversion failed
+      }
+    }
 
     doc.setTextColor(15, 23, 42);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(13.5);
-    doc.text(tenant.name, centerX, y, { align: 'center' });
+    doc.text(meta.schoolName, centerX, y, { align: 'center' });
+
+    y += 4.8;
+    doc.setTextColor(71, 85, 105);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.text(
+      `${meta.location} | ${meta.postalAddress} | Tel: ${meta.contactPhone} | ${meta.contactEmail}`,
+      centerX,
+      y,
+      { align: 'center', maxWidth: innerWidth }
+    );
 
     y += 5.5;
-    doc.setTextColor(71, 85, 105);
+    doc.setTextColor(37, 99, 235);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8.5);
     doc.text('OFFICIAL LEAVE OUT NOTE', centerX, y, { align: 'center' });
 
-    y += 5;
+    y += 4.8;
+    doc.setTextColor(71, 85, 105);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.text(`Date: ${officialNoteDetails.currentDateLabel}`, centerX, y, {
@@ -1444,17 +1475,14 @@ export function AttendanceModule({
 
                   <div
                     id="leave-out-official-note-print"
-                    className="hidden mx-auto max-w-2xl rounded-lg border border-slate-300 bg-white p-6 text-center text-slate-900"
+                    className="hidden mx-auto max-w-2xl rounded-lg border border-slate-300 bg-white p-6 text-slate-900"
                   >
-                    <div className="flex flex-col items-center gap-1 border-b border-slate-200 pb-3 text-center">
-                      <p className="text-base font-bold text-slate-900">{tenant.name}</p>
-                      <p className="text-[11px] font-semibold tracking-wider text-slate-600 uppercase">
-                        Official Leave Out Note
-                      </p>
-                      <p className="font-mono text-xs text-slate-600 tabular-nums">
-                        Date: {officialNoteDetails.currentDateLabel}
-                      </p>
-                    </div>
+                    <TenantDocumentHeader
+                      tenant={tenant}
+                      documentTitle="Official Leave Out Note"
+                      subtitle={`Issued: ${officialNoteDetails.currentDateLabel}`}
+                      compact
+                    />
 
                     <p className="mx-auto mt-3 max-w-xl text-center text-sm leading-relaxed text-slate-800">
                       {officialNoteDetails.bodyText}

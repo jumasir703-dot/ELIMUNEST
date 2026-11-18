@@ -204,8 +204,74 @@ app.post('/api/auth/register-tenant', (req, res, next) => {
   }
 });
 
+app.post('/api/auth/forgot-password/request', (req, res, next) => {
+  try {
+    const result = store.requestPasswordResetByPhone(req.body || {});
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/auth/forgot-password/verify', (req, res, next) => {
+  try {
+    const result = store.verifyPasswordResetByPhone(req.body || {});
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.post('/api/auth/logout', (_req, res) => {
   res.json({ ok: true });
+});
+
+// Public Safaricom Daraja C2B Paybill Webhook (routes strictly by Paybill / BusinessShortCode)
+app.post('/api/mpesa/c2b-callback', (req, res, next) => {
+  try {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const queryPaybill =
+      typeof req.query.paybill === 'string' ? req.query.paybill.trim() : undefined;
+    const paybillNumber = String(
+      body.BusinessShortCode ??
+        body.ShortCode ??
+        body.paybillNumber ??
+        queryPaybill ??
+        ''
+    );
+    const accountReference = String(
+      body.BillRefNumber ?? body.accountReference ?? body.AccountReference ?? ''
+    );
+    const amount = Number(body.TransAmount ?? body.amount ?? 0);
+    const msisdn = String(body.MSISDN ?? body.msisdn ?? body.PhoneNumber ?? '');
+    const mpesaReceipt = body.TransID
+      ? String(body.TransID)
+      : body.mpesaReceipt
+      ? String(body.mpesaReceipt)
+      : undefined;
+
+    const result = store.processMpesaPaybillPayment({
+      paybillNumber,
+      accountReference,
+      amount,
+      msisdn,
+      mpesaReceipt,
+      channel: 'Daraja C2B Webhook',
+      recordedBy: `M-Pesa Paybill ${paybillNumber.trim()}`,
+    });
+
+    res.status(200).json({
+      ResultCode: 0,
+      ResultDesc: 'Accepted',
+      tenantId: result.tenantId,
+      tenantName: result.tenantName,
+      paybillNumber: result.paybillNumber,
+      invoice: result.invoice,
+      transaction: result.transaction,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Require authenticated user session for all protected API endpoints below
@@ -255,7 +321,11 @@ app.post('/api/auth/change-password', (req: AuthenticatedRequest, res, next) => 
 app.get('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
   try {
     const authUser = req.authUser!;
-    if (!isDeveloperRole(authUser.role) && authUser.role !== 'Admin') {
+    if (
+      !isDeveloperRole(authUser.role) &&
+      authUser.role !== 'Super Admin' &&
+      authUser.role !== 'Admin'
+    ) {
       throw new ConflictError('Forbidden: Only School Admins can view the staff user directory.', 403);
     }
     const targetTenantId = getTenantId(req);
@@ -269,7 +339,11 @@ app.get('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
 app.post('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
   try {
     const authUser = req.authUser!;
-    if (!isDeveloperRole(authUser.role) && authUser.role !== 'Admin') {
+    if (
+      !isDeveloperRole(authUser.role) &&
+      authUser.role !== 'Super Admin' &&
+      authUser.role !== 'Admin'
+    ) {
       throw new ConflictError('Forbidden: Only School Admins can provision staff accounts.', 403);
     }
     const targetTenantId = getTenantId(req);
@@ -283,7 +357,11 @@ app.post('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
 app.patch('/api/auth/users/:userId/access', (req: AuthenticatedRequest, res, next) => {
   try {
     const authUser = req.authUser!;
-    if (!isDeveloperRole(authUser.role) && authUser.role !== 'Admin') {
+    if (
+      !isDeveloperRole(authUser.role) &&
+      authUser.role !== 'Super Admin' &&
+      authUser.role !== 'Admin'
+    ) {
       throw new ConflictError('Forbidden: Only School Admins can assign staff access rights.', 403);
     }
     const targetTenantId = getTenantId(req);
@@ -824,6 +902,80 @@ app.post('/api/fees/payments/batch', (req, res, next) => {
   }
 });
 
+// Fees & Billing: Independent Votelines (excluded from Fee Structure & Fee Total, appear alongside fees)
+app.post('/api/fees/independent-votelines', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const items = store.createIndependentVotelines(tenantId, {
+      ...(req.body || {}),
+      recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
+    });
+    res.status(201).json({ items });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/fees/independent-votelines/:id/payments', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const item = store.recordIndependentVotelinePayment(tenantId, req.params.id, {
+      ...(req.body || {}),
+      recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
+    });
+    res.json({ item });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/fees/independent-votelines/:id', (req, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.deleteIndependentVoteline(tenantId, req.params.id);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Fees & Billing: Per-Tenant M-Pesa Paybill Integration & Paybill-Separated Settlement
+app.put('/api/finance/mpesa/config', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.configureTenantMpesa(req.authUser!, tenantId, req.body || {});
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/finance/mpesa/receive', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const body = (req.body || {}) as {
+      paybillNumber?: string;
+      accountReference?: string;
+      amount?: number;
+      msisdn?: string;
+      mpesaReceipt?: string;
+    };
+    const result = store.processMpesaPaybillPayment({
+      paybillNumber: body.paybillNumber,
+      accountReference: body.accountReference,
+      amount: body.amount,
+      msisdn: body.msisdn,
+      mpesaReceipt: body.mpesaReceipt,
+      channel: 'STK / Paybill Terminal',
+      expectedTenantId: tenantId,
+      recordedBy: `${req.authUser!.fullName} (M-Pesa Paybill)`,
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Finance & Accounting: Expensing
 app.post('/api/finance/expenses', (req, res, next) => {
   try {
@@ -988,6 +1140,19 @@ app.post('/api/finance/budgets', (req, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const budget = store.upsertBudgetAllocation(tenantId, req.body);
+    res.json({ budget });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/finance/budgets/approval', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const budget = store.approveBudgetAllocation(tenantId, {
+      ...(req.body || {}),
+      approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
+    });
     res.json({ budget });
   } catch (err) {
     next(err);

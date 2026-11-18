@@ -40,8 +40,10 @@ import {
   type AttendanceRecord,
   type AttendanceStatus,
   type BudgetAllocation,
+  type BudgetApprovalStatus,
   type CbcClusterId,
   type CurrencyCode,
+  DEFAULT_CURRENCY,
   type DayOfWeek,
   type DevCollectionStorageStat,
   type DevPlatformTelemetry,
@@ -58,7 +60,11 @@ import {
   type FeeInvoice,
   type FeeStructure,
   type FeeVoteline,
+  type IndependentVotelineItem,
+  type IndependentVotelinePayment,
   type LeaveOutChit,
+  type MpesaEnvironment,
+  type MpesaTransactionLog,
   type NonTeachingStaffProfile,
   type NotificationCategory,
   type NotificationItem,
@@ -81,6 +87,7 @@ import {
   type Tenant,
   type TenantBranding,
   type TenantModulePermission,
+  type TenantMpesaConfig,
   type TenantPlan,
   type TenantStatus,
   type TenantUser,
@@ -173,6 +180,10 @@ export class ConflictError extends Error {
 export class TenantStore {
   private state: DatabaseState;
   private onBroadcast?: (tenantId: string, eventType: string, payload: unknown) => void;
+  private passwordResetChallenges = new Map<
+    string,
+    { code: string; expiresAt: number; attempts: number }
+  >();
 
   constructor(onBroadcast?: (tenantId: string, eventType: string, payload: unknown) => void) {
     this.onBroadcast = onBroadcast;
@@ -337,8 +348,56 @@ export class TenantStore {
               t.emailDomain = seededDomains[t.id] || deriveSchoolEmailDomain(t.slug || t.name);
               dirty = true;
             }
-            if (t.currency !== 'KES' && t.currency !== 'USD') {
+            const seededTenantMeta: Record<
+              string,
+              {
+                contactEmail: string;
+                contactPhone: string;
+                postalAddress: string;
+                forceKes?: boolean;
+              }
+            > = {
+              'tenant-oakridge': {
+                contactEmail: 'info@oakridge.ac.ke',
+                contactPhone: '+254 712 408 100',
+                postalAddress: 'P.O. Box 45812-00100, Nairobi',
+                forceKes: true,
+              },
+              'tenant-westfield': {
+                contactEmail: 'admissions@westfield.ac.ke',
+                contactPhone: '+254 711 204 510',
+                postalAddress: 'P.O. Box 81204-80100, Mombasa',
+                forceKes: true,
+              },
+              'tenant-stjude': {
+                contactEmail: 'office@stjude.ac.ke',
+                contactPhone: '+254 715 630 142',
+                postalAddress: 'P.O. Box 1924-40100, Kisumu',
+                forceKes: true,
+              },
+            };
+            const metaDef = seededTenantMeta[t.id];
+            if (metaDef?.forceKes && t.currency !== 'KES') {
               t.currency = 'KES';
+              dirty = true;
+            } else if (t.currency !== 'KES' && t.currency !== 'USD') {
+              t.currency = DEFAULT_CURRENCY;
+              dirty = true;
+            }
+            if (!t.contactEmail) {
+              t.contactEmail =
+                metaDef?.contactEmail ||
+                t.teachers?.[0]?.email ||
+                `info@${t.emailDomain || 'school.ac.ke'}`;
+              dirty = true;
+            }
+            if (!t.contactPhone) {
+              t.contactPhone =
+                metaDef?.contactPhone || t.teachers?.[0]?.phone || '+254 700 000 000';
+              dirty = true;
+            }
+            if (!t.postalAddress) {
+              t.postalAddress = metaDef?.postalAddress || t.location || '';
               dirty = true;
             }
             if (!t.branding || !t.branding.primaryColor) {
@@ -562,6 +621,23 @@ export class TenantStore {
           if (!Array.isArray(parsed.budgets)) {
             parsed.budgets = parsed.tenants.flatMap((t) => buildDefaultBudgetsForTenant(t));
             dirty = true;
+          } else {
+            const pendingCats = new Set<string>(['Transport & Fuel', 'ICT & Software']);
+            parsed.budgets.forEach((b) => {
+              if (!b.status) {
+                const isPending = pendingCats.has(b.category);
+                b.status = isPending ? 'Pending Approval' : 'Approved';
+                if (!isPending) {
+                  const t = parsed.tenants.find((x) => x.id === b.tenantId);
+                  b.approvedBy = t?.teachers?.[0]?.name || 'School Principal / BOM';
+                  b.approvedAt = b.updatedAt || '2026-11-01T08:00:00Z';
+                  b.approvalNotes = 'Approved for current term operations.';
+                } else {
+                  b.approvalNotes = 'Awaiting specific departmental budget approval.';
+                }
+                dirty = true;
+              }
+            });
           }
           if (!Array.isArray(parsed.approvalRecords)) {
             parsed.approvalRecords = parsed.tenants.flatMap((t) =>
@@ -577,6 +653,76 @@ export class TenantStore {
             parsed.whatsappDispatches = [];
             dirty = true;
           }
+          if (!parsed.mpesaSecrets || typeof parsed.mpesaSecrets !== 'object') {
+            parsed.mpesaSecrets = {};
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.mpesaTransactions)) {
+            parsed.mpesaTransactions = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.independentVotelines)) {
+            parsed.independentVotelines = [];
+            dirty = true;
+          }
+          // Backfill default distinct Paybill configs onto the 3 seeded demo campuses if unclaimed
+          const seedMpesaDefaults: Record<
+            string,
+            { paybill: string; key: string; secret: string; passkey: string; bank: string }
+          > = {
+            'tenant-oakridge': {
+              paybill: '522522',
+              key: 'oakridge_daraja_live_key_01',
+              secret: 'oakridge-sandbox-secret-7a91',
+              passkey: 'oakridge-lipa-passkey-2c88',
+              bank: 'KCB School Collection A/C 1104829104',
+            },
+            'tenant-westfield': {
+              paybill: '522544',
+              key: 'westfield_daraja_key_02',
+              secret: 'westfield-sandbox-secret-4b19',
+              passkey: 'westfield-lipa-passkey-9e04',
+              bank: 'Equity Bank Mombasa Collection A/C',
+            },
+            'tenant-stjude': {
+              paybill: '522566',
+              key: 'stjude_daraja_key_03',
+              secret: 'stjude-sandbox-secret-3f50',
+              passkey: 'stjude-lipa-passkey-6d11',
+              bank: 'Stanbic Bank Kisumu USD/KES Fee A/C',
+            },
+          };
+          parsed.tenants.forEach((t) => {
+            const def = seedMpesaDefaults[t.id];
+            if (def && !t.mpesaConfig) {
+              const paybillClaimed = parsed.tenants.some(
+                (other) => other.id !== t.id && other.mpesaConfig?.paybillNumber === def.paybill
+              );
+              if (!paybillClaimed) {
+                t.mpesaConfig = {
+                  enabled: true,
+                  environment: 'Sandbox',
+                  paybillNumber: def.paybill,
+                  accountName: `${t.name} Fees`,
+                  accountReferenceFormat: 'Student Code',
+                  consumerKey: def.key,
+                  hasConsumerSecret: true,
+                  consumerSecretMasked: `••••${def.secret.slice(-4)}`,
+                  hasPasskey: true,
+                  passkeyMasked: `••••${def.passkey.slice(-4)}`,
+                  callbackUrl: `/api/mpesa/c2b-callback?paybill=${def.paybill}`,
+                  settlementBank: def.bank,
+                  updatedAt: '2026-09-01T08:00:00Z',
+                  updatedBy: 'System Seed',
+                };
+                parsed.mpesaSecrets![t.id] = {
+                  consumerSecret: def.secret,
+                  passkey: def.passkey,
+                };
+                dirty = true;
+              }
+            }
+          });
           if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
             parsed.users = buildSeedUsers();
             dirty = true;
@@ -592,10 +738,27 @@ export class TenantStore {
               parsed.users.unshift(devUser);
               dirty = true;
             }
+            const seedPhonesByEmail = new Map(
+              seedUsers.map((su) => [su.email.toLowerCase(), su.phone])
+            );
             parsed.users.forEach((u) => {
+              if (u.role === 'Super Admin' && (!u.tenantId || u.tenantId === 'platform')) {
+                u.tenantId = parsed.tenants[0]?.id || 'tenant-oakridge';
+                if (u.fullName === 'Platform Super Admin') {
+                  u.fullName = 'Oakridge Super Admin';
+                }
+                dirty = true;
+              }
               if (!Array.isArray(u.allowedModules)) {
                 u.allowedModules = [...(DEFAULT_ROLE_MODULES[u.role] || ['analytics'])];
                 dirty = true;
+              }
+              if (!u.phone) {
+                const seededPhone = seedPhonesByEmail.get(u.email.toLowerCase());
+                if (seededPhone) {
+                  u.phone = seededPhone;
+                  dirty = true;
+                }
               }
             });
           }
@@ -748,6 +911,8 @@ export class TenantStore {
       ['examResults', this.state.examResults],
       ['feeStructures', this.state.feeStructures],
       ['invoices', this.state.invoices],
+      ['independentVotelines', this.state.independentVotelines || []],
+      ['mpesaTransactions', this.state.mpesaTransactions || []],
       ['expenses', this.state.expenses],
       ['etimsChecks', this.state.etimsChecks || []],
       ['reconciliationLines', this.state.reconciliationLines || []],
@@ -968,6 +1133,12 @@ export class TenantStore {
       examResults: this.state.examResults.filter((r) => r.tenantId === tenantId),
       feeStructures: this.state.feeStructures.filter((f) => f.tenantId === tenantId),
       invoices: this.state.invoices.filter((i) => i.tenantId === tenantId),
+      independentVotelines: (this.state.independentVotelines || []).filter(
+        (v) => v.tenantId === tenantId
+      ),
+      mpesaTransactions: (this.state.mpesaTransactions || []).filter(
+        (m) => m.tenantId === tenantId
+      ),
       expenses: this.state.expenses.filter((e) => e.tenantId === tenantId),
       etimsChecks: (this.state.etimsChecks || []).filter((e) => e.tenantId === tenantId),
       reconciliationLines: (this.state.reconciliationLines || []).filter(
@@ -993,19 +1164,23 @@ export class TenantStore {
     curriculum: string;
     academicYear: string;
     currentTerm: string;
-    currency: CurrencyCode;
+    currency?: CurrencyCode;
     plan: TenantPlan;
     status?: TenantStatus;
     learnerCap?: number;
     subscriptionCycle?: SubscriptionCycle;
     renewalDate?: string;
     location: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    postalAddress?: string;
     branding?: Partial<TenantBranding>;
     grades: string[];
     subjects: string[];
     rooms: string[];
     leadTeacherName: string;
     leadTeacherEmail: string;
+    leadTeacherPhone?: string;
     initialAdminPassword?: string;
   }): Tenant {
     const slug = input.name
@@ -1034,22 +1209,28 @@ export class TenantStore {
         : DEFAULT_TIER_LEARNER_CAPS[resolvedPlan];
     const defaultRenewal = new Date();
     defaultRenewal.setFullYear(defaultRenewal.getFullYear() + 1);
+    const resolvedCurrency: CurrencyCode = input.currency || DEFAULT_CURRENCY;
+    const resolvedLeadEmail = input.leadTeacherEmail.trim() || `admin@${resolvedDomain}`;
+    const resolvedContactPhone = (input.contactPhone || input.leadTeacherPhone || '').trim() || '+254 700 000 000';
 
     const tenant: Tenant = {
       id,
       name: input.name.trim(),
       slug,
       emailDomain: resolvedDomain,
-      curriculum: input.curriculum.trim() || 'Standard Curriculum',
+      curriculum: input.curriculum.trim() || 'Kenyan CBC (Playgroup – Grade 12)',
       academicYear: input.academicYear.trim() || '2026–2027',
       currentTerm: input.currentTerm.trim() || 'Term 1',
-      currency: input.currency || 'KES',
+      currency: resolvedCurrency,
       plan: resolvedPlan,
       status: input.status || 'Active',
       learnerCap: resolvedCap,
       subscriptionCycle: input.subscriptionCycle || 'Annual',
       renewalDate: (input.renewalDate || '').trim() || defaultRenewal.toISOString().slice(0, 10),
-      location: input.location.trim() || 'Campus Main',
+      location: input.location.trim() || 'Nairobi, KE',
+      contactEmail: (input.contactEmail || '').trim() || resolvedLeadEmail,
+      contactPhone: resolvedContactPhone,
+      postalAddress: (input.postalAddress || '').trim() || input.location.trim() || 'Nairobi, KE',
       branding: resolvedBranding,
       grades: resolvedGrades,
       sections: ['A', 'B'],
@@ -1086,8 +1267,8 @@ export class TenantStore {
         {
           id: teacherId,
           name: input.leadTeacherName.trim() || 'Principal Lead',
-          email: input.leadTeacherEmail.trim() || `admin@${slug}.edu`,
-          phone: '+254 700 000 000',
+          email: resolvedLeadEmail,
+          phone: resolvedContactPhone,
           department: 'Administration',
           subjects: [
             input.subjects[0] || KENYAN_CBC_SUBJECTS[0],
@@ -1101,23 +1282,28 @@ export class TenantStore {
 
     this.state.tenants.push(tenant);
 
-    // Seed default fee structure for first grade so billing works immediately
+    // Seed default fee structure for first grade so billing works immediately (scaled to tenant currency)
+    const isKes = resolvedCurrency === 'KES';
+    const defTuition = isKes ? 32000 : 3800;
+    const defLab = isKes ? 2500 : 300;
+    const defTech = isKes ? 2000 : 200;
+    const defAct = isKes ? 1800 : 150;
     this.state.feeStructures.push({
       id: `fs-${randomUUID().slice(0, 6)}`,
       tenantId: id,
       grade: tenant.grades[0],
       term: tenant.currentTerm,
       votelines: [
-        { id: 'vl-tuition', name: 'Tuition Fee', amount: 3800 },
-        { id: 'vl-lab', name: 'Laboratory Fee', amount: 300 },
-        { id: 'vl-tech', name: 'Technology & ICT', amount: 200 },
-        { id: 'vl-act', name: 'Co-Curricular & Activities', amount: 150 },
+        { id: 'vl-tuition', name: 'Tuition Fee', amount: defTuition },
+        { id: 'vl-lab', name: 'Laboratory Fee', amount: defLab },
+        { id: 'vl-tech', name: 'Technology & ICT', amount: defTech },
+        { id: 'vl-act', name: 'Co-Curricular & Activities', amount: defAct },
       ],
-      tuitionFee: 3800,
-      labFee: 300,
-      technologyFee: 200,
-      activitiesFee: 150,
-      totalFee: 4450,
+      tuitionFee: defTuition,
+      labFee: defLab,
+      technologyFee: defTech,
+      activitiesFee: defAct,
+      totalFee: defTuition + defLab + defTech + defAct,
     });
 
     this.state.expenses.push(
@@ -1205,6 +1391,9 @@ export class TenantStore {
         | 'currentTerm'
         | 'currency'
         | 'location'
+        | 'contactEmail'
+        | 'contactPhone'
+        | 'postalAddress'
         | 'plan'
         | 'status'
       >
@@ -1233,6 +1422,9 @@ export class TenantStore {
     if (patch.currentTerm && patch.currentTerm.trim()) tenant.currentTerm = patch.currentTerm.trim();
     if (patch.currency) tenant.currency = patch.currency;
     if (patch.location !== undefined) tenant.location = patch.location.trim() || tenant.location;
+    if (patch.contactEmail !== undefined) tenant.contactEmail = patch.contactEmail.trim();
+    if (patch.contactPhone !== undefined) tenant.contactPhone = patch.contactPhone.trim();
+    if (patch.postalAddress !== undefined) tenant.postalAddress = patch.postalAddress.trim();
     if (patch.plan) tenant.plan = patch.plan;
     if (patch.status) tenant.status = patch.status;
     if (patch.branding) {
@@ -1298,6 +1490,9 @@ export class TenantStore {
       name?: string;
       emailDomain?: string;
       location?: string;
+      contactEmail?: string;
+      contactPhone?: string;
+      postalAddress?: string;
       curriculum?: string;
       academicYear?: string;
       currentTerm?: string;
@@ -1335,6 +1530,9 @@ export class TenantStore {
     this.state.examResults = this.state.examResults.filter((r) => r.tenantId !== tenantId);
     this.state.feeStructures = this.state.feeStructures.filter((f) => f.tenantId !== tenantId);
     this.state.invoices = this.state.invoices.filter((i) => i.tenantId !== tenantId);
+    this.state.independentVotelines = (this.state.independentVotelines || []).filter(
+      (v) => v.tenantId !== tenantId
+    );
     this.state.expenses = this.state.expenses.filter((e) => e.tenantId !== tenantId);
     this.state.etimsChecks = (this.state.etimsChecks || []).filter((e) => e.tenantId !== tenantId);
     this.state.reconciliationLines = (this.state.reconciliationLines || []).filter(
@@ -1352,6 +1550,12 @@ export class TenantStore {
     this.state.whatsappDispatches = (this.state.whatsappDispatches || []).filter(
       (w) => w.tenantId !== tenantId
     );
+    this.state.mpesaTransactions = (this.state.mpesaTransactions || []).filter(
+      (m) => m.tenantId !== tenantId
+    );
+    if (this.state.mpesaSecrets) {
+      delete this.state.mpesaSecrets[tenantId];
+    }
     this.state.notifications = this.state.notifications.filter((n) => n.tenantId !== tenantId);
     this.state.users = (this.state.users || []).filter((u) => u.tenantId !== tenantId);
 
@@ -1433,6 +1637,7 @@ export class TenantStore {
     tenantId?: string;
     fullName: string;
     email: string;
+    phone?: string;
     role?: UserRole;
     password: string;
   }): { user: TenantUser; tenant: Tenant } {
@@ -1515,6 +1720,7 @@ export class TenantStore {
       tenantId: tenant.id,
       fullName,
       email: rawEmail,
+      phone: (input.phone || '').trim() || undefined,
       role: requestedRole,
       passwordHash: hashPassword(password),
       status: 'Active',
@@ -1655,7 +1861,8 @@ export class TenantStore {
     adminName: string,
     adminEmail: string,
     password?: string,
-    mustChangePassword = false
+    mustChangePassword = false,
+    adminPhone?: string
   ): { user: TenantUser; oneTimePassword: string } {
     const domain = this.resolveTenantEmailDomain(tenant);
     const cleanedEmail = (adminEmail || '').trim().toLowerCase();
@@ -1685,6 +1892,7 @@ export class TenantStore {
       tenantId: tenant.id,
       fullName: adminName.trim() || 'School Administrator',
       email,
+      phone: (adminPhone || '').trim() || tenant.contactPhone || undefined,
       role: 'Admin',
       passwordHash: hashPassword(assignedPassword),
       status: 'Active',
@@ -1740,6 +1948,163 @@ export class TenantStore {
     };
   }
 
+  private normalizePhoneDigits(phone: string): string {
+    const digits = (phone || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('0') && digits.length >= 9) {
+      return `254${digits.slice(1)}`;
+    }
+    if (!digits.startsWith('254') && digits.length === 9 && digits.startsWith('7')) {
+      return `254${digits}`;
+    }
+    return digits;
+  }
+
+  private resolveAccountRecoveryPhone(user: StoredTenantUser): string {
+    if (user.phone && user.phone.trim()) return user.phone.trim();
+    if (user.tenantId !== 'platform') {
+      const tenant = this.state.tenants.find((t) => t.id === user.tenantId);
+      if (tenant) {
+        const matchedTeacher = tenant.teachers.find(
+          (tc) => tc.email.toLowerCase() === user.email.toLowerCase() && tc.phone
+        );
+        if (matchedTeacher?.phone) return matchedTeacher.phone;
+        if (user.role === 'Admin' && tenant.contactPhone) return tenant.contactPhone;
+      }
+    }
+    return '';
+  }
+
+  private phonesMatch(submitted: string, registered: string): boolean {
+    const a = this.normalizePhoneDigits(submitted);
+    const b = this.normalizePhoneDigits(registered);
+    if (!a || !b || a.length < 7 || b.length < 7) return false;
+    if (a === b) return true;
+    return a.length >= 9 && b.length >= 9 && a.slice(-9) === b.slice(-9);
+  }
+
+  private maskPhoneNumber(phone: string): string {
+    const clean = phone.trim();
+    if (clean.length <= 5) return '••••';
+    return `${clean.slice(0, 5)}•••${clean.slice(-3)}`;
+  }
+
+  requestPasswordResetByPhone(input: { email: string; phone: string }): {
+    ok: boolean;
+    maskedPhone: string;
+    expiresInMinutes: number;
+    deliveryChannel: string;
+    verificationCode: string;
+  } {
+    const email = (input.email || '').trim().toLowerCase();
+    const phone = (input.phone || '').trim();
+    if (!email || !phone) {
+      throw new ConflictError('Enter both your account email and registered phone number.', 400);
+    }
+
+    const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
+    if (!stored || stored.status !== 'Active') {
+      throw new ConflictError('No active account matches those credentials.', 404);
+    }
+
+    const registeredPhone = this.resolveAccountRecoveryPhone(stored);
+    if (!registeredPhone) {
+      throw new ConflictError(
+        'No recovery phone number is registered on this account. Contact your school or platform administrator.',
+        400
+      );
+    }
+
+    if (!this.phonesMatch(phone, registeredPhone)) {
+      throw new ConflictError(
+        'Phone number does not match the registered number on file for this account.',
+        403
+      );
+    }
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresInMinutes = 10;
+    this.passwordResetChallenges.set(email, {
+      code,
+      expiresAt: Date.now() + expiresInMinutes * 60_000,
+      attempts: 0,
+    });
+
+    return {
+      ok: true,
+      maskedPhone: this.maskPhoneNumber(registeredPhone),
+      expiresInMinutes,
+      deliveryChannel: 'SMS Phone Verification',
+      verificationCode: code,
+    };
+  }
+
+  verifyPasswordResetByPhone(input: {
+    email: string;
+    phone: string;
+    code: string;
+    newPassword: string;
+  }): { ok: boolean; email: string } {
+    const email = (input.email || '').trim().toLowerCase();
+    const phone = (input.phone || '').trim();
+    const code = (input.code || '').trim();
+    const newPassword = input.newPassword || '';
+
+    if (!email || !phone || !code || !newPassword) {
+      throw new ConflictError(
+        'Email, phone number, verification code, and new password are required.',
+        400
+      );
+    }
+    if (newPassword.length < 8) {
+      throw new ConflictError('New password must be at least 8 characters.', 400);
+    }
+
+    const challenge = this.passwordResetChallenges.get(email);
+    if (!challenge) {
+      throw new ConflictError(
+        'No active password reset request found for this email. Request a verification code first.',
+        400
+      );
+    }
+    if (Date.now() > challenge.expiresAt) {
+      this.passwordResetChallenges.delete(email);
+      throw new ConflictError(
+        'Verification code has expired. Request a new code to continue.',
+        400
+      );
+    }
+    if (challenge.attempts >= 5) {
+      this.passwordResetChallenges.delete(email);
+      throw new ConflictError(
+        'Too many invalid verification attempts. Request a fresh verification code.',
+        429
+      );
+    }
+
+    const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
+    if (!stored || stored.status !== 'Active') {
+      throw new ConflictError('Account not found or no longer active.', 404);
+    }
+    const registeredPhone = this.resolveAccountRecoveryPhone(stored);
+    if (!registeredPhone || !this.phonesMatch(phone, registeredPhone)) {
+      throw new ConflictError('Phone number verification failed for this account.', 403);
+    }
+
+    if (challenge.code !== code) {
+      challenge.attempts += 1;
+      throw new ConflictError('Invalid 6-digit phone verification code.', 400);
+    }
+
+    stored.passwordHash = hashPassword(newPassword);
+    stored.mustChangePassword = false;
+    stored.lastLoginAt = new Date().toISOString();
+    this.passwordResetChallenges.delete(email);
+    this.persist();
+
+    return { ok: true, email };
+  }
+
   private normalizeAllowedModules(
     role: UserRole,
     rawModules?: unknown
@@ -1768,6 +2133,7 @@ export class TenantStore {
     input: {
       fullName: string;
       email: string;
+      phone?: string;
       role: UserRole;
       allowedModules?: TenantModulePermission[];
     }
@@ -1782,6 +2148,7 @@ export class TenantStore {
     }
 
     const allowedSchoolRoles = new Set<UserRole>([
+      'Super Admin',
       'Admin',
       'Registrar',
       'Teacher',
@@ -1791,7 +2158,7 @@ export class TenantStore {
     const role: UserRole = input.role || 'Teacher';
     if (!allowedSchoolRoles.has(role)) {
       throw new ConflictError(
-        'Staff role must be Admin, Registrar, Teacher, Bursar, or Parent.',
+        'Staff role must be Super Admin, Admin, Registrar, Teacher, Bursar, or Parent.',
         400
       );
     }
@@ -1831,6 +2198,7 @@ export class TenantStore {
       tenantId: tenant.id,
       fullName,
       email: finalEmail,
+      phone: (input.phone || '').trim() || undefined,
       role,
       passwordHash: hashPassword(oneTimePassword),
       status: 'Active',
@@ -1860,6 +2228,7 @@ export class TenantStore {
     targetUserId: string,
     patch: {
       role?: UserRole;
+      phone?: string;
       allowedModules?: TenantModulePermission[];
       status?: 'Active' | 'Disabled';
       resetOneTimePassword?: boolean;
@@ -1875,11 +2244,12 @@ export class TenantStore {
     if (!target) {
       throw new ConflictError('Staff account not found in this school tenant.', 404);
     }
-    if (target.role === 'Developer' || target.role === 'Super Admin') {
+    if (target.role === 'Developer') {
       throw new ConflictError('Platform engineering accounts cannot be modified here.', 403);
     }
 
     const allowedSchoolRoles = new Set<UserRole>([
+      'Super Admin',
       'Admin',
       'Registrar',
       'Teacher',
@@ -1890,10 +2260,14 @@ export class TenantStore {
       if (!allowedSchoolRoles.has(patch.role)) {
         throw new ConflictError('Invalid staff role specified.', 400);
       }
-      if (target.id === actor.id && patch.role !== 'Admin') {
-        throw new ConflictError('You cannot remove your own School Admin role.', 400);
+      if (target.id === actor.id && patch.role !== 'Admin' && patch.role !== 'Super Admin') {
+        throw new ConflictError('You cannot remove your own administrative role.', 400);
       }
       target.role = patch.role;
+    }
+
+    if (patch.phone !== undefined) {
+      target.phone = patch.phone.trim() || undefined;
     }
 
     if (patch.allowedModules !== undefined) {
@@ -2401,6 +2775,11 @@ export class TenantStore {
         this.state.invoices.forEach((inv) => {
           if (inv.tenantId === tenantId && gradeRenames[inv.grade]) {
             inv.grade = gradeRenames[inv.grade];
+          }
+        });
+        (this.state.independentVotelines || []).forEach((ivl) => {
+          if (ivl.tenantId === tenantId && gradeRenames[ivl.grade]) {
+            ivl.grade = gradeRenames[ivl.grade];
           }
         });
         tenant.teachers.forEach((teacher) => {
@@ -4261,6 +4640,511 @@ export class TenantStore {
     };
   }
 
+  createIndependentVotelines(
+    tenantId: string,
+    input: {
+      name: string;
+      amount: number;
+      term?: string;
+      note?: string;
+      targetScope?: 'student' | 'grade' | 'all';
+      studentId?: string;
+      invoiceId?: string;
+      grade?: string;
+      recordedBy?: string;
+    }
+  ): IndependentVotelineItem[] {
+    const tenant = this.requireTenant(tenantId);
+    const name = (input.name || '').trim();
+    if (!name) {
+      throw new ConflictError('Enter an independent voteline name (e.g. Transport Fee or Academic Trip Fee).', 400);
+    }
+    const amount = Math.round(Number(input.amount));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new ConflictError('Enter a positive amount for the independent voteline.', 400);
+    }
+
+    const scope = input.targetScope || 'student';
+    const term = (input.term || '').trim() || tenant.currentTerm;
+    const note = (input.note || '').trim() || undefined;
+    const recordedBy = (input.recordedBy || '').trim() || 'Bursar Office';
+
+    let targetStudents: Student[] = [];
+    if (scope === 'grade') {
+      const targetGrade = (input.grade || '').trim();
+      if (!targetGrade) {
+        throw new ConflictError('Select a target grade / class for the independent voteline.', 400);
+      }
+      const gradeStudents = this.state.students.filter(
+        (s) => s.tenantId === tenantId && s.grade === targetGrade
+      );
+      const activeGradeStudents = gradeStudents.filter((s) => s.status === 'Active');
+      targetStudents = activeGradeStudents.length > 0 ? activeGradeStudents : gradeStudents;
+    } else if (scope === 'all') {
+      const allTenantStudents = this.state.students.filter((s) => s.tenantId === tenantId);
+      const activeStudents = allTenantStudents.filter((s) => s.status === 'Active');
+      targetStudents = activeStudents.length > 0 ? activeStudents : allTenantStudents;
+    } else {
+      let stu: Student | undefined;
+      if (input.studentId) {
+        stu = this.state.students.find((s) => s.id === input.studentId && s.tenantId === tenantId);
+      }
+      if (!stu && input.invoiceId) {
+        const inv = this.state.invoices.find(
+          (i) => i.id === input.invoiceId && i.tenantId === tenantId
+        );
+        if (inv) {
+          stu = this.state.students.find((s) => s.id === inv.studentId && s.tenantId === tenantId);
+        }
+      }
+      if (!stu) {
+        throw new ConflictError('Student not found in active school.', 404);
+      }
+      targetStudents = [stu];
+    }
+
+    if (targetStudents.length === 0) {
+      throw new ConflictError('No students matched the selected target scope.', 400);
+    }
+
+    if (!Array.isArray(this.state.independentVotelines)) {
+      this.state.independentVotelines = [];
+    }
+
+    const nowIso = new Date().toISOString();
+    const created: IndependentVotelineItem[] = [];
+
+    for (const student of targetStudents) {
+      const linkedInvoice =
+        (input.invoiceId &&
+          this.state.invoices.find(
+            (i) => i.id === input.invoiceId && i.tenantId === tenantId && i.studentId === student.id
+          )) ||
+        this.state.invoices.find(
+          (i) => i.tenantId === tenantId && i.studentId === student.id && i.term === term
+        ) ||
+        this.state.invoices.find((i) => i.tenantId === tenantId && i.studentId === student.id);
+
+      const item: IndependentVotelineItem = {
+        id: `ivl-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        studentId: student.id,
+        studentName: student.fullName,
+        studentCode: student.studentCode,
+        grade: student.grade,
+        invoiceId: linkedInvoice?.id,
+        invoiceNumber: linkedInvoice?.invoiceNumber,
+        term,
+        name,
+        amount,
+        paidAmount: 0,
+        balance: amount,
+        status: 'Pending',
+        note,
+        payments: [],
+        recordedBy,
+        createdAt: nowIso,
+      };
+      this.state.independentVotelines.unshift(item);
+      created.push(item);
+    }
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Independent Voteline Added: ${name}`,
+      `${created.length} learner(s) assigned ${name} (${tenant.currency} ${amount.toLocaleString()}) alongside fees — Fee Total unchanged.`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:independent-voteline-created');
+    return created;
+  }
+
+  recordIndependentVotelinePayment(
+    tenantId: string,
+    itemId: string,
+    input: {
+      amount: number;
+      method: PaymentMethod;
+      reference?: string;
+      recordedBy?: string;
+      paidAt?: string;
+    }
+  ): IndependentVotelineItem {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.independentVotelines)) {
+      this.state.independentVotelines = [];
+    }
+    const item = this.state.independentVotelines.find(
+      (v) => v.id === itemId && v.tenantId === tenantId
+    );
+    if (!item) {
+      throw new ConflictError('Independent voteline record not found.', 404);
+    }
+    if (item.balance <= 0) {
+      throw new ConflictError('Independent voteline has no remaining balance.', 400);
+    }
+
+    const requestedAmount = Math.round(Number(input.amount));
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new ConflictError('Enter a valid positive payment amount.', 400);
+    }
+    const payAmount = Math.min(item.balance, requestedAmount);
+    const receiptNumber = `IVL-RCT-${Math.floor(10000 + Math.random() * 89999)}`;
+    const paidAtIso =
+      input.paidAt && !Number.isNaN(Date.parse(input.paidAt))
+        ? new Date(input.paidAt).toISOString()
+        : new Date().toISOString();
+
+    const payment: IndependentVotelinePayment = {
+      id: `ivlpay-${randomUUID().slice(0, 8)}`,
+      receiptNumber,
+      amount: payAmount,
+      method: input.method || 'Mobile Money',
+      reference: (input.reference || '').trim() || receiptNumber,
+      paidAt: paidAtIso,
+      recordedBy: (input.recordedBy || '').trim() || 'Bursar Office',
+    };
+
+    item.payments.push(payment);
+    item.paidAmount += payAmount;
+    item.balance = Math.max(0, item.amount - item.paidAmount);
+    item.status = item.balance === 0 ? 'Paid' : 'Partial';
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Independent Voteline Payment: ${item.name}`,
+      `${item.studentName} paid ${tenant.currency} ${payAmount.toLocaleString()} toward ${item.name} (${receiptNumber}).`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:independent-voteline-payment');
+    return item;
+  }
+
+  deleteIndependentVoteline(tenantId: string, itemId: string): { deleted: boolean } {
+    this.requireTenant(tenantId);
+    const list = this.state.independentVotelines || [];
+    const idx = list.findIndex((v) => v.id === itemId && v.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Independent voteline record not found.', 404);
+    }
+    list.splice(idx, 1);
+    this.state.independentVotelines = list;
+    this.persist();
+    this.syncTenant(tenantId, 'fee:independent-voteline-deleted');
+    return { deleted: true };
+  }
+
+  private maskMpesaSecret(secret: string): string {
+    const clean = secret.trim();
+    if (!clean) return '';
+    if (clean.length <= 4) return '••••';
+    return `••••${clean.slice(-4)}`;
+  }
+
+  private normalizePaybillNumber(raw: string): string {
+    const cleaned = (raw || '').replace(/\s+/g, '').trim();
+    if (!/^\d{5,8}$/.test(cleaned)) {
+      throw new ConflictError(
+        'Enter a valid M-Pesa Paybill / Business Shortcode (5 to 8 numeric digits, e.g., 522522).',
+        400
+      );
+    }
+    return cleaned;
+  }
+
+  configureTenantMpesa(
+    actor: Pick<TenantUser, 'role' | 'fullName' | 'email'>,
+    tenantId: string,
+    input: {
+      enabled?: boolean;
+      environment?: MpesaEnvironment;
+      paybillNumber?: string;
+      accountName?: string;
+      accountReferenceFormat?: string;
+      consumerKey?: string;
+      consumerSecret?: string;
+      passkey?: string;
+      settlementBank?: string;
+    }
+  ): { tenant: Tenant; mpesaConfig: TenantMpesaConfig } {
+    if (
+      actor.role !== 'Admin' &&
+      actor.role !== 'Super Admin' &&
+      actor.role !== 'Developer' &&
+      actor.role !== 'Bursar'
+    ) {
+      throw new ConflictError(
+        'Forbidden: Only School Admin or Bursar accounts can configure M-Pesa Paybill integration.',
+        403
+      );
+    }
+
+    const tenant = this.requireTenant(tenantId);
+    const paybillNumber = this.normalizePaybillNumber(input.paybillNumber || '');
+
+    // Enforce global uniqueness across all tenants: Paybill is the differentiating routing key
+    const conflictingTenant = this.state.tenants.find(
+      (t) => t.id !== tenantId && t.mpesaConfig?.paybillNumber === paybillNumber
+    );
+    if (conflictingTenant) {
+      throw new ConflictError(
+        `Paybill "${paybillNumber}" is already assigned to ${conflictingTenant.name}. Each school tenant must register a unique Paybill to enforce payment separation.`,
+        409
+      );
+    }
+
+    const accountName = (input.accountName || '').trim() || `${tenant.name} Fees`;
+    const accountReferenceFormat =
+      (input.accountReferenceFormat || '').trim() || 'Student Code (e.g. ADM-2601)';
+    const consumerKey = (input.consumerKey || '').trim();
+    const enabled = input.enabled !== undefined ? Boolean(input.enabled) : true;
+    const environment: MpesaEnvironment =
+      input.environment === 'Production' ? 'Production' : 'Sandbox';
+
+    if (!this.state.mpesaSecrets || typeof this.state.mpesaSecrets !== 'object') {
+      this.state.mpesaSecrets = {};
+    }
+    const existingSecrets = this.state.mpesaSecrets[tenantId];
+    const resolvedSecret = (input.consumerSecret || '').trim() || existingSecrets?.consumerSecret || '';
+    const resolvedPasskey = (input.passkey || '').trim() || existingSecrets?.passkey || '';
+
+    if (enabled) {
+      if (!consumerKey) {
+        throw new ConflictError(
+          'Daraja Consumer Key is required when enabling M-Pesa Paybill integration.',
+          400
+        );
+      }
+      if (!resolvedSecret) {
+        throw new ConflictError(
+          'Daraja Consumer Secret is required when enabling M-Pesa Paybill integration.',
+          400
+        );
+      }
+      if (!resolvedPasskey) {
+        throw new ConflictError(
+          'Lipa Na M-Pesa Online Passkey is required when enabling M-Pesa Paybill integration.',
+          400
+        );
+      }
+    }
+
+    this.state.mpesaSecrets[tenantId] = {
+      consumerSecret: resolvedSecret,
+      passkey: resolvedPasskey,
+    };
+
+    const config: TenantMpesaConfig = {
+      enabled,
+      environment,
+      paybillNumber,
+      accountName,
+      accountReferenceFormat,
+      consumerKey,
+      hasConsumerSecret: Boolean(resolvedSecret),
+      consumerSecretMasked: resolvedSecret ? this.maskMpesaSecret(resolvedSecret) : undefined,
+      hasPasskey: Boolean(resolvedPasskey),
+      passkeyMasked: resolvedPasskey ? this.maskMpesaSecret(resolvedPasskey) : undefined,
+      callbackUrl: `/api/mpesa/c2b-callback?paybill=${paybillNumber}`,
+      settlementBank: (input.settlementBank || '').trim() || undefined,
+      updatedAt: new Date().toISOString(),
+      updatedBy: actor.fullName || actor.email || actor.role,
+    };
+
+    tenant.mpesaConfig = config;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `M-Pesa Paybill ${enabled ? 'Configured' : 'Saved (Disabled)'}: ${paybillNumber}`,
+      `${tenant.name} fee payments are isolated via Paybill ${paybillNumber} (${environment}).`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'finance:mpesa-config-updated');
+
+    return { tenant, mpesaConfig: config };
+  }
+
+  processMpesaPaybillPayment(input: {
+    paybillNumber?: string;
+    accountReference?: string;
+    amount?: number;
+    msisdn?: string;
+    mpesaReceipt?: string;
+    channel?: 'Daraja C2B Webhook' | 'STK / Paybill Terminal';
+    expectedTenantId?: string;
+    recordedBy?: string;
+  }): {
+    tenantId: string;
+    tenantName: string;
+    paybillNumber: string;
+    invoice: FeeInvoice;
+    transaction: MpesaTransactionLog;
+  } {
+    const paybillNumber = this.normalizePaybillNumber(input.paybillNumber || '');
+    const accountReference = (input.accountReference || '').trim();
+    const msisdn = (input.msisdn || '').trim() || '254700000000';
+    const requestedAmount = Math.round(Number(input.amount));
+    const channel = input.channel || 'Daraja C2B Webhook';
+    const mpesaReceipt =
+      (input.mpesaReceipt || '').trim().toUpperCase() ||
+      `MPE${Math.random().toString(36).slice(2, 9).toUpperCase()}`;
+
+    if (!accountReference) {
+      throw new ConflictError(
+        'Account Reference (Student Code or Invoice Number) is required to match the student fee ledger.',
+        400
+      );
+    }
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new ConflictError('Enter a positive payment amount for M-Pesa Paybill settlement.', 400);
+    }
+
+    const matchedTenant = this.state.tenants.find(
+      (t) => t.mpesaConfig?.paybillNumber === paybillNumber
+    );
+    if (!matchedTenant) {
+      throw new ConflictError(
+        `No school tenant is registered with M-Pesa Paybill "${paybillNumber}". Configure the school's Paybill under Fee & Billing -> M-Pesa Integration first.`,
+        404
+      );
+    }
+
+    if (!Array.isArray(this.state.mpesaTransactions)) {
+      this.state.mpesaTransactions = [];
+    }
+
+    // Strict tenant separation guard when called from inside a tenant's workspace
+    if (input.expectedTenantId && matchedTenant.id !== input.expectedTenantId) {
+      const rejectedEntry: MpesaTransactionLog = {
+        id: `mpesa-${randomUUID().slice(0, 8)}`,
+        tenantId: input.expectedTenantId,
+        paybillNumber,
+        mpesaReceipt,
+        msisdn,
+        accountReference,
+        amount: requestedAmount,
+        status: 'Rejected',
+        channel,
+        note: `Blocked cross-tenant payment: Paybill ${paybillNumber} belongs to ${matchedTenant.name}.`,
+        receivedAt: new Date().toISOString(),
+      };
+      this.state.mpesaTransactions.unshift(rejectedEntry);
+      this.persist();
+      this.syncTenant(input.expectedTenantId, 'finance:mpesa-blocked-cross-tenant');
+      throw new ConflictError(
+        `Tenant Isolation Blocked: Paybill "${paybillNumber}" belongs to ${matchedTenant.name}, not the active school workspace.`,
+        403
+      );
+    }
+
+    if (matchedTenant.status === 'Suspended') {
+      throw new ConflictError(
+        `School account "${matchedTenant.name}" is currently suspended. Payment cannot be settled.`,
+        403
+      );
+    }
+    if (!matchedTenant.mpesaConfig?.enabled) {
+      throw new ConflictError(
+        `M-Pesa Paybill "${paybillNumber}" is currently disabled for ${matchedTenant.name}.`,
+        400
+      );
+    }
+
+    const refLower = accountReference.toLowerCase();
+    // Look up student & open invoice strictly within matchedTenant.id
+    let targetInvoice = this.state.invoices.find(
+      (i) =>
+        i.tenantId === matchedTenant.id &&
+        i.balance > 0 &&
+        (i.studentCode.trim().toLowerCase() === refLower ||
+          i.invoiceNumber.trim().toLowerCase() === refLower)
+    );
+
+    if (!targetInvoice) {
+      const matchedStudent = this.state.students.find(
+        (s) =>
+          s.tenantId === matchedTenant.id &&
+          (s.studentCode.trim().toLowerCase() === refLower ||
+            s.upi.trim().toLowerCase() === refLower ||
+            s.fullName.trim().toLowerCase() === refLower)
+      );
+      if (matchedStudent) {
+        targetInvoice = this.state.invoices.find(
+          (i) =>
+            i.tenantId === matchedTenant.id &&
+            i.studentId === matchedStudent.id &&
+            i.balance > 0
+        );
+      }
+    }
+
+    if (!targetInvoice) {
+      const rejectedEntry: MpesaTransactionLog = {
+        id: `mpesa-${randomUUID().slice(0, 8)}`,
+        tenantId: matchedTenant.id,
+        paybillNumber,
+        mpesaReceipt,
+        msisdn,
+        accountReference,
+        amount: requestedAmount,
+        status: 'Rejected',
+        channel,
+        note: `No open fee invoice matched "${accountReference}" within ${matchedTenant.name}.`,
+        receivedAt: new Date().toISOString(),
+      };
+      this.state.mpesaTransactions.unshift(rejectedEntry);
+      this.persist();
+      this.syncTenant(matchedTenant.id, 'finance:mpesa-unmatched-ref');
+      throw new ConflictError(
+        `No open student fee balance matched account reference "${accountReference}" in ${matchedTenant.name} (Paybill ${paybillNumber}).`,
+        404
+      );
+    }
+
+    const updatedInvoice = this.recordPayment(matchedTenant.id, targetInvoice.id, {
+      amount: requestedAmount,
+      method: 'Mobile Money',
+      reference: mpesaReceipt,
+      recordedBy: input.recordedBy || `M-Pesa Paybill ${paybillNumber}`,
+    });
+
+    const latestPayment = updatedInvoice.payments[updatedInvoice.payments.length - 1];
+    const settledAmount = latestPayment ? latestPayment.amount : requestedAmount;
+    const txLog: MpesaTransactionLog = {
+      id: `mpesa-${randomUUID().slice(0, 8)}`,
+      tenantId: matchedTenant.id,
+      paybillNumber,
+      mpesaReceipt,
+      msisdn,
+      accountReference,
+      amount: settledAmount,
+      studentId: updatedInvoice.studentId,
+      studentName: updatedInvoice.studentName,
+      invoiceId: updatedInvoice.id,
+      invoiceNumber: updatedInvoice.invoiceNumber,
+      status: 'Settled',
+      channel,
+      note: `Settled to ${matchedTenant.name} via Paybill ${paybillNumber}`,
+      receivedAt: new Date().toISOString(),
+    };
+    this.state.mpesaTransactions.unshift(txLog);
+    this.persist();
+    this.syncTenant(matchedTenant.id, 'finance:mpesa-settled');
+
+    return {
+      tenantId: matchedTenant.id,
+      tenantName: matchedTenant.name,
+      paybillNumber,
+      invoice: updatedInvoice,
+      transaction: txLog,
+    };
+  }
+
   // Finance & Accounting: Expensing Vouchers & Supporting Documents
   private normalizeExpenseAttachments(
     raw:
@@ -5049,10 +5933,19 @@ export class TenantStore {
     );
 
     if (existing) {
+      const amountChanged = existing.allocatedAmount !== allocatedAmount;
       existing.allocatedAmount = allocatedAmount;
       if (input.fiscalYear) existing.fiscalYear = input.fiscalYear.trim();
       if (input.term) existing.term = input.term.trim();
       if (input.notes !== undefined) existing.notes = input.notes.trim() || undefined;
+      if (amountChanged) {
+        existing.status = 'Pending Approval';
+        existing.approvedBy = undefined;
+        existing.approvedAt = undefined;
+        existing.approvalNotes = 'Ceiling revised — awaiting approval.';
+      } else if (!existing.status) {
+        existing.status = 'Pending Approval';
+      }
       existing.updatedAt = new Date().toISOString();
       this.persist();
       this.syncTenant(tenantId, 'finance:budget-updated');
@@ -5066,6 +5959,7 @@ export class TenantStore {
       term: (input.term || '').trim() || tenant.currentTerm || 'Term 1',
       category: input.category,
       allocatedAmount,
+      status: 'Pending Approval',
       notes: (input.notes || '').trim() || undefined,
       updatedAt: new Date().toISOString(),
     };
@@ -5073,6 +5967,92 @@ export class TenantStore {
     this.persist();
     this.syncTenant(tenantId, 'finance:budget-created');
     return created;
+  }
+
+  approveBudgetAllocation(
+    tenantId: string,
+    input: {
+      budgetId?: string;
+      category?: ExpenseCategory;
+      status: BudgetApprovalStatus;
+      approvedBy: string;
+      approvalNotes?: string;
+    }
+  ): BudgetAllocation {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.budgets)) this.state.budgets = [];
+
+    let target = input.budgetId
+      ? this.state.budgets.find((b) => b.tenantId === tenantId && b.id === input.budgetId)
+      : undefined;
+    if (!target && input.category) {
+      target = this.state.budgets.find(
+        (b) => b.tenantId === tenantId && b.category === input.category
+      );
+    }
+
+    if (!target && input.category) {
+      const validCategories = new Set<string>(EXPENSE_CATEGORIES);
+      if (!validCategories.has(input.category)) {
+        throw new ConflictError(`Invalid budget category "${input.category}".`, 400);
+      }
+      target = {
+        id: `bdg-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        fiscalYear: tenant.academicYear || '2026–2027',
+        term: tenant.currentTerm || 'Term 1',
+        category: input.category,
+        allocatedAmount: 0,
+        status: 'Draft',
+        updatedAt: new Date().toISOString(),
+      };
+      this.state.budgets.push(target);
+    }
+
+    if (!target) {
+      throw new ConflictError('Budget allocation record not found.', 404);
+    }
+
+    const allowedStatuses = new Set<BudgetApprovalStatus>([
+      'Draft',
+      'Pending Approval',
+      'Approved',
+      'Rejected',
+    ]);
+    if (!allowedStatuses.has(input.status)) {
+      throw new ConflictError(`Invalid budget approval status "${String(input.status)}".`, 400);
+    }
+
+    if (input.status === 'Approved' && target.allocatedAmount <= 0) {
+      throw new ConflictError(
+        `Set a positive budget ceiling for ${target.category} before approving it.`,
+        400
+      );
+    }
+
+    const now = new Date().toISOString();
+    target.status = input.status;
+    target.approvalNotes = (input.approvalNotes || '').trim() || undefined;
+    target.updatedAt = now;
+
+    if (input.status === 'Approved' || input.status === 'Rejected') {
+      target.approvedBy = (input.approvedBy || '').trim() || 'Finance Administrator';
+      target.approvedAt = now;
+    } else {
+      target.approvedBy = undefined;
+      target.approvedAt = undefined;
+    }
+
+    this.persist();
+    this.syncTenant(tenantId, 'finance:budget-approval');
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Budget ${input.status}: ${target.category}`,
+      `${target.category} ceiling (${target.allocatedAmount.toLocaleString()}) marked ${input.status} by ${target.approvedBy || 'Finance Admin'}.`,
+      'finance'
+    );
+    return target;
   }
 
   // Finance Controls: Board / Procurement Sign-Off Approvals

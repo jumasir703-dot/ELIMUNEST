@@ -172,6 +172,10 @@ export function DeveloperPanel({
   const [obAdminName, setObAdminName] = useState('');
   const [obAdminLocal, setObAdminLocal] = useState('');
   const [obAdminLocalEdited, setObAdminLocalEdited] = useState(false);
+  const [obAdminPhone, setObAdminPhone] = useState('');
+  const [obContactPhone, setObContactPhone] = useState('');
+  const [obContactEmail, setObContactEmail] = useState('');
+  const [obPostalAddress, setObPostalAddress] = useState('');
   const [obSubmitting, setObSubmitting] = useState(false);
   const [copiedOtp, setCopiedOtp] = useState(false);
   const [lastProvisioned, setLastProvisioned] = useState<{
@@ -338,6 +342,9 @@ export function DeveloperPanel({
         name: obName.trim(),
         emailDomain: cleanDomain,
         location: obLocation.trim(),
+        contactEmail: obContactEmail.trim() || undefined,
+        contactPhone: obContactPhone.trim() || undefined,
+        postalAddress: obPostalAddress.trim() || undefined,
         curriculum: obCurriculum.trim(),
         currency: obCurrency,
         plan: obPlan,
@@ -350,6 +357,7 @@ export function DeveloperPanel({
         },
         adminFullName: obAdminName.trim() || 'Principal Administrator',
         adminEmail: localPart ? `${localPart}@${cleanDomain}` : undefined,
+        adminPhone: obAdminPhone.trim() || undefined,
       });
 
       setLastProvisioned({
@@ -367,6 +375,10 @@ export function DeveloperPanel({
       setObAdminName('');
       setObAdminLocal('');
       setObAdminLocalEdited(false);
+      setObAdminPhone('');
+      setObContactPhone('');
+      setObContactEmail('');
+      setObPostalAddress('');
       onNotify(`Provisioned ${res.tenant.name} (@${res.tenant.emailDomain}) with 1-time password`, 'success');
       await loadControlPlaneData();
     } catch (err) {
@@ -1234,9 +1246,48 @@ export function DeveloperPanel({
                         onChange={(e) => setObCurrency(e.target.value as CurrencyCode)}
                         className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
                       >
-                        <option value="KES">KES — Kenya Shilling</option>
+                        <option value="KES">KES — Kenya Shilling (Default)</option>
                         <option value="USD">USD — US Dollar</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        School Phone (Printed Docs)
+                      </label>
+                      <input
+                        type="tel"
+                        value={obContactPhone}
+                        onChange={(e) => setObContactPhone(e.target.value)}
+                        placeholder="+254 712 000 000"
+                        className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        School Contact Email
+                      </label>
+                      <input
+                        type="email"
+                        value={obContactEmail}
+                        onChange={(e) => setObContactEmail(e.target.value)}
+                        placeholder={`info@${obDomain || 'school.ac.ke'}`}
+                        className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        Postal Address
+                      </label>
+                      <input
+                        type="text"
+                        value={obPostalAddress}
+                        onChange={(e) => setObPostalAddress(e.target.value)}
+                        placeholder="P.O. Box 450, Nakuru"
+                        className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                      />
                     </div>
                   </div>
 
@@ -1339,7 +1390,7 @@ export function DeveloperPanel({
 
                   <div className="border-t border-slate-200 pt-4 dark:border-slate-800">
                     <div className="text-xs font-semibold">Initial School Administrator Account</div>
-                    <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                       <div>
                         <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
                           Admin Full Name
@@ -1373,11 +1424,23 @@ export function DeveloperPanel({
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Admin Recovery Phone
+                        </label>
+                        <input
+                          type="tel"
+                          value={obAdminPhone}
+                          onChange={(e) => setObAdminPhone(e.target.value)}
+                          placeholder="+254 712 345 678"
+                          className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
                           Initial Password Policy
                         </label>
                         <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
                           <KeyRound className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
-                          <span>Auto-generated 1-time password (changed on 1st login)</span>
+                          <span>Auto-generated 1-time OTP</span>
                         </div>
                       </div>
                     </div>

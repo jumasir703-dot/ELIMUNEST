@@ -11,6 +11,10 @@ import {
   Upload,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import {
+  createBrandedWorksheetFromObjects,
+  parseExcelSheetRowsSmart,
+} from '../lib/documentBranding';
 import { computeClientGrade } from '../lib/format';
 import {
   getStreamsForGrade,
@@ -314,7 +318,11 @@ export function ExamResultsEntryPanel({
       return row;
     });
 
-    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const worksheet = createBrandedWorksheetFromObjects(
+      tenant,
+      `${selectedExamType} Marks Template (${selectedGrade} Stream ${effectiveStream})`,
+      rows
+    );
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(
       workbook,
@@ -324,9 +332,9 @@ export function ExamResultsEntryPanel({
     const safeName = `${selectedExamType}-${selectedGrade}-Stream-${effectiveStream}`
       .replace(/[^a-zA-Z0-9_-]+/g, '_')
       .toLowerCase();
-    XLSX.writeFile(workbook, `${safeName}-marks-template.xlsx`);
+    XLSX.writeFile(workbook, `${tenant.slug}-${safeName}-marks-template.xlsx`);
     onNotify(
-      `Downloaded Excel template with ${allowedSubjects.length} assigned subject column(s) for ${selectedGrade} Stream ${effectiveStream}.`
+      `Downloaded branded Excel template with ${allowedSubjects.length} assigned subject column(s) for ${selectedGrade} Stream ${effectiveStream}.`
     );
   }
 
@@ -357,10 +365,16 @@ export function ExamResultsEntryPanel({
       }
 
       const sheet = workbook.Sheets[firstSheetName];
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-        defval: '',
-        raw: false,
-      });
+      const rows = parseExcelSheetRowsSmart(sheet, [
+        'adm',
+        'student',
+        'name',
+        'score',
+        'marks',
+        'math',
+        'english',
+        'remarks',
+      ]);
       if (rows.length === 0) {
         onNotify('The uploaded Excel sheet has no data rows.', 'error');
         return;

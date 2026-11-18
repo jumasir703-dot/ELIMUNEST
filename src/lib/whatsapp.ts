@@ -183,7 +183,7 @@ export function buildReportCardWhatsAppMessage(params: {
 }
 
 export function buildFeeReminderWhatsAppMessage(params: {
-  tenant: Pick<Tenant, 'name' | 'currency' | 'currentTerm'>;
+  tenant: Pick<Tenant, 'name' | 'currency' | 'currentTerm' | 'mpesaConfig'>;
   invoice: FeeInvoice;
   guardianName: string;
   customNote?: string;
@@ -193,6 +193,8 @@ export function buildFeeReminderWhatsAppMessage(params: {
   const formattedBalance = formatCurrency(invoice.balance, currency);
   const formattedTotal = formatCurrency(invoice.totalAmount, currency);
   const formattedPaid = formatCurrency(invoice.paidAmount, currency);
+  const paybill = tenant.mpesaConfig?.enabled ? tenant.mpesaConfig.paybillNumber : '';
+  const paybillAccountName = tenant.mpesaConfig?.accountName || tenant.name;
 
   const lines = [
     `*${tenant.name.toUpperCase()} — FEE BALANCE REMINDER*`,
@@ -208,8 +210,19 @@ export function buildFeeReminderWhatsAppMessage(params: {
     `• Due Date: ${formatDateShort(invoice.dueDate)}`,
   ];
 
+  if (paybill) {
+    lines.push(
+      `• *M-Pesa Paybill:* ${paybill} (${paybillAccountName}) · Account No: *${invoice.studentCode}*`
+    );
+  }
+
   if (customNote && customNote.trim()) {
     lines.push('', `*Note:* ${customNote.trim()}`);
+  } else if (paybill) {
+    lines.push(
+      '',
+      `Kindly settle the *${formattedBalance}* balance via *M-Pesa Paybill ${paybill}*, Account Number *${invoice.studentCode}*, at your earliest convenience.`
+    );
   } else {
     lines.push(
       '',

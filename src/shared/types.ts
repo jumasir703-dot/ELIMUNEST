@@ -536,6 +536,8 @@ export type NotificationCategory =
 
 export type CurrencyCode = 'KES' | 'USD';
 
+export const DEFAULT_CURRENCY: CurrencyCode = 'KES';
+
 export const PUBLIC_EMAIL_DOMAINS = new Set([
   'gmail.com',
   'googlemail.com',
@@ -587,6 +589,43 @@ export function suggestNameEmailLocalPart(fullName: string): string {
   return `${tokens[0]}.${tokens[tokens.length - 1]}`.slice(0, 48);
 }
 
+export type MpesaEnvironment = 'Sandbox' | 'Production';
+
+export interface TenantMpesaConfig {
+  enabled: boolean;
+  environment: MpesaEnvironment;
+  paybillNumber: string;
+  accountName: string;
+  accountReferenceFormat: string;
+  consumerKey: string;
+  hasConsumerSecret: boolean;
+  consumerSecretMasked?: string;
+  hasPasskey: boolean;
+  passkeyMasked?: string;
+  callbackUrl?: string;
+  settlementBank?: string;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface MpesaTransactionLog {
+  id: string;
+  tenantId: string;
+  paybillNumber: string;
+  mpesaReceipt: string;
+  msisdn: string;
+  accountReference: string;
+  amount: number;
+  studentId?: string;
+  studentName?: string;
+  invoiceId?: string;
+  invoiceNumber?: string;
+  status: 'Settled' | 'Rejected';
+  channel: 'Daraja C2B Webhook' | 'STK / Paybill Terminal';
+  note?: string;
+  receivedAt: string;
+}
+
 export interface Tenant {
   id: string;
   name: string;
@@ -605,7 +644,11 @@ export interface Tenant {
   suspendedAt?: string;
   suspendedBy?: string;
   location: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  postalAddress?: string;
   branding?: TenantBranding;
+  mpesaConfig?: TenantMpesaConfig;
   grades: string[];
   sections: string[];
   gradeStreams?: Record<string, string[]>;
@@ -624,6 +667,7 @@ export interface TenantUser {
   tenantId: string;
   fullName: string;
   email: string;
+  phone?: string;
   role: UserRole;
   status: 'Active' | 'Disabled';
   mustChangePassword?: boolean;
@@ -1183,6 +1227,46 @@ export interface FeeInvoice {
   createdAt: string;
 }
 
+export const INDEPENDENT_VOTELINE_PRESETS = [
+  'Transport Fee',
+  'Academic Trip Fee',
+  'School Uniform & Sportswear',
+  'Swimming & Club Levy',
+  'Remedial / Holiday Tuition',
+  'Graduation & Prize Day Fee',
+] as const;
+
+export interface IndependentVotelinePayment {
+  id: string;
+  receiptNumber: string;
+  amount: number;
+  method: PaymentMethod;
+  reference: string;
+  paidAt: string;
+  recordedBy: string;
+}
+
+export interface IndependentVotelineItem {
+  id: string;
+  tenantId: string;
+  studentId: string;
+  studentName: string;
+  studentCode: string;
+  grade: string;
+  invoiceId?: string;
+  invoiceNumber?: string;
+  term: string;
+  name: string;
+  amount: number;
+  paidAmount: number;
+  balance: number;
+  status: InvoiceStatus;
+  note?: string;
+  payments: IndependentVotelinePayment[];
+  recordedBy: string;
+  createdAt: string;
+}
+
 export const EXPENSE_CATEGORIES = [
   'Payroll & Allowances',
   'Utilities & Water',
@@ -1284,6 +1368,8 @@ export interface PayrollEntry {
   updatedAt: string;
 }
 
+export type BudgetApprovalStatus = 'Draft' | 'Pending Approval' | 'Approved' | 'Rejected';
+
 export interface BudgetAllocation {
   id: string;
   tenantId: string;
@@ -1291,6 +1377,10 @@ export interface BudgetAllocation {
   term: string;
   category: ExpenseCategory;
   allocatedAmount: number;
+  status?: BudgetApprovalStatus;
+  approvedBy?: string;
+  approvedAt?: string;
+  approvalNotes?: string;
   notes?: string;
   updatedAt: string;
 }
@@ -1409,6 +1499,8 @@ export interface TenantWorkspaceData {
   examResults: ExamResult[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
+  independentVotelines?: IndependentVotelineItem[];
+  mpesaTransactions?: MpesaTransactionLog[];
   expenses: SchoolExpense[];
   etimsChecks: EtimsVerificationRecord[];
   reconciliationLines: ReconciliationLine[];

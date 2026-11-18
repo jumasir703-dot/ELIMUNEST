@@ -35,6 +35,9 @@ export interface DeveloperOnboardTenantPayload {
   name: string;
   emailDomain?: string;
   location?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  postalAddress?: string;
   curriculum?: string;
   academicYear?: string;
   currentTerm?: string;
@@ -47,6 +50,7 @@ export interface DeveloperOnboardTenantPayload {
   branding?: Partial<TenantBranding>;
   adminFullName: string;
   adminEmail?: string;
+  adminPhone?: string;
   adminPassword?: string;
 }
 
@@ -60,7 +64,7 @@ export class PlatformDeveloperService {
   private assertDeveloperActor(actor: TenantUser | undefined): TenantUser {
     if (!actor || !isDeveloperRole(actor.role)) {
       throw new ConflictError(
-        'Forbidden: Isolated Developer Control Plane requires Developer or Super Admin role.',
+        'Forbidden: Isolated Developer Control Plane requires Developer role.',
         403
       );
     }
@@ -216,6 +220,9 @@ export class PlatformDeveloperService {
       subscriptionCycle,
       renewalDate: raw.renewalDate,
       location: (raw.location || '').trim() || 'Nairobi, KE',
+      contactEmail: (raw.contactEmail || '').trim() || finalAdminEmail,
+      contactPhone: (raw.contactPhone || raw.adminPhone || '').trim() || '+254 700 000 000',
+      postalAddress: (raw.postalAddress || '').trim() || (raw.location || '').trim() || 'Nairobi, KE',
       branding: {
         primaryColor,
         accentColor,
@@ -227,6 +234,7 @@ export class PlatformDeveloperService {
       rooms: [],
       leadTeacherName: adminFullName,
       leadTeacherEmail: finalAdminEmail,
+      leadTeacherPhone: raw.adminPhone?.trim() || raw.contactPhone?.trim(),
     });
 
     const provisionedAdmin = this.store.provisionTenantAdminAccount(
@@ -234,7 +242,8 @@ export class PlatformDeveloperService {
       adminFullName,
       finalAdminEmail,
       oneTimePassword,
-      true
+      true,
+      raw.adminPhone?.trim() || raw.contactPhone?.trim()
     );
 
     const auditEntry = this.recordAudit(

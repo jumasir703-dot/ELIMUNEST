@@ -7,7 +7,7 @@
       "curriculum": "Kenyan CBC (Playgroup – Grade 12)",
       "academicYear": "2026–2027",
       "currentTerm": "Term 1",
-      "currency": "USD",
+      "currency": "KES",
       "plan": "Enterprise",
       "location": "Nairobi, KE",
       "grades": [
@@ -417,12 +417,31 @@
         "accentColor": "#047857",
         "sidebarColor": "#1F160D",
         "logoDataUrl": "",
-        "tagline": "Excellence & Integrity in CBC Learning"
+        "tagline": "Verified Oakridge Motto"
       },
       "emailDomain": "oakridge.ac.ke",
       "learnerCap": 2500,
       "subscriptionCycle": "Annual",
-      "renewalDate": "2027-08-31"
+      "renewalDate": "2027-08-31",
+      "mpesaConfig": {
+        "enabled": true,
+        "environment": "Sandbox",
+        "paybillNumber": "522522",
+        "accountName": "Oakridge Preparatory Academy Fees",
+        "accountReferenceFormat": "Student Code",
+        "consumerKey": "oakridge_daraja_live_key_01",
+        "hasConsumerSecret": true,
+        "consumerSecretMasked": "••••7a91",
+        "hasPasskey": true,
+        "passkeyMasked": "••••2c88",
+        "callbackUrl": "/api/mpesa/c2b-callback?paybill=522522",
+        "settlementBank": "KCB School Collection A/C 1104829104",
+        "updatedAt": "2026-09-01T08:00:00Z",
+        "updatedBy": "System Seed"
+      },
+      "contactEmail": "info@oakridge.ac.ke",
+      "contactPhone": "+254 712 408 100",
+      "postalAddress": "P.O. Box 45812-00100, Nairobi"
     },
     {
       "id": "tenant-westfield",
@@ -431,7 +450,7 @@
       "curriculum": "Kenyan CBC STEM Track",
       "academicYear": "2026–2027",
       "currentTerm": "Term 1",
-      "currency": "USD",
+      "currency": "KES",
       "plan": "Growth",
       "location": "Mombasa, KE",
       "grades": [
@@ -808,7 +827,26 @@
       "emailDomain": "westfield.ac.ke",
       "learnerCap": 600,
       "subscriptionCycle": "Annual",
-      "renewalDate": "2027-08-31"
+      "renewalDate": "2027-08-31",
+      "mpesaConfig": {
+        "enabled": true,
+        "environment": "Sandbox",
+        "paybillNumber": "522544",
+        "accountName": "Westfield STEM High Fees",
+        "accountReferenceFormat": "Student Code",
+        "consumerKey": "westfield_daraja_key_02",
+        "hasConsumerSecret": true,
+        "consumerSecretMasked": "••••4b19",
+        "hasPasskey": true,
+        "passkeyMasked": "••••9e04",
+        "callbackUrl": "/api/mpesa/c2b-callback?paybill=522544",
+        "settlementBank": "Equity Bank Mombasa Collection A/C",
+        "updatedAt": "2026-09-01T08:00:00Z",
+        "updatedBy": "System Seed"
+      },
+      "contactEmail": "admissions@westfield.ac.ke",
+      "contactPhone": "+254 711 204 510",
+      "postalAddress": "P.O. Box 81204-80100, Mombasa"
     },
     {
       "id": "tenant-stjude",
@@ -1184,7 +1222,372 @@
       "emailDomain": "stjude.ac.ke",
       "learnerCap": 2500,
       "subscriptionCycle": "Annual",
-      "renewalDate": "2027-08-31"
+      "renewalDate": "2027-08-31",
+      "mpesaConfig": {
+        "enabled": true,
+        "environment": "Sandbox",
+        "paybillNumber": "522566",
+        "accountName": "St. Jude International School Fees",
+        "accountReferenceFormat": "Student Code",
+        "consumerKey": "stjude_daraja_key_03",
+        "hasConsumerSecret": true,
+        "consumerSecretMasked": "••••3f50",
+        "hasPasskey": true,
+        "passkeyMasked": "••••6d11",
+        "callbackUrl": "/api/mpesa/c2b-callback?paybill=522566",
+        "settlementBank": "Stanbic Bank Kisumu USD/KES Fee A/C",
+        "updatedAt": "2026-09-01T08:00:00Z",
+        "updatedBy": "System Seed"
+      },
+      "contactEmail": "office@stjude.ac.ke",
+      "contactPhone": "+254 715 630 142",
+      "postalAddress": "P.O. Box 1924-40100, Kisumu"
+    },
+    {
+      "id": "tenant-kilimani-scholars-academy-8df7",
+      "name": "Kilimani Scholars Academy",
+      "slug": "kilimani-scholars-academy",
+      "emailDomain": "kilimanischolarsacademy.ac.ke",
+      "curriculum": "Kenyan CBC & KJSEA",
+      "academicYear": "2026–2027",
+      "currentTerm": "Term 1",
+      "currency": "KES",
+      "plan": "Growth",
+      "status": "Active",
+      "learnerCap": 600,
+      "subscriptionCycle": "Annual",
+      "renewalDate": "2027-11-18",
+      "location": "Nairobi, Kenya",
+      "contactEmail": "info@kilimanischolars.ac.ke",
+      "contactPhone": "+254 711 222 333",
+      "postalAddress": "P.O. Box 7788-00100, Nairobi",
+      "branding": {
+        "primaryColor": "#2563EB",
+        "accentColor": "#0F766E",
+        "sidebarColor": "",
+        "logoDataUrl": "",
+        "tagline": ""
+      },
+      "grades": [
+        "Playgroup",
+        "PP1",
+        "PP2",
+        "Grade 1",
+        "Grade 2",
+        "Grade 3",
+        "Grade 4",
+        "Grade 5",
+        "Grade 6",
+        "Grade 7",
+        "Grade 8",
+        "Grade 9",
+        "Grade 10",
+        "Grade 11",
+        "Grade 12"
+      ],
+      "sections": [
+        "A",
+        "B"
+      ],
+      "gradeStreams": {
+        "Playgroup": [
+          "A",
+          "B"
+        ],
+        "PP1": [
+          "A",
+          "B"
+        ],
+        "PP2": [
+          "A",
+          "B"
+        ],
+        "Grade 1": [
+          "A",
+          "B"
+        ],
+        "Grade 2": [
+          "A",
+          "B"
+        ],
+        "Grade 3": [
+          "A",
+          "B"
+        ],
+        "Grade 4": [
+          "A",
+          "B"
+        ],
+        "Grade 5": [
+          "A",
+          "B"
+        ],
+        "Grade 6": [
+          "A",
+          "B"
+        ],
+        "Grade 7": [
+          "A",
+          "B"
+        ],
+        "Grade 8": [
+          "A",
+          "B"
+        ],
+        "Grade 9": [
+          "A",
+          "B"
+        ],
+        "Grade 10": [
+          "A",
+          "B"
+        ],
+        "Grade 11": [
+          "A",
+          "B"
+        ],
+        "Grade 12": [
+          "A",
+          "B"
+        ]
+      },
+      "subjects": [
+        "Language Activities",
+        "Mathematical Activities",
+        "Environmental Activities",
+        "Psychomotor & Creative Activities",
+        "Religious Education Activities",
+        "English",
+        "Kiswahili",
+        "Indigenous Language",
+        "Mathematics",
+        "Creative Activities",
+        "Religious Education (CRE / IRE / HRE)",
+        "Science & Technology",
+        "Agriculture & Nutrition",
+        "Social Studies",
+        "Creative Arts",
+        "Integrated Science",
+        "Pre-Technical Studies",
+        "Creative Arts & Sports",
+        "Core Mathematics",
+        "Community Service Learning (CSL)",
+        "Physical Education (PE)",
+        "Biology",
+        "Chemistry",
+        "Physics",
+        "Computer Studies",
+        "Business Studies",
+        "History & Citizenship",
+        "Geography"
+      ],
+      "subjectWeeklyLessons": {
+        "Language Activities": 5,
+        "Mathematical Activities": 5,
+        "Environmental Activities": 4,
+        "Psychomotor & Creative Activities": 5,
+        "Religious Education Activities": 5,
+        "English": 5,
+        "Kiswahili": 4,
+        "Indigenous Language": 2,
+        "Mathematics": 5,
+        "Creative Activities": 6,
+        "Religious Education (CRE / IRE / HRE)": 2,
+        "Science & Technology": 4,
+        "Agriculture & Nutrition": 4,
+        "Social Studies": 4,
+        "Creative Arts": 6,
+        "Integrated Science": 5,
+        "Pre-Technical Studies": 4,
+        "Creative Arts & Sports": 5,
+        "Core Mathematics": 5,
+        "Community Service Learning (CSL)": 2,
+        "Physical Education (PE)": 2,
+        "Biology": 3,
+        "Chemistry": 3,
+        "Physics": 3,
+        "Computer Studies": 3,
+        "Business Studies": 3,
+        "History & Citizenship": 3,
+        "Geography": 2
+      },
+      "levelSubjects": {
+        "pre_school": [
+          "Language Activities",
+          "Mathematical Activities",
+          "Environmental Activities",
+          "Psychomotor & Creative Activities",
+          "Religious Education Activities"
+        ],
+        "lower_primary": [
+          "English",
+          "Kiswahili",
+          "Indigenous Language",
+          "Mathematics",
+          "Environmental Activities",
+          "Creative Activities",
+          "Religious Education (CRE / IRE / HRE)"
+        ],
+        "upper_primary": [
+          "English",
+          "Kiswahili",
+          "Mathematics",
+          "Science & Technology",
+          "Agriculture & Nutrition",
+          "Social Studies",
+          "Creative Arts",
+          "Religious Education (CRE / IRE / HRE)"
+        ],
+        "junior_school": [
+          "English",
+          "Kiswahili",
+          "Mathematics",
+          "Integrated Science",
+          "Social Studies",
+          "Agriculture & Nutrition",
+          "Pre-Technical Studies",
+          "Creative Arts & Sports",
+          "Religious Education (CRE / IRE / HRE)"
+        ],
+        "senior_school": [
+          "English",
+          "Kiswahili",
+          "Core Mathematics",
+          "Community Service Learning (CSL)",
+          "Physical Education (PE)",
+          "Biology",
+          "Chemistry",
+          "Physics",
+          "Computer Studies",
+          "Business Studies",
+          "History & Citizenship",
+          "Geography",
+          "Religious Education (CRE / IRE / HRE)"
+        ]
+      },
+      "levelSubjectWeeklyLessons": {
+        "pre_school": {
+          "Language Activities": 5,
+          "Mathematical Activities": 5,
+          "Environmental Activities": 5,
+          "Psychomotor & Creative Activities": 5,
+          "Religious Education Activities": 5
+        },
+        "lower_primary": {
+          "English": 5,
+          "Kiswahili": 4,
+          "Indigenous Language": 2,
+          "Mathematics": 5,
+          "Environmental Activities": 4,
+          "Creative Activities": 6,
+          "Religious Education (CRE / IRE / HRE)": 3
+        },
+        "upper_primary": {
+          "English": 5,
+          "Kiswahili": 4,
+          "Mathematics": 5,
+          "Science & Technology": 4,
+          "Agriculture & Nutrition": 4,
+          "Social Studies": 3,
+          "Creative Arts": 6,
+          "Religious Education (CRE / IRE / HRE)": 3
+        },
+        "junior_school": {
+          "English": 5,
+          "Kiswahili": 4,
+          "Mathematics": 5,
+          "Integrated Science": 5,
+          "Social Studies": 4,
+          "Agriculture & Nutrition": 4,
+          "Pre-Technical Studies": 4,
+          "Creative Arts & Sports": 5,
+          "Religious Education (CRE / IRE / HRE)": 3
+        },
+        "senior_school": {
+          "English": 5,
+          "Kiswahili": 4,
+          "Core Mathematics": 5,
+          "Community Service Learning (CSL)": 2,
+          "Physical Education (PE)": 2,
+          "Biology": 3,
+          "Chemistry": 3,
+          "Physics": 3,
+          "Computer Studies": 3,
+          "Business Studies": 3,
+          "History & Citizenship": 3,
+          "Geography": 2,
+          "Religious Education (CRE / IRE / HRE)": 2
+        }
+      },
+      "rooms": [
+        "Room 101",
+        "Room 102",
+        "Science Lab"
+      ],
+      "teachers": [
+        {
+          "id": "t-873a98",
+          "name": "Grace Muthoni",
+          "email": "grace.muthoni@kilimanischolarsacademy.ac.ke",
+          "phone": "+254 711 222 333",
+          "department": "Administration",
+          "subjects": [
+            "Language Activities"
+          ],
+          "assignedClasses": []
+        }
+      ],
+      "nonTeachingStaff": [
+        {
+          "id": "nts-8df7-1",
+          "name": "Mary Wanjiru",
+          "role": "School Bursar",
+          "department": "Finance & Accounts",
+          "phone": "+254 711 504 210",
+          "email": "bursar@kilimani-scholars-academy.ac.ke"
+        },
+        {
+          "id": "nts-8df7-2",
+          "name": "Samuel Kiprop",
+          "role": "Laboratory Technician",
+          "department": "Laboratories",
+          "phone": "+254 722 814 309",
+          "email": "lab@kilimani-scholars-academy.ac.ke"
+        },
+        {
+          "id": "nts-8df7-3",
+          "name": "Grace Muthoni",
+          "role": "School Matron",
+          "department": "Welfare & Health",
+          "phone": "+254 733 290 411",
+          "email": "matron@kilimani-scholars-academy.ac.ke"
+        },
+        {
+          "id": "nts-8df7-4",
+          "name": "Peter Otieno",
+          "role": "Head of Security",
+          "department": "Security & Grounds",
+          "phone": "+254 714 662 180",
+          "email": "security@kilimani-scholars-academy.ac.ke"
+        },
+        {
+          "id": "nts-8df7-5",
+          "name": "Beatrice Chepkoech",
+          "role": "ICT & Library Assistant",
+          "department": "Library & ICT",
+          "phone": "+254 720 918 542",
+          "email": "library@kilimani-scholars-academy.ac.ke"
+        },
+        {
+          "id": "nts-8df7-6",
+          "name": "Josephat Mwema",
+          "role": "School Caterer",
+          "department": "Catering & Kitchen",
+          "phone": "+254 718 403 775",
+          "email": "catering@kilimani-scholars-academy.ac.ke"
+        }
+      ],
+      "createdAt": "2026-11-18T13:53:04.901Z"
     }
   ],
   "students": [
@@ -3795,6 +4198,36 @@
       "endDate": "2026-11-24",
       "status": "Grading",
       "createdAt": "2026-11-01T09:00:00Z"
+    },
+    {
+      "id": "exm-fbc774",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "title": "Term 1 Opening Exam",
+      "term": "Term 1",
+      "startDate": "2026-09-07",
+      "endDate": "2026-09-11",
+      "status": "Draft",
+      "createdAt": "2026-11-18T13:53:04.902Z"
+    },
+    {
+      "id": "exm-aba2b0",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "title": "Term 1 Mid-Term Exam",
+      "term": "Term 1",
+      "startDate": "2026-10-12",
+      "endDate": "2026-10-16",
+      "status": "Draft",
+      "createdAt": "2026-11-18T13:53:04.902Z"
+    },
+    {
+      "id": "exm-d53cab",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "title": "Term 1 End of Term Exam",
+      "term": "Term 1",
+      "startDate": "2026-11-20",
+      "endDate": "2026-11-26",
+      "status": "Draft",
+      "createdAt": "2026-11-18T13:53:04.902Z"
     }
   ],
   "examResults": [
@@ -6871,6 +7304,72 @@
           "amount": 300
         }
       ]
+    },
+    {
+      "id": "fs-b8b020b0",
+      "tenantId": "tenant-oakridge",
+      "grade": "Grade 4",
+      "term": "Term 2",
+      "votelines": [
+        {
+          "id": "v1",
+          "name": "Tuition & CBC Materials",
+          "amount": 22000
+        },
+        {
+          "id": "v2",
+          "name": "Hot Lunch Program",
+          "amount": 6500
+        },
+        {
+          "id": "v3",
+          "name": "Co-curricular & Activity",
+          "amount": 3000
+        },
+        {
+          "id": "v4",
+          "name": "School Bus & Transport",
+          "amount": 4500
+        }
+      ],
+      "tuitionFee": 22000,
+      "labFee": 6500,
+      "technologyFee": 3000,
+      "activitiesFee": 3000,
+      "totalFee": 36000
+    },
+    {
+      "id": "fs-38d979",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "grade": "Playgroup",
+      "term": "Term 1",
+      "votelines": [
+        {
+          "id": "vl-tuition",
+          "name": "Tuition Fee",
+          "amount": 32000
+        },
+        {
+          "id": "vl-lab",
+          "name": "Laboratory Fee",
+          "amount": 2500
+        },
+        {
+          "id": "vl-tech",
+          "name": "Technology & ICT",
+          "amount": 2000
+        },
+        {
+          "id": "vl-act",
+          "name": "Co-Curricular & Activities",
+          "amount": 1800
+        }
+      ],
+      "tuitionFee": 32000,
+      "labFee": 2500,
+      "technologyFee": 2000,
+      "activitiesFee": 1800,
+      "totalFee": 38300
     }
   ],
   "invoices": [
@@ -7127,6 +7626,17 @@
   ],
   "announcements": [
     {
+      "id": "ann-f66936",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "title": "Welcome to Kilimani Scholars Academy Workspace",
+      "body": "Tenant environment provisioned for 2026–2027 (Kenyan CBC & KJSEA). Configure fee structures, admit students, and schedule classes.",
+      "audience": "All School",
+      "priority": "Normal",
+      "authorName": "Grace Muthoni",
+      "authorRole": "Admin",
+      "createdAt": "2026-11-18T13:53:04.902Z"
+    },
+    {
       "id": "ann-oak-1",
       "tenantId": "tenant-oakridge",
       "title": "Term 1 Final Examination Schedule & Room Allocations Published",
@@ -7210,6 +7720,36 @@
     }
   ],
   "notifications": [
+    {
+      "id": "notif-021f9d2a",
+      "tenantId": "tenant-oakridge",
+      "category": "announcement",
+      "title": "School Branding & Theme Updated",
+      "description": "Oakridge Preparatory Academy branding palette and platform identity have been updated by Super Admin.",
+      "targetModule": "settings",
+      "read": false,
+      "createdAt": "2026-11-18T14:18:20.167Z"
+    },
+    {
+      "id": "notif-8a6bf507",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "category": "announcement",
+      "title": "School Tenant Provisioned",
+      "description": "Kilimani Scholars Academy (Growth) is active and isolated.",
+      "targetModule": "settings",
+      "read": false,
+      "createdAt": "2026-11-18T13:53:04.905Z"
+    },
+    {
+      "id": "notif-fc37b6a9",
+      "tenantId": "tenant-oakridge",
+      "category": "fee",
+      "title": "Budget Approved: Transport & Fuel",
+      "description": "Transport & Fuel ceiling (720) marked Approved by Dr. Helena Vance.",
+      "targetModule": "finance",
+      "read": false,
+      "createdAt": "2026-11-18T13:52:23.467Z"
+    },
     {
       "id": "notif-9968e365",
       "tenantId": "tenant-oakridge",
@@ -7525,6 +8065,26 @@
   "staffAttendance": [],
   "adminAuditLogs": [
     {
+      "id": "audit-3033ddb4",
+      "timestamp": "2026-11-18T14:18:20.170Z",
+      "actorRole": "Super Admin",
+      "actorEmail": "super.admin@elimunest.platform",
+      "action": "UPDATE_BRANDING",
+      "tenantId": "tenant-oakridge",
+      "tenantName": "Oakridge Preparatory Academy",
+      "summary": "Applied theme #B45309 / #047857 (using initials crest)."
+    },
+    {
+      "id": "dev-audit-e160f515",
+      "timestamp": "2026-11-18T13:53:04.964Z",
+      "actorRole": "Developer",
+      "actorEmail": "developer@elimunest.platform",
+      "action": "PROVISION_TENANT",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "tenantName": "Kilimani Scholars Academy",
+      "summary": "Developer provisioned Kilimani Scholars Academy (@kilimanischolarsacademy.ac.ke) on Growth tier (cap: 600 learners). One-time admin password generated for grace.muthoni@kilimanischolarsacademy.ac.ke (password change required on first login)."
+    },
+    {
       "id": "audit-8f40ab7d",
       "timestamp": "2026-11-16T11:49:13.280Z",
       "actorRole": "Admin",
@@ -7737,6 +8297,71 @@
       "recordedBy": "Transport Coordinator",
       "notes": "Scheduled 15,000 km brake & oil service plus diesel refill.",
       "createdAt": "2026-11-14T08:45:00Z"
+    },
+    {
+      "id": "exp-tenant-kilimani-scholars-academy-8df7-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "voucherNumber": "KIL-EXP-202601",
+      "title": "Science Laboratory Reagents & Apparatus",
+      "category": "Teaching & Lab Supplies",
+      "vendor": "AfriLab Scientific Supplies Ltd",
+      "amount": 78000,
+      "paymentMethod": "Bank Transfer",
+      "reference": "EFT-LAB-8821",
+      "expenseDate": "2026-11-04",
+      "status": "Paid",
+      "recordedBy": "Bursar Office",
+      "notes": "Chemistry & Biology Grade 9-12 practical consumables.",
+      "createdAt": "2026-11-04T09:15:00Z"
+    },
+    {
+      "id": "exp-tenant-kilimani-scholars-academy-8df7-2",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "voucherNumber": "KIL-EXP-202602",
+      "title": "Term 1 Catering & Kitchen Provisions",
+      "category": "Catering & Boarding",
+      "vendor": "Highland Fresh Produce Co.",
+      "amount": 144000,
+      "paymentMethod": "Bank Transfer",
+      "reference": "EFT-CAT-4410",
+      "expenseDate": "2026-11-08",
+      "status": "Paid",
+      "recordedBy": "Bursar Office",
+      "notes": "Dry grains, dairy, and produce batch delivery.",
+      "createdAt": "2026-11-08T11:30:00Z"
+    },
+    {
+      "id": "exp-tenant-kilimani-scholars-academy-8df7-3",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "voucherNumber": "KIL-EXP-202603",
+      "title": "Electricity & Water Utility Settlement",
+      "category": "Utilities & Water",
+      "vendor": "Kenya Power & Water Services",
+      "amount": 50400,
+      "paymentMethod": "Mobile Money",
+      "reference": "MPESA-UTL-9034",
+      "expenseDate": "2026-11-11",
+      "status": "Approved",
+      "recordedBy": "Accounts Office",
+      "notes": "Monthly campus electricity and borehole pump billing.",
+      "createdAt": "2026-11-11T14:20:00Z"
+    },
+    {
+      "id": "exp-tenant-kilimani-scholars-academy-8df7-4",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "voucherNumber": "KIL-EXP-202604",
+      "title": "School Bus Diesel & Routine Servicing",
+      "category": "Transport & Fuel",
+      "vendor": "Metro Fleet Energy Station",
+      "amount": 37200,
+      "paymentMethod": "Card",
+      "reference": "FLT-2026-19",
+      "expenseDate": "2026-11-14",
+      "status": "Pending Approval",
+      "recordedBy": "Transport Coordinator",
+      "notes": "Scheduled 15,000 km brake & oil service plus diesel refill.",
+      "etimsStatus": "Unverified",
+      "createdAt": "2026-11-14T08:45:00Z"
     }
   ],
   "etimsChecks": [
@@ -7833,6 +8458,40 @@
       "supplierName": "Highland Fresh Produce Co.",
       "supplierKraPin": "P051993044M",
       "cuInvoiceNumber": "KRAMW012026ST0299",
+      "receiptDate": "2026-11-08",
+      "taxableAmount": 124138,
+      "vatAmount": 19862,
+      "totalAmount": 144000,
+      "status": "Verified",
+      "verificationNotes": "Zero-rated & standard rated farm produce tax invoice validated.",
+      "checkedBy": "Accounts Office",
+      "checkedAt": "2026-11-08T13:05:00Z"
+    },
+    {
+      "id": "etims-tenant-kilimani-scholars-academy-8df7-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "expenseId": "exp-tenant-kilimani-scholars-academy-8df7-1",
+      "voucherNumber": "KIL-EXP-202601",
+      "supplierName": "AfriLab Scientific Supplies Ltd",
+      "supplierKraPin": "P051482910K",
+      "cuInvoiceNumber": "KRAMW012026KI0184",
+      "receiptDate": "2026-11-04",
+      "taxableAmount": 67241,
+      "vatAmount": 10759,
+      "totalAmount": 78000,
+      "status": "Verified",
+      "verificationNotes": "CU serial & supplier KRA PIN verified against KRA eTIMS format.",
+      "checkedBy": "Bursar Office",
+      "checkedAt": "2026-11-04T10:10:00Z"
+    },
+    {
+      "id": "etims-tenant-kilimani-scholars-academy-8df7-2",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "expenseId": "exp-tenant-kilimani-scholars-academy-8df7-2",
+      "voucherNumber": "KIL-EXP-202602",
+      "supplierName": "Highland Fresh Produce Co.",
+      "supplierKraPin": "P051993044M",
+      "cuInvoiceNumber": "KRAMW012026KI0299",
       "receiptDate": "2026-11-08",
       "taxableAmount": 124138,
       "vatAmount": 19862,
@@ -7985,6 +8644,51 @@
       "accountName": "KCB Main Operating A/C",
       "transactionDate": "2026-11-13",
       "statementRef": "BNKCHG-ST--11",
+      "narration": "MONTHLY BANK LEDGER & RTGS COMMISSION",
+      "direction": "Debit",
+      "amount": 2450,
+      "status": "Unmatched",
+      "notes": "Pending expense voucher capture for monthly bank charge.",
+      "importedAt": "2026-11-14T09:00:00Z"
+    },
+    {
+      "id": "rec-tenant-kilimani-scholars-academy-8df7-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "channel": "M-Pesa",
+      "accountName": "Paybill 522533 — School Fees",
+      "transactionDate": "2026-11-04",
+      "statementRef": "UBC48KXKI1",
+      "narration": "MPESA FEE COLLECTION - TERM 1",
+      "direction": "Credit",
+      "amount": 222000,
+      "status": "Matched",
+      "matchedType": "Fee Payment",
+      "matchedLabel": "Tuition Fee Receipt Match",
+      "importedAt": "2026-11-12T08:00:00Z"
+    },
+    {
+      "id": "rec-tenant-kilimani-scholars-academy-8df7-2",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "channel": "Bank",
+      "accountName": "KCB Main Operating A/C",
+      "transactionDate": "2026-11-04",
+      "statementRef": "EFT-LAB-8821",
+      "narration": "RTGS TO AFRILAB SCIENTIFIC SUPPLIES",
+      "direction": "Debit",
+      "amount": 78000,
+      "status": "Matched",
+      "matchedType": "Expense Voucher",
+      "matchedRecordId": "exp-tenant-kilimani-scholars-academy-8df7-1",
+      "matchedLabel": "KIL-EXP-202601 · AfriLab Scientific Supplies Ltd",
+      "importedAt": "2026-11-12T08:00:00Z"
+    },
+    {
+      "id": "rec-tenant-kilimani-scholars-academy-8df7-3",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "channel": "Bank",
+      "accountName": "KCB Main Operating A/C",
+      "transactionDate": "2026-11-13",
+      "statementRef": "BNKCHG-KIL-11",
       "narration": "MONTHLY BANK LEDGER & RTGS COMMISSION",
       "direction": "Debit",
       "amount": 2450,
@@ -8644,6 +9348,153 @@
       "netPay": 42392,
       "status": "Draft",
       "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-t-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "t-873a98",
+      "staffName": "Grace Muthoni",
+      "staffCategory": "Teaching",
+      "designation": "Administration Teacher",
+      "basicSalary": 58000,
+      "allowances": 9500,
+      "grossPay": 67500,
+      "paye": 11418,
+      "nssf": 4050,
+      "shif": 1856,
+      "housingLevy": 1013,
+      "saccoOrLoan": 3500,
+      "totalDeductions": 21837,
+      "netPay": 45663,
+      "status": "Approved",
+      "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-n-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "nts-8df7-1",
+      "staffName": "Mary Wanjiru",
+      "staffCategory": "Non-Teaching",
+      "designation": "School Bursar",
+      "basicSalary": 34000,
+      "allowances": 5000,
+      "grossPay": 39000,
+      "paye": 3381,
+      "nssf": 2340,
+      "shif": 1073,
+      "housingLevy": 585,
+      "saccoOrLoan": 2500,
+      "totalDeductions": 9879,
+      "netPay": 29121,
+      "status": "Draft",
+      "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-n-2",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "nts-8df7-2",
+      "staffName": "Samuel Kiprop",
+      "staffCategory": "Non-Teaching",
+      "designation": "Laboratory Technician",
+      "basicSalary": 37500,
+      "allowances": 5000,
+      "grossPay": 42500,
+      "paye": 4368,
+      "nssf": 2550,
+      "shif": 1169,
+      "housingLevy": 638,
+      "saccoOrLoan": 0,
+      "totalDeductions": 8725,
+      "netPay": 33775,
+      "status": "Draft",
+      "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-n-3",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "nts-8df7-3",
+      "staffName": "Grace Muthoni",
+      "staffCategory": "Non-Teaching",
+      "designation": "School Matron",
+      "basicSalary": 41000,
+      "allowances": 5000,
+      "grossPay": 46000,
+      "paye": 5355,
+      "nssf": 2760,
+      "shif": 1265,
+      "housingLevy": 690,
+      "saccoOrLoan": 0,
+      "totalDeductions": 10070,
+      "netPay": 35930,
+      "status": "Draft",
+      "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-n-4",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "nts-8df7-4",
+      "staffName": "Peter Otieno",
+      "staffCategory": "Non-Teaching",
+      "designation": "Head of Security",
+      "basicSalary": 44500,
+      "allowances": 5000,
+      "grossPay": 49500,
+      "paye": 6342,
+      "nssf": 2970,
+      "shif": 1361,
+      "housingLevy": 743,
+      "saccoOrLoan": 0,
+      "totalDeductions": 11416,
+      "netPay": 38084,
+      "status": "Draft",
+      "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-n-5",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "nts-8df7-5",
+      "staffName": "Beatrice Chepkoech",
+      "staffCategory": "Non-Teaching",
+      "designation": "ICT & Library Assistant",
+      "basicSalary": 48000,
+      "allowances": 5000,
+      "grossPay": 53000,
+      "paye": 7329,
+      "nssf": 3180,
+      "shif": 1458,
+      "housingLevy": 795,
+      "saccoOrLoan": 0,
+      "totalDeductions": 12762,
+      "netPay": 40238,
+      "status": "Draft",
+      "updatedAt": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "payr-tenant-kilimani-scholars-academy-8df7-n-6",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "payPeriod": "2026-11",
+      "staffId": "nts-8df7-6",
+      "staffName": "Josephat Mwema",
+      "staffCategory": "Non-Teaching",
+      "designation": "School Caterer",
+      "basicSalary": 51500,
+      "allowances": 5000,
+      "grossPay": 56500,
+      "paye": 8316,
+      "nssf": 3390,
+      "shif": 1554,
+      "housingLevy": 848,
+      "saccoOrLoan": 0,
+      "totalDeductions": 14108,
+      "netPay": 42392,
+      "status": "Draft",
+      "updatedAt": "2026-11-14T10:00:00Z"
     }
   ],
   "budgets": [
@@ -8655,7 +9506,11 @@
       "category": "Payroll & Allowances",
       "allocatedAmount": 6000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Mr. Kamau Njoroge",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-oakridge-2",
@@ -8665,7 +9520,11 @@
       "category": "Utilities & Water",
       "allocatedAmount": 760,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Mr. Kamau Njoroge",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-oakridge-3",
@@ -8675,7 +9534,11 @@
       "category": "Catering & Boarding",
       "allocatedAmount": 2240,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Mr. Kamau Njoroge",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-oakridge-4",
@@ -8685,7 +9548,11 @@
       "category": "Teaching & Lab Supplies",
       "allocatedAmount": 1120,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Mr. Kamau Njoroge",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-oakridge-5",
@@ -8695,7 +9562,11 @@
       "category": "Maintenance & Repairs",
       "allocatedAmount": 880,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Mr. Kamau Njoroge",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-oakridge-6",
@@ -8705,7 +9576,11 @@
       "category": "Transport & Fuel",
       "allocatedAmount": 720,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-18T13:52:23.445Z",
+      "status": "Approved",
+      "approvalNotes": "Board approved Q2 fuel allocation",
+      "approvedBy": "Dr. Helena Vance",
+      "approvedAt": "2026-11-18T13:52:23.445Z"
     },
     {
       "id": "bdg-tenant-oakridge-7",
@@ -8715,7 +9590,9 @@
       "category": "ICT & Software",
       "allocatedAmount": 600,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval."
     },
     {
       "id": "bdg-tenant-oakridge-8",
@@ -8725,7 +9602,11 @@
       "category": "Administration & Statutory",
       "allocatedAmount": 680,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Mr. Kamau Njoroge",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-westfield-1",
@@ -8735,7 +9616,11 @@
       "category": "Payroll & Allowances",
       "allocatedAmount": 6000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "David Chen",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-westfield-2",
@@ -8745,7 +9630,11 @@
       "category": "Utilities & Water",
       "allocatedAmount": 760,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "David Chen",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-westfield-3",
@@ -8755,7 +9644,11 @@
       "category": "Catering & Boarding",
       "allocatedAmount": 2240,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "David Chen",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-westfield-4",
@@ -8765,7 +9658,11 @@
       "category": "Teaching & Lab Supplies",
       "allocatedAmount": 1120,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "David Chen",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-westfield-5",
@@ -8775,7 +9672,11 @@
       "category": "Maintenance & Repairs",
       "allocatedAmount": 880,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "David Chen",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-westfield-6",
@@ -8785,7 +9686,9 @@
       "category": "Transport & Fuel",
       "allocatedAmount": 720,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval."
     },
     {
       "id": "bdg-tenant-westfield-7",
@@ -8795,7 +9698,9 @@
       "category": "ICT & Software",
       "allocatedAmount": 600,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval."
     },
     {
       "id": "bdg-tenant-westfield-8",
@@ -8805,7 +9710,11 @@
       "category": "Administration & Statutory",
       "allocatedAmount": 680,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "David Chen",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-stjude-1",
@@ -8815,7 +9724,11 @@
       "category": "Payroll & Allowances",
       "allocatedAmount": 750000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Arthur Pendelton",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-stjude-2",
@@ -8825,7 +9738,11 @@
       "category": "Utilities & Water",
       "allocatedAmount": 95000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Arthur Pendelton",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-stjude-3",
@@ -8835,7 +9752,11 @@
       "category": "Catering & Boarding",
       "allocatedAmount": 280000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Arthur Pendelton",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-stjude-4",
@@ -8845,7 +9766,11 @@
       "category": "Teaching & Lab Supplies",
       "allocatedAmount": 140000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Arthur Pendelton",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-stjude-5",
@@ -8855,7 +9780,11 @@
       "category": "Maintenance & Repairs",
       "allocatedAmount": 110000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Arthur Pendelton",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
     },
     {
       "id": "bdg-tenant-stjude-6",
@@ -8865,7 +9794,9 @@
       "category": "Transport & Fuel",
       "allocatedAmount": 90000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval."
     },
     {
       "id": "bdg-tenant-stjude-7",
@@ -8875,7 +9806,9 @@
       "category": "ICT & Software",
       "allocatedAmount": 75000,
       "notes": "Term 1 departmental ceiling",
-      "updatedAt": "2026-11-01T08:00:00Z"
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval."
     },
     {
       "id": "bdg-tenant-stjude-8",
@@ -8884,6 +9817,118 @@
       "term": "Term 1",
       "category": "Administration & Statutory",
       "allocatedAmount": 85000,
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z",
+      "status": "Approved",
+      "approvedBy": "Arthur Pendelton",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations."
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Payroll & Allowances",
+      "allocatedAmount": 750000,
+      "status": "Approved",
+      "approvedBy": "Grace Muthoni",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-2",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Utilities & Water",
+      "allocatedAmount": 95000,
+      "status": "Approved",
+      "approvedBy": "Grace Muthoni",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-3",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Catering & Boarding",
+      "allocatedAmount": 280000,
+      "status": "Approved",
+      "approvedBy": "Grace Muthoni",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-4",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Teaching & Lab Supplies",
+      "allocatedAmount": 140000,
+      "status": "Approved",
+      "approvedBy": "Grace Muthoni",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-5",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Maintenance & Repairs",
+      "allocatedAmount": 110000,
+      "status": "Approved",
+      "approvedBy": "Grace Muthoni",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-6",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Transport & Fuel",
+      "allocatedAmount": 90000,
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-7",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "ICT & Software",
+      "allocatedAmount": 75000,
+      "status": "Pending Approval",
+      "approvalNotes": "Awaiting specific departmental budget approval.",
+      "notes": "Term 1 departmental ceiling",
+      "updatedAt": "2026-11-01T08:00:00Z"
+    },
+    {
+      "id": "bdg-tenant-kilimani-scholars-academy-8df7-8",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fiscalYear": "2026–2027",
+      "term": "Term 1",
+      "category": "Administration & Statutory",
+      "allocatedAmount": 85000,
+      "status": "Approved",
+      "approvedBy": "Grace Muthoni",
+      "approvedAt": "2026-11-01T08:00:00Z",
+      "approvalNotes": "Approved for current term operations.",
       "notes": "Term 1 departmental ceiling",
       "updatedAt": "2026-11-01T08:00:00Z"
     }
@@ -8999,6 +10044,43 @@
       "decision": "Pending Sign-Off",
       "remarks": "Awaiting Finance Sub-Committee counter-signature before disbursement.",
       "createdAt": "2026-11-15T09:00:00Z"
+    },
+    {
+      "id": "apr-tenant-kilimani-scholars-academy-8df7-1",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "referenceCode": "KIL-BOM-2026-01",
+      "committee": "Procurement & Tendering Committee",
+      "subject": "Term 1 Science Laboratory Apparatus & Reagents Tender",
+      "linkedExpenseId": "exp-tenant-kilimani-scholars-academy-8df7-1",
+      "linkedVoucherNumber": "KIL-EXP-202601",
+      "amount": 78000,
+      "meetingDate": "2026-11-02",
+      "minuteReference": "MIN/PROC/04/2026",
+      "chairpersonName": "Dr. Margaret Kariuki (BOM Chair)",
+      "secretaryName": "Dr. Helena Vance (Principal)",
+      "bursarName": "Mary Wanjiru (School Bursar)",
+      "decision": "Approved",
+      "remarks": "Awarded to lowest evaluated compliant bidder AfriLab Scientific.",
+      "createdAt": "2026-11-02T14:00:00Z",
+      "signedAt": "2026-11-02T16:15:00Z"
+    },
+    {
+      "id": "apr-tenant-kilimani-scholars-academy-8df7-2",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "referenceCode": "KIL-BOM-2026-02",
+      "committee": "Board of Management (BOM)",
+      "subject": "School Bus Major Service & Term 1 Fleet Fuel Requisition",
+      "linkedExpenseId": "exp-tenant-kilimani-scholars-academy-8df7-4",
+      "linkedVoucherNumber": "KIL-EXP-202604",
+      "amount": 37200,
+      "meetingDate": "2026-11-15",
+      "minuteReference": "MIN/FIN/11/2026",
+      "chairpersonName": "Dr. Margaret Kariuki (BOM Chair)",
+      "secretaryName": "Dr. Helena Vance (Principal)",
+      "bursarName": "Mary Wanjiru (School Bursar)",
+      "decision": "Pending Sign-Off",
+      "remarks": "Awaiting Finance Sub-Committee counter-signature before disbursement.",
+      "createdAt": "2026-11-15T09:00:00Z"
     }
   ],
   "whatsappDispatches": [],
@@ -9021,12 +10103,14 @@
         "fees",
         "communications",
         "settings"
-      ]
+      ],
+      "phone": "+254 700 100 001",
+      "lastLoginAt": "2026-11-18T14:18:20.249Z"
     },
     {
       "id": "usr-platform-super",
-      "tenantId": "platform",
-      "fullName": "Platform Super Admin",
+      "tenantId": "tenant-oakridge",
+      "fullName": "Oakridge Super Admin",
       "email": "super.admin@elimunest.platform",
       "role": "Super Admin",
       "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
@@ -9041,7 +10125,9 @@
         "fees",
         "communications",
         "settings"
-      ]
+      ],
+      "phone": "+254 700 100 002",
+      "lastLoginAt": "2026-11-18T14:18:20.067Z"
     },
     {
       "id": "usr-oak-admin",
@@ -9049,7 +10135,7 @@
       "fullName": "Dr. Helena Vance",
       "email": "helena.vance@oakridge.ac.ke",
       "role": "Admin",
-      "passwordHash": "scrypt:040989e9ca8345c9e950561c12f2e200:7335890e47238939091580562f8c5ee339c409f3d35c3a1e7dd3d9e6edca02c129732d18c9c013cb906c5b6b8b07d17f18c1c7d09323dd3e645d049a391d9c0e",
+      "passwordHash": "scrypt:74f3724e7b1556f3a0b25af5a424e4cb:3642a9b0be8d625e97f5f3e2164b670b251e24123ac1e0a305b6ba5ca2eab580ed4b2bbe4d84c28bf0df2bf99bf4ec86d418db074d76bffb7edf2c6f0566cebd",
       "status": "Active",
       "createdAt": "2026-09-01T08:00:00Z",
       "allowedModules": [
@@ -9061,7 +10147,10 @@
         "fees",
         "communications",
         "settings"
-      ]
+      ],
+      "phone": "+254 712 408 100",
+      "lastLoginAt": "2026-11-18T13:52:48.101Z",
+      "mustChangePassword": false
     },
     {
       "id": "usr-oak-bursar",
@@ -9076,7 +10165,8 @@
         "analytics",
         "fees",
         "communications"
-      ]
+      ],
+      "phone": "+254 722 408 101"
     },
     {
       "id": "usr-oak-teacher",
@@ -9093,7 +10183,8 @@
         "attendance",
         "exams",
         "communications"
-      ]
+      ],
+      "phone": "+254 712 408 112"
     },
     {
       "id": "usr-oak-registrar",
@@ -9109,7 +10200,8 @@
         "admissions",
         "attendance",
         "communications"
-      ]
+      ],
+      "phone": "+254 733 408 103"
     },
     {
       "id": "usr-west-admin",
@@ -9129,7 +10221,8 @@
         "fees",
         "communications",
         "settings"
-      ]
+      ],
+      "phone": "+254 711 204 510"
     },
     {
       "id": "usr-west-bursar",
@@ -9144,7 +10237,8 @@
         "analytics",
         "fees",
         "communications"
-      ]
+      ],
+      "phone": "+254 722 308 614"
     },
     {
       "id": "usr-sj-admin",
@@ -9164,7 +10258,8 @@
         "fees",
         "communications",
         "settings"
-      ]
+      ],
+      "phone": "+254 715 630 142"
     },
     {
       "id": "usr-sj-teacher",
@@ -9181,7 +10276,46 @@
         "attendance",
         "exams",
         "communications"
-      ]
+      ],
+      "phone": "+254 726 741 253"
+    },
+    {
+      "id": "usr-916adc8d",
+      "tenantId": "tenant-kilimani-scholars-academy-8df7",
+      "fullName": "Grace Muthoni",
+      "email": "grace.muthoni@kilimanischolarsacademy.ac.ke",
+      "phone": "+254 711 222 334",
+      "role": "Admin",
+      "passwordHash": "scrypt:f7d98c1b1922553a26e5a603bbe7758e:386341d3b4f239203724b15a8f0a29d3c32896628b9dd575589a141835c256b66067458b7bf83e4e1a29e705fe309053ab0db25f2c0d00dc765912497fcba661",
+      "status": "Active",
+      "mustChangePassword": true,
+      "allowedModules": [
+        "analytics",
+        "admissions",
+        "timetable",
+        "attendance",
+        "exams",
+        "fees",
+        "communications",
+        "settings"
+      ],
+      "createdAt": "2026-11-18T13:53:04.908Z"
     }
-  ]
+  ],
+  "mpesaSecrets": {
+    "tenant-oakridge": {
+      "consumerSecret": "oakridge-sandbox-secret-7a91",
+      "passkey": "oakridge-lipa-passkey-2c88"
+    },
+    "tenant-westfield": {
+      "consumerSecret": "westfield-sandbox-secret-4b19",
+      "passkey": "westfield-lipa-passkey-9e04"
+    },
+    "tenant-stjude": {
+      "consumerSecret": "stjude-sandbox-secret-3f50",
+      "passkey": "stjude-lipa-passkey-6d11"
+    }
+  },
+  "mpesaTransactions": [],
+  "independentVotelines": []
 }

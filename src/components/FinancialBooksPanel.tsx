@@ -14,6 +14,7 @@ import {
 } from '../lib/accounting';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import type { TenantWorkspaceData } from '../shared/types';
+import { TenantDocumentHeader } from './TenantDocumentHeader';
 
 interface FinancialBooksPanelProps {
   workspace: TenantWorkspaceData;
@@ -279,6 +280,15 @@ export function FinancialBooksPanel({ workspace, onNotify }: FinancialBooksPanel
             </button>
           )}
         </div>
+      </div>
+
+      {/* Print-ready Official Tenant Letterhead */}
+      <div className="hidden rounded-xl border border-slate-200 bg-white p-5 print:block">
+        <TenantDocumentHeader
+          tenant={tenant}
+          documentTitle="Financial & Statutory Accounting Statement"
+          subtitle={`Currency: ${tenant.currency} · As of ${formatDateShort(report.asOfDate)}`}
+        />
       </div>
 
       {/* 1. Statement of Profit & Loss */}

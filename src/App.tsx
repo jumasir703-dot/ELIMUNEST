@@ -886,7 +886,7 @@ export default function App() {
             }`}
           >
             {isPlatformSuperAdmin
-              ? 'Open Super Admin Panel'
+              ? 'Multi-Tenant Quick Admin'
               : canAccessSuperAdmin
               ? 'School Theme & Admin'
               : 'School Settings'}

@@ -34,7 +34,14 @@ interface SettingsModuleProps {
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
 
-const STAFF_ROLE_OPTIONS: UserRole[] = ['Admin', 'Registrar', 'Teacher', 'Bursar', 'Parent'];
+const STAFF_ROLE_OPTIONS: UserRole[] = [
+  'Super Admin',
+  'Admin',
+  'Registrar',
+  'Teacher',
+  'Bursar',
+  'Parent',
+];
 
 export function SettingsModule({
   workspace,
@@ -47,7 +54,7 @@ export function SettingsModule({
   const { tenant } = workspace;
   const canMutateTenant =
     currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
-  const isSuperAdmin = currentRole === 'Super Admin';
+  const isDeveloper = currentRole === 'Developer';
   const domainSuffix = tenant.emailDomain || `${tenant.slug}.ac.ke`;
 
   const [tenantUsers, setTenantUsers] = useState<TenantUser[]>([]);
@@ -56,6 +63,7 @@ export function SettingsModule({
   const [staffFullName, setStaffFullName] = useState('');
   const [staffEmailHandle, setStaffEmailHandle] = useState('');
   const [staffHandleEdited, setStaffHandleEdited] = useState(false);
+  const [staffPhone, setStaffPhone] = useState('');
   const [staffRole, setStaffRole] = useState<UserRole>('Teacher');
   const [staffModules, setStaffModules] = useState<TenantModulePermission[]>(
     DEFAULT_ROLE_MODULES.Teacher
@@ -83,6 +91,9 @@ export function SettingsModule({
     currentTerm: tenant.currentTerm,
     currency: tenant.currency,
     location: tenant.location,
+    contactEmail: tenant.contactEmail || '',
+    contactPhone: tenant.contactPhone || '',
+    postalAddress: tenant.postalAddress || '',
   });
 
   useEffect(() => {
@@ -94,6 +105,9 @@ export function SettingsModule({
       currentTerm: tenant.currentTerm,
       currency: tenant.currency,
       location: tenant.location,
+      contactEmail: tenant.contactEmail || '',
+      contactPhone: tenant.contactPhone || '',
+      postalAddress: tenant.postalAddress || '',
     });
   }, [tenant]);
 
@@ -197,7 +211,7 @@ export function SettingsModule({
           .map((s) => s.trim())
           .filter(Boolean),
         leadTeacherName: provisionForm.leadTeacherName || 'Principal Admin',
-        leadTeacherEmail: provisionForm.leadTeacherEmail || 'principal@school.edu',
+        leadTeacherEmail: provisionForm.leadTeacherEmail || 'principal@school.ac.ke',
       });
       onSwitchTenant(created.id);
       setProvisionForm({ ...provisionForm, name: '', location: '', leadTeacherName: '', leadTeacherEmail: '' });
@@ -240,6 +254,7 @@ export function SettingsModule({
       const res = await saasApi.createTenantStaffUser(tenant.id, {
         fullName: staffFullName.trim(),
         email: `${local}@${domainSuffix}`,
+        phone: staffPhone.trim() || undefined,
         role: staffRole,
         allowedModules: staffModules,
       });
@@ -252,6 +267,7 @@ export function SettingsModule({
       setStaffFullName('');
       setStaffEmailHandle('');
       setStaffHandleEdited(false);
+      setStaffPhone('');
       setStaffRole('Teacher');
       setStaffModules(DEFAULT_ROLE_MODULES.Teacher);
       setShowAddStaff(false);
@@ -313,10 +329,12 @@ export function SettingsModule({
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-          Tenant Administration & Provisioning
+          {isDeveloper ? 'Tenant Administration & Provisioning' : 'School Settings & Access Control'}
         </h1>
         <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-          Configure {tenant.name} academic parameters, manage faculty/rooms/subjects, or spin up an isolated new school tenant.
+          {isDeveloper
+            ? `Configure ${tenant.name} academic parameters, manage faculty/rooms/subjects, or spin up an isolated new school tenant.`
+            : `Configure ${tenant.name} academic parameters, manage faculty/rooms/subjects, and assign staff access rights.`}
         </p>
       </div>
 
@@ -427,6 +445,42 @@ export function SettingsModule({
                 <option value="KES">KES (Kenya Shilling)</option>
                 <option value="USD">USD (US Dollar)</option>
               </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                School Contact Phone (Printed Docs)
+              </label>
+              <input
+                type="tel"
+                value={tenantForm.contactPhone}
+                onChange={(e) => setTenantForm({ ...tenantForm, contactPhone: e.target.value })}
+                placeholder="+254 712 408 100"
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Official Contact Email (Printed Docs)
+              </label>
+              <input
+                type="email"
+                value={tenantForm.contactEmail}
+                onChange={(e) => setTenantForm({ ...tenantForm, contactEmail: e.target.value })}
+                placeholder={`info@${domainSuffix}`}
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Postal Address (Letterhead &amp; Statements)
+              </label>
+              <input
+                type="text"
+                value={tenantForm.postalAddress}
+                onChange={(e) => setTenantForm({ ...tenantForm, postalAddress: e.target.value })}
+                placeholder="P.O. Box 14820-00800, Westlands, Nairobi"
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
             </div>
           </div>
 
@@ -632,27 +686,41 @@ export function SettingsModule({
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                    School Email
-                  </label>
-                  <div className="mt-1 flex overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                      School Email
+                    </label>
+                    <div className="mt-1 flex overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700">
+                      <input
+                        type="text"
+                        required
+                        value={staffEmailHandle}
+                        onChange={(e) => {
+                          setStaffHandleEdited(true);
+                          setStaffEmailHandle(
+                            e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, '')
+                          );
+                        }}
+                        placeholder="jane.wanjiku"
+                        className="min-w-0 flex-1 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:outline-none dark:bg-slate-900 dark:text-slate-100"
+                      />
+                      <span className="flex shrink-0 items-center border-l border-slate-200 bg-slate-100 px-2.5 font-mono text-[11px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                        @{domainSuffix}
+                      </span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                      Recovery Phone (Password Reset)
+                    </label>
                     <input
-                      type="text"
-                      required
-                      value={staffEmailHandle}
-                      onChange={(e) => {
-                        setStaffHandleEdited(true);
-                        setStaffEmailHandle(
-                          e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, '')
-                        );
-                      }}
-                      placeholder="jane.wanjiku"
-                      className="min-w-0 flex-1 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 focus:outline-none dark:bg-slate-900 dark:text-slate-100"
+                      type="tel"
+                      value={staffPhone}
+                      onChange={(e) => setStaffPhone(e.target.value)}
+                      placeholder="+254 712 345 678"
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                     />
-                    <span className="flex shrink-0 items-center border-l border-slate-200 bg-slate-100 px-2.5 font-mono text-[11px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                      @{domainSuffix}
-                    </span>
                   </div>
                 </div>
 
@@ -745,6 +813,7 @@ export function SettingsModule({
                           </div>
                           <p className="truncate font-mono text-[11px] text-slate-500 dark:text-slate-400">
                             {u.email}
+                            {u.phone ? ` · ${u.phone}` : ''}
                           </p>
                           <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
                             Access:{' '}
@@ -884,7 +953,7 @@ export function SettingsModule({
             )}
           </div>
 
-          {isSuperAdmin && (
+          {isDeveloper && (
             <form
               onSubmit={handleProvisionTenant}
               className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"

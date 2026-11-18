@@ -27,7 +27,10 @@ import type {
   FeeInvoice,
   FeeStructure,
   ImpersonatorMeta,
+  IndependentVotelineItem,
   LeaveOutChit,
+  MpesaEnvironment,
+  MpesaTransactionLog,
   NonTeachingStaffProfile,
   OnboardingChecklist,
   PaymentMethod,
@@ -48,6 +51,7 @@ import type {
   Tenant,
   TenantBranding,
   TenantModulePermission,
+  TenantMpesaConfig,
   TenantPlan,
   TenantStatus,
   TenantUser,
@@ -117,7 +121,7 @@ function isPrivilegedRole(role: UserRole): boolean {
 }
 
 export function isDeveloperRoleClient(role?: UserRole): boolean {
-  return role === 'Developer' || role === 'Super Admin';
+  return role === 'Developer';
 }
 
 function readDevRestoreSession(): AuthSessionInfo | null {
@@ -379,6 +383,33 @@ export const saasApi = {
     return session;
   },
 
+  requestPasswordResetByPhone(payload: { email: string; phone: string }) {
+    return apiRequest<{
+      ok: boolean;
+      maskedPhone: string;
+      expiresInMinutes: number;
+      deliveryChannel: string;
+      verificationCode: string;
+    }>('/api/auth/forgot-password/request', {
+      method: 'POST',
+      skipAuth: true,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  verifyPasswordResetByPhone(payload: {
+    email: string;
+    phone: string;
+    code: string;
+    newPassword: string;
+  }) {
+    return apiRequest<{ ok: boolean; email: string }>('/api/auth/forgot-password/verify', {
+      method: 'POST',
+      skipAuth: true,
+      body: JSON.stringify(payload),
+    });
+  },
+
   listTenantUsers(tenantId?: string) {
     return apiRequest<{ users: TenantUser[] }>('/api/auth/users', { tenantId });
   },
@@ -388,6 +419,7 @@ export const saasApi = {
     payload: {
       fullName: string;
       email: string;
+      phone?: string;
       role: UserRole;
       allowedModules?: TenantModulePermission[];
     }
@@ -404,6 +436,7 @@ export const saasApi = {
     userId: string,
     payload: {
       role?: UserRole;
+      phone?: string;
       allowedModules?: TenantModulePermission[];
       status?: 'Active' | 'Disabled';
       resetOneTimePassword?: boolean;
@@ -466,6 +499,9 @@ export const saasApi = {
     plan: TenantPlan;
     status?: TenantStatus;
     location: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    postalAddress?: string;
     branding?: Partial<TenantBranding>;
     grades: string[];
     subjects: string[];
@@ -491,6 +527,9 @@ export const saasApi = {
         | 'currentTerm'
         | 'currency'
         | 'location'
+        | 'contactEmail'
+        | 'contactPhone'
+        | 'postalAddress'
         | 'plan'
         | 'status'
       >
@@ -524,6 +563,9 @@ export const saasApi = {
       name?: string;
       emailDomain?: string;
       location?: string;
+      contactEmail?: string;
+      contactPhone?: string;
+      postalAddress?: string;
       curriculum?: string;
       academicYear?: string;
       currentTerm?: string;
@@ -988,6 +1030,102 @@ export const saasApi = {
     });
   },
 
+  createIndependentVoteline(
+    tenantId: string,
+    payload: {
+      name: string;
+      amount: number;
+      term?: string;
+      note?: string;
+      targetScope?: 'student' | 'grade' | 'all';
+      studentId?: string;
+      invoiceId?: string;
+      grade?: string;
+      recordedBy?: string;
+    }
+  ) {
+    return apiRequest<{ items: IndependentVotelineItem[] }>('/api/fees/independent-votelines', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  recordIndependentVotelinePayment(
+    tenantId: string,
+    itemId: string,
+    payload: {
+      amount: number;
+      method: PaymentMethod;
+      reference?: string;
+      recordedBy?: string;
+      paidAt?: string;
+    }
+  ) {
+    return apiRequest<{ item: IndependentVotelineItem }>(
+      `/api/fees/independent-votelines/${itemId}/payments`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  deleteIndependentVoteline(tenantId: string, itemId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/fees/independent-votelines/${itemId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  saveMpesaConfig(
+    tenantId: string,
+    payload: {
+      enabled: boolean;
+      environment: MpesaEnvironment;
+      paybillNumber: string;
+      accountName: string;
+      accountReferenceFormat: string;
+      consumerKey: string;
+      consumerSecret?: string;
+      passkey?: string;
+      settlementBank?: string;
+    }
+  ) {
+    return apiRequest<{ tenant: Tenant; mpesaConfig: TenantMpesaConfig }>(
+      '/api/finance/mpesa/config',
+      {
+        method: 'PUT',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  receiveMpesaPaybillPayment(
+    tenantId: string,
+    payload: {
+      paybillNumber: string;
+      accountReference: string;
+      amount: number;
+      msisdn: string;
+      mpesaReceipt?: string;
+    }
+  ) {
+    return apiRequest<{
+      tenantId: string;
+      tenantName: string;
+      paybillNumber: string;
+      invoice: FeeInvoice;
+      transaction: MpesaTransactionLog;
+    }>('/api/finance/mpesa/receive', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
   createExpense(
     tenantId: string,
     payload: {
@@ -1217,6 +1355,23 @@ export const saasApi = {
     });
   },
 
+  approveBudgetAllocation(
+    tenantId: string,
+    payload: {
+      budgetId?: string;
+      category?: ExpenseCategory;
+      status: 'Draft' | 'Pending Approval' | 'Approved' | 'Rejected';
+      approvedBy?: string;
+      approvalNotes?: string;
+    }
+  ) {
+    return apiRequest<{ budget: BudgetAllocation }>('/api/finance/budgets/approval', {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
   createApprovalRecord(
     tenantId: string,
     payload: {
@@ -1325,6 +1480,9 @@ export const saasApi = {
     name: string;
     emailDomain?: string;
     location?: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    postalAddress?: string;
     curriculum?: string;
     academicYear?: string;
     currentTerm?: string;
@@ -1337,6 +1495,7 @@ export const saasApi = {
     branding?: Partial<TenantBranding>;
     adminFullName: string;
     adminEmail?: string;
+    adminPhone?: string;
     adminPassword?: string;
   }) {
     return devApiRequest<{

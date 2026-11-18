@@ -1,5 +1,9 @@
 import * as XLSX from 'xlsx';
 import {
+  createBrandedAoaWorksheet,
+  createBrandedWorksheetFromObjects,
+} from './documentBranding';
+import {
   EXPENSE_CATEGORIES,
   type CurrencyCode,
   type ExpenseCategory,
@@ -89,6 +93,7 @@ export interface PayableAuditRow {
 }
 
 export interface FinancialBooksReport {
+  tenant?: Tenant;
   tenantName: string;
   currency: CurrencyCode;
   asOfDate: string;
@@ -496,12 +501,22 @@ export function buildFinancialBooksReport(params: {
   const supportingDocCoveragePct =
     totalVouchersCount > 0 ? (vouchersWithDocsCount / totalVouchersCount) * 100 : 100;
 
+  const tenantInfo: Partial<Tenant> = {
+    name: tenant.name,
+    location: tenant.location,
+    contactEmail: tenant.contactEmail,
+    contactPhone: tenant.contactPhone,
+    postalAddress: tenant.postalAddress,
+    branding: tenant.branding,
+    currency: tenant.currency,
+  };
+
   return {
-    tenantName: tenant.name,
+    tenant,
+    tenantName: tenantInfo.name || tenant.name,
     currency: tenant.currency,
     asOfDate: effectiveAsOfDate,
     generatedAt: new Date().toISOString(),
-
     revenueLines,
     totalRevenueBilled,
     totalCashCollected,
@@ -513,7 +528,6 @@ export function buildFinancialBooksReport(params: {
     netCashOperatingSurplus,
     collectionEfficiencyPct,
     expenseToRevenuePct,
-
     cashChannelLines,
     netCashPosition,
     cashAssetBalance,
@@ -525,12 +539,10 @@ export function buildFinancialBooksReport(params: {
     accumulatedSurplusEquity,
     totalLiabilitiesAndEquity,
     balanceSheetBalanced,
-
     trialBalanceRows,
     trialBalanceTotalDebits,
     trialBalanceTotalCredits,
     trialBalanceBalanced,
-
     cashbookEntries,
     debtorsSchedule,
     payablesAndAuditSchedule,
@@ -549,11 +561,17 @@ export type AccountingExportBook =
   | 'CASHBOOK'
   | 'DEBTORS_PAYABLES';
 
+function resolveReportTenant(report: FinancialBooksReport): Tenant | { name: string; currency: CurrencyCode } {
+  return (
+    report.tenant || {
+      name: report.tenantName,
+      currency: report.currency,
+    }
+  );
+}
+
 function buildProfitAndLossSheet(report: FinancialBooksReport): XLSX.WorkSheet {
   const rows: Array<Array<string | number>> = [
-    [`${report.tenantName} — Statement of Profit & Loss (Income & Expenditure)`],
-    [`Reporting Currency: ${report.currency}`, `As of Date: ${report.asOfDate}`],
-    [],
     ['Section', 'Account / Votehead', 'Billed / Incurred', 'Cash Settled', 'Uncollected / Accrued', 'Share (%)'],
     ...report.revenueLines.map((r) => [
       'Operating Revenue',
@@ -598,16 +616,19 @@ function buildProfitAndLossSheet(report: FinancialBooksReport): XLSX.WorkSheet {
       '',
     ],
   ];
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{ wch: 24 }, { wch: 36 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 12 }];
-  return ws;
+  return createBrandedAoaWorksheet(
+    resolveReportTenant(report),
+    'Statement of Profit & Loss (Income & Expenditure)',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [24, 36, 18, 18, 22, 12],
+    }
+  );
 }
 
 function buildBalanceSheetWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
   const rows: Array<Array<string | number>> = [
-    [`${report.tenantName} — Statement of Financial Position (Balance Sheet)`],
-    [`Reporting Currency: ${report.currency}`, `As of Date: ${report.asOfDate}`],
-    [],
     ['Classification', 'Account Line Item', `Amount (${report.currency})`],
     ['CURRENT ASSETS', 'Cash & Bank Equivalents (Positive Treasury)', report.cashAssetBalance],
     ['CURRENT ASSETS', 'Accounts Receivable — Student Fee Debtors', report.accountsReceivable],
@@ -622,16 +643,19 @@ function buildBalanceSheetWorksheet(report: FinancialBooksReport): XLSX.WorkShee
     [],
     ['Reconciliation Status', report.balanceSheetBalanced ? 'BALANCED (Assets = Liabilities + Equity)' : 'OUT OF BALANCE', ''],
   ];
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{ wch: 28 }, { wch: 46 }, { wch: 22 }];
-  return ws;
+  return createBrandedAoaWorksheet(
+    resolveReportTenant(report),
+    'Statement of Financial Position (Balance Sheet)',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [28, 46, 22],
+    }
+  );
 }
 
 function buildTrialBalanceWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
   const rows: Array<Array<string | number>> = [
-    [`${report.tenantName} — General Ledger Trial Balance`],
-    [`Reporting Currency: ${report.currency}`, `As of Date: ${report.asOfDate}`],
-    [],
     ['Account Code', 'Account Name', 'Account Class', `Debit (${report.currency})`, `Credit (${report.currency})`],
     ...report.trialBalanceRows.map((r) => [
       r.accountCode,
@@ -649,16 +673,19 @@ function buildTrialBalanceWorksheet(report: FinancialBooksReport): XLSX.WorkShee
       report.trialBalanceTotalCredits,
     ],
   ];
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{ wch: 14 }, { wch: 44 }, { wch: 16 }, { wch: 18 }, { wch: 18 }];
-  return ws;
+  return createBrandedAoaWorksheet(
+    resolveReportTenant(report),
+    'General Ledger Trial Balance',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [14, 44, 16, 18, 18],
+    }
+  );
 }
 
 function buildCashFlowWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
   const rows: Array<Array<string | number>> = [
-    [`${report.tenantName} — Statement of Cash Flows`],
-    [`Reporting Currency: ${report.currency}`, `As of Date: ${report.asOfDate}`],
-    [],
     ['Payment Channel', `Cash Inflows (${report.currency})`, `Cash Outflows (${report.currency})`, `Net Cash Balance (${report.currency})`],
     ...report.cashChannelLines.map((c) => [c.method, c.inflows, c.outflows, c.netBalance]),
     [
@@ -671,9 +698,15 @@ function buildCashFlowWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
     ['Operating Expense Cash Disbursed by Category', 'Paid Cash', 'Pending / Approved Payable', 'Voucher Count'],
     ...report.expenseLines.map((e) => [e.category, e.paidAmount, e.accruedAmount, e.voucherCount]),
   ];
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{ wch: 42 }, { wch: 22 }, { wch: 24 }, { wch: 22 }];
-  return ws;
+  return createBrandedAoaWorksheet(
+    resolveReportTenant(report),
+    'Statement of Cash Flows',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [42, 22, 24, 22],
+    }
+  );
 }
 
 function buildCashbookWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
@@ -691,22 +724,15 @@ function buildCashbookWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
     Running_Cash_Balance: c.runningCashBalance,
     Status: c.status,
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [
-    { wch: 12 },
-    { wch: 18 },
-    { wch: 20 },
-    { wch: 28 },
-    { wch: 26 },
-    { wch: 16 },
-    { wch: 18 },
-    { wch: 26 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 18 },
-    { wch: 16 },
-  ];
-  return ws;
+  return createBrandedWorksheetFromObjects(
+    resolveReportTenant(report),
+    'General Cashbook & Transaction Journal',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [12, 18, 20, 28, 26, 16, 18, 26, 14, 14, 18, 16],
+    }
+  );
 }
 
 function buildDebtorsWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
@@ -723,21 +749,15 @@ function buildDebtorsWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
     Balance_Due: d.balanceDue,
     Status: d.status,
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [
-    { wch: 16 },
-    { wch: 14 },
-    { wch: 26 },
-    { wch: 12 },
-    { wch: 18 },
-    { wch: 12 },
-    { wch: 20 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 12 },
-  ];
-  return ws;
+  return createBrandedWorksheetFromObjects(
+    resolveReportTenant(report),
+    'Aged Student Fee Debtors Schedule',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [16, 14, 26, 12, 18, 12, 20, 14, 14, 14, 12],
+    }
+  );
 }
 
 function buildPayablesAndAuditWorksheet(report: FinancialBooksReport): XLSX.WorkSheet {
@@ -754,21 +774,15 @@ function buildPayablesAndAuditWorksheet(report: FinancialBooksReport): XLSX.Work
     Attached_Doc_Count: p.attachmentsCount,
     Supporting_Documents: p.attachmentNames,
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [
-    { wch: 18 },
-    { wch: 12 },
-    { wch: 32 },
-    { wch: 24 },
-    { wch: 24 },
-    { wch: 16 },
-    { wch: 18 },
-    { wch: 14 },
-    { wch: 18 },
-    { wch: 16 },
-    { wch: 42 },
-  ];
-  return ws;
+  return createBrandedWorksheetFromObjects(
+    resolveReportTenant(report),
+    'Expense Vouchers & Document Audit Schedule',
+    rows,
+    {
+      subtitle: `Reporting Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+      colWidths: [18, 12, 32, 24, 24, 16, 18, 14, 18, 16, 42],
+    }
+  );
 }
 
 export function downloadFinancialBooksExcel(
@@ -781,9 +795,6 @@ export function downloadFinancialBooksExcel(
 
   if (book === 'ALL_BOOKS') {
     const execRows: Array<Array<string | number>> = [
-      [`${report.tenantName} — Complete Financial Books Pack`],
-      [`Currency: ${report.currency}`, `As of Date: ${report.asOfDate}`],
-      [],
       ['Key Financial Metric', `Value (${report.currency})`],
       ['Total Billed School Revenue', report.totalRevenueBilled],
       ['Cash Collected from Fees', report.totalCashCollected],
@@ -796,8 +807,15 @@ export function downloadFinancialBooksExcel(
       ['Supporting Document Audit Coverage (%)', Number(report.supportingDocCoveragePct.toFixed(1))],
       ['Balance Sheet Equation Check', report.balanceSheetBalanced ? 'Balanced' : 'Check Variance'],
     ];
-    const execWs = XLSX.utils.aoa_to_sheet(execRows);
-    execWs['!cols'] = [{ wch: 44 }, { wch: 24 }];
+    const execWs = createBrandedAoaWorksheet(
+      resolveReportTenant(report),
+      'Complete Financial Books Pack — Executive Summary',
+      execRows,
+      {
+        subtitle: `Currency: ${report.currency} | As of Date: ${report.asOfDate}`,
+        colWidths: [44, 24],
+      }
+    );
     XLSX.utils.book_append_sheet(wb, execWs, 'Executive Summary');
     XLSX.utils.book_append_sheet(wb, buildProfitAndLossSheet(report), 'Profit & Loss');
     XLSX.utils.book_append_sheet(wb, buildBalanceSheetWorksheet(report), 'Balance Sheet');

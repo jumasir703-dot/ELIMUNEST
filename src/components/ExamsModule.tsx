@@ -23,6 +23,7 @@ import {
 import {
   ALL_REGISTERED_SUBJECTS_OPTION,
   CBE_GRADING_SCALE,
+  CLASS_TEACHER_SUBJECT_TOKEN,
   getAssessmentGradingSystem,
   getClusterForGrade,
   getSubjectsForGrade,
@@ -30,10 +31,15 @@ import {
   KCSE_844_GRADING_SCALE,
   KENYAN_CBC_CLUSTERS,
   STANDARD_ASSESSMENT_TYPES,
+  type Student,
+  type TeacherProfile,
+  type Tenant,
   type TenantWorkspaceData,
+  type TimetableSlot,
   type UserRole,
 } from '../shared/types';
 import { ExamResultsEntryPanel } from './ExamResultsEntryPanel';
+import { TenantDocumentHeader } from './TenantDocumentHeader';
 
 interface ExamsModuleProps {
   workspace: TenantWorkspaceData;
@@ -48,6 +54,106 @@ function getCycleOrderRank(title: string): number {
   if (/mid[- ]?term/.test(lower)) return 1;
   if (/end\s*of\s*term|final/.test(lower)) return 2;
   return 3;
+}
+
+function shortenCycleTitle(title: string): string {
+  return title
+    .replace(/\bTerm\s+(\d+)\b/i, 'T$1')
+    .replace(/\bExamination\b|\bExam\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function deriveTeacherInitials(fullName?: string): string {
+  if (!fullName) return '—';
+  const cleaned = fullName
+    .trim()
+    .replace(/\b(dr|prof|mr|mrs|ms|miss|rev|eng|tr|sir|madam)\.?\s+/gi, ' ')
+    .replace(/[^a-zA-Z\s-]/g, ' ')
+    .trim();
+  if (!cleaned) return '—';
+  const parts = cleaned.split(/[\s-]+/).filter(Boolean);
+  if (parts.length === 0) return '—';
+  return `${parts
+    .slice(0, 3)
+    .map((part) => part[0].toUpperCase())
+    .join('.')}.`;
+}
+
+function resolveSubjectTeacher(
+  tenant: Pick<Tenant, 'teachers'>,
+  timetable: TimetableSlot[],
+  student: Pick<Student, 'grade' | 'section'>,
+  subject: string
+): { name: string; initials: string } {
+  const gNorm = student.grade.trim().toLowerCase();
+  const sNorm = student.section.trim().toLowerCase();
+  const subNorm = subject.trim().toLowerCase();
+
+  // 1. Direct timetable slot match for this student's grade, stream & subject
+  const slotMatch = timetable.find(
+    (slot) =>
+      slot.grade.trim().toLowerCase() === gNorm &&
+      slot.section.trim().toLowerCase() === sNorm &&
+      slot.subject.trim().toLowerCase() === subNorm &&
+      slot.teacherName
+  );
+  if (slotMatch) {
+    return {
+      name: slotMatch.teacherName,
+      initials: deriveTeacherInitials(slotMatch.teacherName),
+    };
+  }
+
+  const teachers: TeacherProfile[] = tenant.teachers || [];
+
+  // 2. Teacher explicitly assigned to this grade + stream + subject
+  const explicitCohortMatch = teachers.find((t) =>
+    (t.assignedClasses || []).some(
+      (c) =>
+        c.grade.trim().toLowerCase() === gNorm &&
+        (c.section.trim().toLowerCase() === sNorm ||
+          c.section.trim().toLowerCase() === 'all streams') &&
+        ((c.subject && c.subject.trim().toLowerCase() === subNorm) ||
+          c.subject === CLASS_TEACHER_SUBJECT_TOKEN ||
+          (!c.subject &&
+            (t.subjects.some((s) => s.trim().toLowerCase() === subNorm) ||
+              t.subjects.includes(CLASS_TEACHER_SUBJECT_TOKEN))))
+    )
+  );
+  if (explicitCohortMatch) {
+    return {
+      name: explicitCohortMatch.name,
+      initials: deriveTeacherInitials(explicitCohortMatch.name),
+    };
+  }
+
+  // 3. Teacher open to all classes (assignedClasses empty) teaching this subject
+  const openSubjectTeacher = teachers.find(
+    (t) =>
+      (!t.assignedClasses || t.assignedClasses.length === 0) &&
+      (t.subjects.some((s) => s.trim().toLowerCase() === subNorm) ||
+        t.subjects.includes(CLASS_TEACHER_SUBJECT_TOKEN))
+  );
+  if (openSubjectTeacher) {
+    return {
+      name: openSubjectTeacher.name,
+      initials: deriveTeacherInitials(openSubjectTeacher.name),
+    };
+  }
+
+  // 4. Any teacher configured with this subject
+  const anySubjectTeacher = teachers.find((t) =>
+    t.subjects.some((s) => s.trim().toLowerCase() === subNorm)
+  );
+  if (anySubjectTeacher) {
+    return {
+      name: anySubjectTeacher.name,
+      initials: deriveTeacherInitials(anySubjectTeacher.name),
+    };
+  }
+
+  return { name: 'Unassigned', initials: '—' };
 }
 
 function getGradeBadgeColor(letterGrade: string, is844: boolean): string {
@@ -84,7 +190,7 @@ export function ExamsModule({
   onRefresh,
   onNotify,
 }: ExamsModuleProps) {
-  const { tenant, students, admissions, examCycles, examResults } = workspace;
+  const { tenant, students, admissions, examCycles, examResults, timetable } = workspace;
   const whatsappDispatches = workspace.whatsappDispatches || [];
   const defaultGrade = tenant.grades.includes('Grade 9') ? 'Grade 9' : tenant.grades[0] || 'Grade 9';
 
@@ -511,10 +617,13 @@ export function ExamsModule({
       .filter((r) => r.examCycleId === activeCycle.id && r.studentId === student.id)
       .map((r) => {
         const graded = computeClientGrade(r.score, student.grade);
+        const teacherInfo = resolveSubjectTeacher(tenant, timetable, student, r.subject);
         return {
           ...r,
           letterGrade: graded.letterGrade,
           gpaPoints: graded.gpaPoints,
+          teacherName: teacherInfo.name,
+          teacherInitials: teacherInfo.initials,
         };
       });
     const totalMarks = results.reduce((sum, r) => sum + r.score, 0);
@@ -525,6 +634,75 @@ export function ExamsModule({
       results.length > 0 ? computeClientGrade(avgScore, student.grade) : null;
     const rankRow = allSubjectsRankedRows.find((r) => r.student.id === student.id);
     const totalRanked = allSubjectsRankedRows.filter((r) => r.rank !== null).length;
+
+    // Build chronological progression across exam cycles up to and including the active cycle
+    const activeCycleIdx = orderedCycles.findIndex((c) => c.id === activeCycle.id);
+    const candidateCycles =
+      activeCycleIdx >= 0 ? orderedCycles.slice(0, activeCycleIdx + 1) : orderedCycles;
+    const rawProgression = candidateCycles
+      .map((cycle) => {
+        const cycleResults = examResults.filter(
+          (r) => r.examCycleId === cycle.id && r.studentId === student.id
+        );
+        if (cycleResults.length === 0) return null;
+        const cTotal = cycleResults.reduce((sum, r) => sum + r.score, 0);
+        const cMax = cycleResults.reduce((sum, r) => sum + (r.maxScore || 100), 0);
+        const cAvg = cMax > 0 ? Math.round((cTotal / cMax) * 1000) / 10 : 0;
+        const cGrade = computeClientGrade(cAvg, student.grade);
+        return {
+          cycleId: cycle.id,
+          title: cycle.title,
+          shortLabel: shortenCycleTitle(cycle.title),
+          term: cycle.term,
+          startDate: cycle.startDate,
+          avgScore: cAvg,
+          totalMarks: cTotal,
+          maxPossible: cMax,
+          subjectsSat: cycleResults.length,
+          meanGrade: cGrade.letterGrade,
+          gpaPoints: cGrade.gpaPoints,
+          isCurrent: cycle.id === activeCycle.id,
+          cycleResults,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+
+    const progressionPoints = rawProgression.map((pt, idx) => ({
+      ...pt,
+      deltaFromPrev:
+        idx > 0
+          ? Math.round((pt.avgScore - rawProgression[idx - 1].avgScore) * 10) / 10
+          : null,
+    }));
+
+    const currentProgIdx = progressionPoints.findIndex((p) => p.isCurrent);
+    const previousCyclePoint =
+      currentProgIdx > 0
+        ? progressionPoints[currentProgIdx - 1]
+        : !progressionPoints.some((p) => p.isCurrent) && progressionPoints.length > 0
+        ? progressionPoints[progressionPoints.length - 1]
+        : null;
+
+    const subjectComparison = results.map((r) => {
+      const prevMatch = previousCyclePoint?.cycleResults.find(
+        (pr) => pr.subject.trim().toLowerCase() === r.subject.trim().toLowerCase()
+      );
+      const currentPct =
+        (r.maxScore || 100) > 0 ? Math.round((r.score / (r.maxScore || 100)) * 100) : r.score;
+      const previousPct = prevMatch
+        ? (prevMatch.maxScore || 100) > 0
+          ? Math.round((prevMatch.score / (prevMatch.maxScore || 100)) * 100)
+          : prevMatch.score
+        : null;
+      return {
+        subject: r.subject,
+        shortSubject: r.subject.length > 14 ? `${r.subject.slice(0, 12)}…` : r.subject,
+        currentScore: currentPct,
+        previousScore: previousPct,
+        delta: previousPct !== null ? currentPct - previousPct : null,
+      };
+    });
+
     const guardianContact = resolveStudentGuardianContact(student, admissions);
     const effectivePhone = whatsAppPhoneOverride.trim() || guardianContact.guardianPhone;
     const whatsappMessage = buildReportCardWhatsAppMessage({
@@ -563,6 +741,9 @@ export function ExamsModule({
       studentSystemLabel: studentIs844 ? '8-4-4 KCSE (Form 4)' : 'Current CBE',
       overallRank: rankRow?.rank || null,
       totalRanked,
+      progressionPoints,
+      previousCyclePoint,
+      subjectComparison,
       guardianContact,
       effectivePhone,
       whatsappMessage,
@@ -572,9 +753,11 @@ export function ExamsModule({
   }, [
     reportCardStudentId,
     activeCycle,
+    orderedCycles,
     students,
     admissions,
     examResults,
+    timetable,
     allSubjectsRankedRows,
     tenant,
     whatsAppPhoneOverride,
@@ -977,54 +1160,60 @@ export function ExamsModule({
 
       {/* Report Card Modal */}
       {reportCardData && activeCycle && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4">
-          <div className="my-8 max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex items-start justify-between gap-3 border-b border-slate-200 pb-4 dark:border-slate-800">
-              <div>
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                  {tenant.name} · {activeCycle.title} · {reportCardData.studentSystemLabel}
-                </p>
-                <h2 className="mt-1 text-xl font-bold text-slate-900 dark:text-slate-100">
-                  Academic Report Card — {reportCardData.student.fullName}
-                </h2>
-                <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                  {reportCardData.student.studentCode} · {reportCardData.student.grade} Stream{' '}
-                  {reportCardData.student.section} · Guardian: {reportCardData.guardianContact.guardianName} (
-                  {reportCardData.guardianContact.guardianPhone || 'No number on file'})
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 no-print">
-                <button
-                  type="button"
-                  onClick={() => setReportCardWhatsAppOpen((prev) => !prev)}
-                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${
-                    reportCardWhatsAppOpen
-                      ? 'border-emerald-600 bg-emerald-600 text-white'
-                      : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300'
-                  }`}
-                >
-                  <MessageCircle className="h-3.5 w-3.5" />
-                  Send via WhatsApp
-                </button>
-                <button
-                  type="button"
-                  onClick={() => window.print()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                >
-                  <Printer className="h-3.5 w-3.5" />
-                  Print
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setReportCardStudentId(null);
-                    setReportCardWhatsAppOpen(false);
-                  }}
-                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
+        <div className="print-modal-root fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4">
+          <div className="print-modal-sheet my-8 max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="mb-3 flex flex-wrap items-center justify-end gap-2 no-print">
+              <button
+                type="button"
+                onClick={() => setReportCardWhatsAppOpen((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold whitespace-nowrap transition-colors ${
+                  reportCardWhatsAppOpen
+                    ? 'border-emerald-600 bg-emerald-600 text-white'
+                    : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300'
+                }`}
+              >
+                <MessageCircle className="h-3.5 w-3.5" />
+                Send via WhatsApp
+              </button>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Print
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setReportCardStudentId(null);
+                  setReportCardWhatsAppOpen(false);
+                }}
+                aria-label="Close report card"
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <TenantDocumentHeader
+              tenant={tenant}
+              documentTitle="Academic Report Card"
+              subtitle={`${activeCycle.title} · ${reportCardData.studentSystemLabel}`}
+              rightMeta={[
+                { label: 'Student', value: reportCardData.student.fullName },
+                { label: 'Adm No', value: reportCardData.student.studentCode },
+              ]}
+              compact
+            />
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/70 px-3.5 py-2 font-mono text-xs text-slate-600 tabular-nums dark:border-slate-800 dark:bg-slate-800/40 dark:text-slate-300">
+              <span>
+                Class: <strong className="text-slate-900 dark:text-slate-100">{reportCardData.student.grade} Stream {reportCardData.student.section}</strong>
+              </span>
+              <span>
+                Guardian: <strong className="text-slate-900 dark:text-slate-100">{reportCardData.guardianContact.guardianName}</strong> ({reportCardData.guardianContact.guardianPhone || 'No number on file'})
+              </span>
             </div>
 
             {/* Expandable WhatsApp Dispatch Panel using Admissions Guardian Phone */}
@@ -1153,12 +1342,13 @@ export function ExamsModule({
                     <th className="py-2 text-right">Grade</th>
                     <th className="py-2 text-right">Points</th>
                     <th className="py-2 pl-4">Instructor Remarks</th>
+                    <th className="py-2 pl-3 text-right">Teacher Initials</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {reportCardData.results.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-6 text-center text-xs text-slate-500">
+                      <td colSpan={6} className="py-6 text-center text-xs text-slate-500">
                         No marks recorded yet for this student in {activeCycle.title}.
                       </td>
                     </tr>
@@ -1180,12 +1370,316 @@ export function ExamsModule({
                         <td className="py-2.5 pl-4 text-xs text-slate-600 dark:text-slate-400">
                           {r.remarks}
                         </td>
+                        <td
+                          title={r.teacherName}
+                          className="py-2.5 pl-3 text-right font-mono text-xs font-semibold text-slate-800 tabular-nums dark:text-slate-200"
+                        >
+                          {r.teacherInitials}
+                        </td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
             </div>
+
+            {/* Progressive Performance Graphs (Historical Exam Cycles & Subject Trajectory) */}
+            {reportCardData.progressionPoints.length > 0 && (
+              <div className="mt-5 break-inside-avoid rounded-lg border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 pb-2.5 dark:border-slate-800">
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                      Academic Performance Progression
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Longitudinal mean score trend across previous &amp; current assessments
+                    </p>
+                  </div>
+                  {(() => {
+                    const latestPt =
+                      reportCardData.progressionPoints.find((p) => p.isCurrent) ||
+                      reportCardData.progressionPoints[reportCardData.progressionPoints.length - 1];
+                    if (!latestPt || latestPt.deltaFromPrev === null) {
+                      return (
+                        <span className="rounded border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] text-slate-600 tabular-nums dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                          Baseline Assessment
+                        </span>
+                      );
+                    }
+                    const d = latestPt.deltaFromPrev;
+                    return (
+                      <span
+                        className={`rounded border px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums ${
+                          d > 0
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                            : d < 0
+                            ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300'
+                            : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300'
+                        }`}
+                      >
+                        {d > 0 ? `+${d}%` : `${d}%`} vs {reportCardData.previousCyclePoint?.shortLabel || 'Prior Exam'}
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                <div
+                  className={`mt-3 grid grid-cols-1 gap-4 ${
+                    reportCardData.subjectComparison.length > 0 && reportCardData.previousCyclePoint
+                      ? 'md:grid-cols-2'
+                      : ''
+                  }`}
+                >
+                  {/* Graph 1: Mean Percentage Trend Line Across Exam Cycles */}
+                  <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+                    <p className="mb-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Exam Cycle Mean Trend (%)
+                    </p>
+                    {(() => {
+                      const pts = reportCardData.progressionPoints;
+                      const w = 360;
+                      const h = 148;
+                      const padL = 32;
+                      const padR = 24;
+                      const padT = 22;
+                      const padB = 34;
+                      const plotW = w - padL - padR;
+                      const plotH = h - padT - padB;
+                      const coords = pts.map((pt, idx) => {
+                        const x =
+                          pts.length === 1
+                            ? padL + plotW / 2
+                            : padL + (idx / (pts.length - 1)) * plotW;
+                        const y = padT + ((100 - Math.max(0, Math.min(100, pt.avgScore))) / 100) * plotH;
+                        return { ...pt, x, y };
+                      });
+                      const linePoints = coords.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+                      const areaPoints =
+                        coords.length > 1
+                          ? `${coords[0].x.toFixed(1)},${(padT + plotH).toFixed(1)} ${linePoints} ${coords[
+                              coords.length - 1
+                            ].x.toFixed(1)},${(padT + plotH).toFixed(1)}`
+                          : '';
+                      return (
+                        <svg
+                          viewBox={`0 0 ${w} ${h}`}
+                          className="h-36 w-full overflow-visible"
+                          role="img"
+                          aria-label="Student progressive mean score line graph"
+                        >
+                          {[0, 25, 50, 75, 100].map((tick) => {
+                            const ty = padT + ((100 - tick) / 100) * plotH;
+                            return (
+                              <g key={tick}>
+                                <line
+                                  x1={padL}
+                                  y1={ty}
+                                  x2={w - padR}
+                                  y2={ty}
+                                  stroke="#cbd5e1"
+                                  strokeWidth="0.75"
+                                  strokeDasharray={tick === 0 ? undefined : '3 3'}
+                                />
+                                <text
+                                  x={padL - 5}
+                                  y={ty + 3}
+                                  textAnchor="end"
+                                  fill="#64748b"
+                                  fontSize="9"
+                                  fontFamily="var(--font-mono), monospace"
+                                >
+                                  {tick}
+                                </text>
+                              </g>
+                            );
+                          })}
+                          {areaPoints && (
+                            <polygon points={areaPoints} fill="rgba(37, 99, 235, 0.10)" />
+                          )}
+                          {coords.length > 1 && (
+                            <polyline
+                              fill="none"
+                              stroke="#2563EB"
+                              strokeWidth="2.25"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              points={linePoints}
+                            />
+                          )}
+                          {coords.map((c) => (
+                            <g key={c.cycleId}>
+                              <circle
+                                cx={c.x}
+                                cy={c.y}
+                                r={c.isCurrent ? 5 : 3.75}
+                                fill={c.isCurrent ? '#2563EB' : '#ffffff'}
+                                stroke="#2563EB"
+                                strokeWidth="2"
+                              />
+                              <text
+                                x={c.x}
+                                y={Math.max(11, c.y - 9)}
+                                textAnchor="middle"
+                                fill="#0f172a"
+                                className="dark:fill-slate-100"
+                                fontSize="9.5"
+                                fontWeight="700"
+                                fontFamily="var(--font-mono), monospace"
+                              >
+                                {c.avgScore}%
+                              </text>
+                              <text
+                                x={c.x}
+                                y={h - 16}
+                                textAnchor="middle"
+                                fill="#475569"
+                                className="dark:fill-slate-300"
+                                fontSize="8.5"
+                                fontWeight={c.isCurrent ? '700' : '500'}
+                              >
+                                {c.shortLabel}
+                              </text>
+                              <text
+                                x={c.x}
+                                y={h - 5}
+                                textAnchor="middle"
+                                fill="#2563EB"
+                                fontSize="8"
+                                fontWeight="700"
+                                fontFamily="var(--font-mono), monospace"
+                              >
+                                {c.meanGrade}
+                              </text>
+                            </g>
+                          ))}
+                        </svg>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Graph 2: Subject-by-Subject Progress vs Previous Exam */}
+                  {reportCardData.subjectComparison.length > 0 && reportCardData.previousCyclePoint && (
+                    <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+                      <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
+                        <span className="font-semibold text-slate-700 dark:text-slate-300">
+                          Subject Progress vs {reportCardData.previousCyclePoint.shortLabel}
+                        </span>
+                        <span className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2 w-2 bg-slate-400" />
+                            Prior
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-2 w-2 bg-blue-600" />
+                            Current
+                          </span>
+                        </span>
+                      </div>
+                      <div className="space-y-2">
+                        {reportCardData.subjectComparison.map((item) => (
+                          <div key={item.subject} className="space-y-0.5">
+                            <div className="flex items-center justify-between text-[11px]">
+                              <span className="truncate font-medium text-slate-700 dark:text-slate-200">
+                                {item.subject}
+                              </span>
+                              <span className="shrink-0 font-mono text-[10px] tabular-nums">
+                                <span className="text-slate-500 dark:text-slate-400">
+                                  {item.previousScore !== null ? `${item.previousScore}% → ` : ''}
+                                </span>
+                                <strong className="text-slate-900 dark:text-slate-100">
+                                  {item.currentScore}%
+                                </strong>
+                                {item.delta !== null && (
+                                  <span
+                                    className={`ml-1.5 font-semibold ${
+                                      item.delta > 0
+                                        ? 'text-emerald-700 dark:text-emerald-400'
+                                        : item.delta < 0
+                                        ? 'text-rose-600 dark:text-rose-400'
+                                        : 'text-slate-500'
+                                    }`}
+                                  >
+                                    ({item.delta > 0 ? `+${item.delta}` : item.delta})
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                            <svg
+                              viewBox="0 0 260 12"
+                              className="h-3 w-full"
+                              role="img"
+                              aria-label={`${item.subject} comparison bar`}
+                            >
+                              <rect x="0" y="1" width="260" height="4" rx="2" fill="#e2e8f0" />
+                              {item.previousScore !== null && (
+                                <rect
+                                  x="0"
+                                  y="1"
+                                  width={Math.max(4, (Math.min(100, item.previousScore) / 100) * 260)}
+                                  height="4"
+                                  rx="2"
+                                  fill="#94a3b8"
+                                />
+                              )}
+                              <rect x="0" y="7" width="260" height="4" rx="2" fill="#e2e8f0" />
+                              <rect
+                                x="0"
+                                y="7"
+                                width={Math.max(4, (Math.min(100, item.currentScore) / 100) * 260)}
+                                height="4"
+                                rx="2"
+                                fill="#2563EB"
+                              />
+                            </svg>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Compact Cycle History Strip */}
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  {reportCardData.progressionPoints.map((pt) => (
+                    <div
+                      key={pt.cycleId}
+                      className={`rounded-md border px-2.5 py-1.5 text-[11px] ${
+                        pt.isCurrent
+                          ? 'border-blue-300 bg-blue-50/70 dark:border-blue-800 dark:bg-blue-950/30'
+                          : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="truncate font-semibold text-slate-800 dark:text-slate-100">
+                          {pt.title}
+                        </span>
+                        <span className="shrink-0 font-mono font-bold text-blue-700 dark:text-blue-400">
+                          {pt.meanGrade}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex items-center justify-between font-mono text-[10px] text-slate-500 tabular-nums dark:text-slate-400">
+                        <span>
+                          {pt.totalMarks}/{pt.maxPossible} ({pt.avgScore}%)
+                        </span>
+                        {pt.deltaFromPrev !== null && (
+                          <span
+                            className={
+                              pt.deltaFromPrev > 0
+                                ? 'font-semibold text-emerald-700 dark:text-emerald-400'
+                                : pt.deltaFromPrev < 0
+                                ? 'font-semibold text-rose-600 dark:text-rose-400'
+                                : ''
+                            }
+                          >
+                            {pt.deltaFromPrev > 0 ? `+${pt.deltaFromPrev}%` : `${pt.deltaFromPrev}%`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

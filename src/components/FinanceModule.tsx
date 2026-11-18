@@ -6,7 +6,6 @@ import {
   ArrowUpRight,
   BookOpen,
   CheckCircle2,
-  ClipboardCheck,
   CreditCard,
   Download,
   FileSpreadsheet,
@@ -16,7 +15,6 @@ import {
   PiggyBank,
   Plus,
   Receipt,
-  ScanLine,
   Search,
   ShieldCheck,
   Trash2,
@@ -26,6 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import {
   EXPENSE_ATTACHMENT_TYPES,
@@ -42,11 +41,9 @@ import {
 import { FeesModule } from './FeesModule';
 import { FinancialBooksPanel } from './FinancialBooksPanel';
 import {
-  BoardApprovalsPanel,
   BudgetTrackingPanel,
   EtimsVerificationPanel,
   PayrollDeductionsPanel,
-  ReceiptScannerPanel,
   ReconciliationPanel,
 } from './FinanceControlsPanels';
 
@@ -60,12 +57,10 @@ interface FinanceModuleProps {
 type FinanceSubModule =
   | 'fees'
   | 'expensing'
-  | 'receipt-scan'
   | 'etims'
   | 'reconciliation'
   | 'payroll'
   | 'budgets'
-  | 'approvals'
   | 'books';
 
 interface StagedAttachment {
@@ -466,23 +461,15 @@ export function FinanceModule({
       Notes: exp.notes || '',
     }));
 
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [
-      { wch: 16 },
-      { wch: 12 },
-      { wch: 32 },
-      { wch: 24 },
-      { wch: 24 },
-      { wch: 10 },
-      { wch: 14 },
-      { wch: 16 },
-      { wch: 18 },
-      { wch: 18 },
-      { wch: 14 },
-      { wch: 36 },
-      { wch: 18 },
-      { wch: 28 },
-    ];
+    const ws = createBrandedWorksheetFromObjects(
+      tenant,
+      'School Expense Vouchers Register',
+      rows,
+      {
+        subtitle: `${filteredExpenses.length} vouchers | Currency: ${tenant.currency}`,
+        colWidths: [16, 12, 32, 24, 24, 10, 14, 16, 18, 18, 14, 36, 18, 28],
+      }
+    );
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Expense Vouchers');
     const safeSlug = tenant.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -508,7 +495,7 @@ export function FinanceModule({
               </span>
             </div>
             <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-              Unified school treasury: Fee &amp; Billing, Expensing, Receipt Scan &amp; Upload, KRA eTIMS Verification, M-Pesa/Bank Reconciliation, Statutory Payroll, Budgets, Board Approvals &amp; Financial Books.
+              Unified school treasury: Fee &amp; Billing, Expensing, KRA eTIMS Verification, M-Pesa/Bank Reconciliation, Statutory Payroll, Budgets &amp; Approvals, and Financial Books.
             </p>
           </div>
         </div>
@@ -538,18 +525,6 @@ export function FinanceModule({
           >
             <Receipt className="h-3.5 w-3.5" />
             Expensing ({expenses.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubModule('receipt-scan')}
-            className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold whitespace-nowrap transition-colors ${
-              subModule === 'receipt-scan'
-                ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
-                : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
-            }`}
-          >
-            <ScanLine className="h-3.5 w-3.5" />
-            Receipt Scan
           </button>
           <button
             type="button"
@@ -598,18 +573,6 @@ export function FinanceModule({
           >
             <PiggyBank className="h-3.5 w-3.5" />
             Budgets
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubModule('approvals')}
-            className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold whitespace-nowrap transition-colors ${
-              subModule === 'approvals'
-                ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
-                : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
-            }`}
-          >
-            <ClipboardCheck className="h-3.5 w-3.5" />
-            Approvals ({(workspace.approvalRecords || []).length})
           </button>
           <button
             type="button"
@@ -711,16 +674,6 @@ export function FinanceModule({
         />
       )}
 
-      {subModule === 'receipt-scan' && (
-        <ReceiptScannerPanel
-          workspace={workspace}
-          canManage={canManageExpenses}
-          actorRole={currentRole}
-          onRefresh={onRefresh}
-          onNotify={onNotify}
-        />
-      )}
-
       {subModule === 'etims' && (
         <EtimsVerificationPanel
           workspace={workspace}
@@ -753,16 +706,6 @@ export function FinanceModule({
 
       {subModule === 'budgets' && (
         <BudgetTrackingPanel
-          workspace={workspace}
-          canManage={canManageExpenses}
-          actorRole={currentRole}
-          onRefresh={onRefresh}
-          onNotify={onNotify}
-        />
-      )}
-
-      {subModule === 'approvals' && (
-        <BoardApprovalsPanel
           workspace={workspace}
           canManage={canManageExpenses}
           actorRole={currentRole}

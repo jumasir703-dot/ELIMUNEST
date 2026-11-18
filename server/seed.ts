@@ -21,7 +21,9 @@ import {
   type FeeInvoice,
   type FeeStructure,
   type FeeVoteline,
+  type IndependentVotelineItem,
   type LeaveOutChit,
+  type MpesaTransactionLog,
   type NonTeachingStaffProfile,
   type NotificationItem,
   type PayrollEntry,
@@ -107,6 +109,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'platform',
       fullName: 'Lead Platform Engineer',
       email: 'developer@elimunest.platform',
+      phone: '+254 700 100 001',
       role: 'Developer',
       passwordHash: defaultHash,
       status: 'Active',
@@ -114,9 +117,10 @@ export function buildSeedUsers(): StoredTenantUser[] {
     },
     {
       id: 'usr-platform-super',
-      tenantId: 'platform',
-      fullName: 'Platform Super Admin',
+      tenantId: 'tenant-oakridge',
+      fullName: 'Oakridge Super Admin',
       email: 'super.admin@elimunest.platform',
+      phone: '+254 700 100 002',
       role: 'Super Admin',
       passwordHash: defaultHash,
       status: 'Active',
@@ -127,6 +131,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-oakridge',
       fullName: 'Dr. Helena Vance',
       email: 'helena.vance@oakridge.ac.ke',
+      phone: '+254 712 408 100',
       role: 'Admin',
       passwordHash: defaultHash,
       status: 'Active',
@@ -137,6 +142,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-oakridge',
       fullName: 'Mary Wanjiru',
       email: 'mary.wanjiru@oakridge.ac.ke',
+      phone: '+254 722 408 101',
       role: 'Bursar',
       passwordHash: defaultHash,
       status: 'Active',
@@ -147,6 +153,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-oakridge',
       fullName: 'Kamau Njoroge',
       email: 'kamau.njoroge@oakridge.ac.ke',
+      phone: '+254 712 408 112',
       role: 'Teacher',
       passwordHash: defaultHash,
       status: 'Active',
@@ -157,6 +164,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-oakridge',
       fullName: 'Grace Admissions',
       email: 'grace.admissions@oakridge.ac.ke',
+      phone: '+254 733 408 103',
       role: 'Registrar',
       passwordHash: defaultHash,
       status: 'Active',
@@ -167,6 +175,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-westfield',
       fullName: 'David Chen',
       email: 'david.chen@westfield.ac.ke',
+      phone: '+254 711 204 510',
       role: 'Admin',
       passwordHash: defaultHash,
       status: 'Active',
@@ -177,6 +186,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-westfield',
       fullName: 'Elena Morales',
       email: 'elena.morales@westfield.ac.ke',
+      phone: '+254 722 308 614',
       role: 'Bursar',
       passwordHash: defaultHash,
       status: 'Active',
@@ -187,6 +197,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-stjude',
       fullName: 'Arthur Pendelton',
       email: 'arthur.pendelton@stjude.ac.ke',
+      phone: '+254 715 630 142',
       role: 'Admin',
       passwordHash: defaultHash,
       status: 'Active',
@@ -197,6 +208,7 @@ export function buildSeedUsers(): StoredTenantUser[] {
       tenantId: 'tenant-stjude',
       fullName: 'Priya Nair',
       email: 'priya.nair@stjude.ac.ke',
+      phone: '+254 726 741 253',
       role: 'Teacher',
       passwordHash: defaultHash,
       status: 'Active',
@@ -205,9 +217,16 @@ export function buildSeedUsers(): StoredTenantUser[] {
   ];
 }
 
+export interface StoredMpesaSecrets {
+  consumerSecret: string;
+  passkey: string;
+}
+
 export interface DatabaseState {
   tenants: Tenant[];
   users: StoredTenantUser[];
+  mpesaSecrets?: Record<string, StoredMpesaSecrets>;
+  mpesaTransactions?: MpesaTransactionLog[];
   students: Student[];
   admissions: AdmissionApplication[];
   timetable: TimetableSlot[];
@@ -218,6 +237,7 @@ export interface DatabaseState {
   examResults: ExamResult[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
+  independentVotelines?: IndependentVotelineItem[];
   expenses: SchoolExpense[];
   etimsChecks: EtimsVerificationRecord[];
   reconciliationLines: ReconciliationLine[];
@@ -531,7 +551,7 @@ export function buildDefaultPayrollForTenant(
 }
 
 export function buildDefaultBudgetsForTenant(tenant: Tenant): BudgetAllocation[] {
-  const isKes = tenant.currency === 'KES';
+  const isKes = (tenant.currency || 'KES') === 'KES';
   const scale = isKes ? 1 : 0.008;
   const baseAmounts: Record<(typeof EXPENSE_CATEGORIES)[number], number> = {
     'Payroll & Allowances': Math.round(750000 * scale),
@@ -544,16 +564,28 @@ export function buildDefaultBudgetsForTenant(tenant: Tenant): BudgetAllocation[]
     'Administration & Statutory': Math.round(85000 * scale),
   };
 
-  return EXPENSE_CATEGORIES.map((category, idx) => ({
-    id: `bdg-${tenant.id}-${idx + 1}`,
-    tenantId: tenant.id,
-    fiscalYear: tenant.academicYear || '2026–2027',
-    term: tenant.currentTerm || 'Term 1',
-    category,
-    allocatedAmount: Math.max(100, baseAmounts[category]),
-    notes: `${tenant.currentTerm} departmental ceiling`,
-    updatedAt: '2026-11-01T08:00:00Z',
-  }));
+  const pendingCategories = new Set<string>(['Transport & Fuel', 'ICT & Software']);
+  const approverName = tenant.teachers?.[0]?.name || 'School Principal / BOM';
+
+  return EXPENSE_CATEGORIES.map((category, idx) => {
+    const isPending = pendingCategories.has(category);
+    return {
+      id: `bdg-${tenant.id}-${idx + 1}`,
+      tenantId: tenant.id,
+      fiscalYear: tenant.academicYear || '2026–2027',
+      term: tenant.currentTerm || 'Term 1',
+      category,
+      allocatedAmount: Math.max(100, baseAmounts[category]),
+      status: isPending ? 'Pending Approval' : 'Approved',
+      approvedBy: isPending ? undefined : approverName,
+      approvedAt: isPending ? undefined : '2026-11-01T08:00:00Z',
+      approvalNotes: isPending
+        ? 'Awaiting specific departmental budget approval.'
+        : 'Approved for current term operations.',
+      notes: `${tenant.currentTerm} departmental ceiling`,
+      updatedAt: '2026-11-01T08:00:00Z',
+    };
+  });
 }
 
 export function buildDefaultApprovalsForTenant(
@@ -644,12 +676,31 @@ export function createSeedDatabase(): DatabaseState {
       subscriptionCycle: 'Annual',
       renewalDate: '2027-08-12',
       location: 'Nairobi, KE',
+      contactEmail: 'info@oakridge.ac.ke',
+      contactPhone: '+254 712 408 100',
+      postalAddress: 'P.O. Box 45812-00100, Nairobi',
       branding: {
         primaryColor: '#2563EB',
         accentColor: '#0284C7',
         sidebarColor: '',
         logoDataUrl: '',
         tagline: 'Excellence & Integrity in CBC Learning',
+      },
+      mpesaConfig: {
+        enabled: true,
+        environment: 'Sandbox',
+        paybillNumber: '522522',
+        accountName: 'Oakridge Preparatory Academy Fees',
+        accountReferenceFormat: 'Student Code (e.g. ADM-2601)',
+        consumerKey: 'oakridge_daraja_live_key_01',
+        hasConsumerSecret: true,
+        consumerSecretMasked: '••••7a91',
+        hasPasskey: true,
+        passkeyMasked: '••••2c88',
+        callbackUrl: '/api/mpesa/c2b-callback?paybill=522522',
+        settlementBank: 'KCB School Collection A/C 1104829104',
+        updatedAt: '2026-09-01T08:00:00Z',
+        updatedBy: 'Dr. Helena Vance',
       },
       grades: [...KENYAN_CBC_GRADES],
       sections: ['A', 'B', 'C'],
@@ -754,12 +805,31 @@ export function createSeedDatabase(): DatabaseState {
       subscriptionCycle: 'Annual',
       renewalDate: '2027-01-18',
       location: 'Mombasa, KE',
+      contactEmail: 'admissions@westfield.ac.ke',
+      contactPhone: '+254 711 204 510',
+      postalAddress: 'P.O. Box 81204-80100, Mombasa',
       branding: {
         primaryColor: '#059669',
         accentColor: '#0D9488',
         sidebarColor: '#062C22',
         logoDataUrl: '',
         tagline: 'STEM Innovation & Coastal Leadership',
+      },
+      mpesaConfig: {
+        enabled: true,
+        environment: 'Sandbox',
+        paybillNumber: '522544',
+        accountName: 'Westfield STEM High School Fees',
+        accountReferenceFormat: 'Student Code (e.g. WHS-2601)',
+        consumerKey: 'westfield_daraja_key_02',
+        hasConsumerSecret: true,
+        consumerSecretMasked: '••••4b19',
+        hasPasskey: true,
+        passkeyMasked: '••••9e04',
+        callbackUrl: '/api/mpesa/c2b-callback?paybill=522544',
+        settlementBank: 'Equity Bank Mombasa Collection A/C',
+        updatedAt: '2026-09-01T08:00:00Z',
+        updatedBy: 'David Chen',
       },
       grades: [...KENYAN_CBC_GRADES],
       sections: ['A', 'B'],
@@ -792,19 +862,38 @@ export function createSeedDatabase(): DatabaseState {
       curriculum: 'Cambridge & CBC Hybrid',
       academicYear: '2026–2027',
       currentTerm: 'Term 1',
-      currency: 'USD',
+      currency: 'KES',
       plan: 'Enterprise',
       status: 'Active',
       learnerCap: 2500,
       subscriptionCycle: 'Monthly',
       renewalDate: '2026-12-15',
       location: 'Kisumu, KE',
+      contactEmail: 'office@stjude.ac.ke',
+      contactPhone: '+254 715 630 142',
+      postalAddress: 'P.O. Box 1924-40100, Kisumu',
       branding: {
         primaryColor: '#9F1239',
         accentColor: '#D97706',
         sidebarColor: '#2A0B14',
         logoDataUrl: '',
         tagline: 'Global Perspectives, Rooted Values',
+      },
+      mpesaConfig: {
+        enabled: true,
+        environment: 'Sandbox',
+        paybillNumber: '522566',
+        accountName: 'St. Jude International Fees',
+        accountReferenceFormat: 'Student Code (e.g. SJI-2601)',
+        consumerKey: 'stjude_daraja_key_03',
+        hasConsumerSecret: true,
+        consumerSecretMasked: '••••3f50',
+        hasPasskey: true,
+        passkeyMasked: '••••6d11',
+        callbackUrl: '/api/mpesa/c2b-callback?paybill=522566',
+        settlementBank: 'Stanbic Bank Kisumu KES Fee A/C',
+        updatedAt: '2026-09-01T08:00:00Z',
+        updatedBy: 'Arthur Pendelton',
       },
       grades: [...KENYAN_CBC_GRADES],
       sections: ['A', 'B'],
@@ -2142,6 +2231,38 @@ export function createSeedDatabase(): DatabaseState {
   return {
     tenants,
     users: buildSeedUsers(),
+    mpesaSecrets: {
+      'tenant-oakridge': {
+        consumerSecret: 'oakridge-sandbox-secret-7a91',
+        passkey: 'oakridge-lipa-passkey-2c88',
+      },
+      'tenant-westfield': {
+        consumerSecret: 'westfield-sandbox-secret-4b19',
+        passkey: 'westfield-lipa-passkey-9e04',
+      },
+      'tenant-stjude': {
+        consumerSecret: 'stjude-sandbox-secret-3f50',
+        passkey: 'stjude-lipa-passkey-6d11',
+      },
+    },
+    mpesaTransactions: [
+      {
+        id: 'mpesa-seed-oak-1',
+        tenantId: 'tenant-oakridge',
+        paybillNumber: '522522',
+        mpesaReceipt: 'UJK84M219P',
+        msisdn: '254712345678',
+        accountReference: 'ADM-2601',
+        amount: 25000,
+        studentId: 'stu-oak-1',
+        studentName: 'Wanjiku Kamau',
+        invoiceNumber: 'OAK-INV-202601',
+        status: 'Settled',
+        channel: 'Daraja C2B Webhook',
+        note: 'Routed via Paybill 522522 to Oakridge Preparatory Academy',
+        receivedAt: '2026-11-10T09:15:00Z',
+      },
+    ],
     students,
     admissions,
     timetable,
@@ -2152,6 +2273,48 @@ export function createSeedDatabase(): DatabaseState {
     examResults,
     feeStructures,
     invoices,
+    independentVotelines: [
+      {
+        id: 'ivl-oak-1',
+        tenantId: 'tenant-oakridge',
+        studentId: 'stu-oak-1',
+        studentName: 'Wanjiku Kamau',
+        studentCode: 'ADM-2601',
+        grade: 'Grade 9',
+        invoiceId: 'inv-oak-1',
+        invoiceNumber: 'INV-2026-8801',
+        term: 'Term 1 (Autumn)',
+        name: 'Transport Fee',
+        amount: 8500,
+        paidAmount: 0,
+        balance: 8500,
+        status: 'Pending',
+        note: 'Route A — Westlands Morning & Evening Shuttle',
+        payments: [],
+        recordedBy: 'Bursar Office',
+        createdAt: '2026-09-02T08:30:00Z',
+      },
+      {
+        id: 'ivl-oak-2',
+        tenantId: 'tenant-oakridge',
+        studentId: 'stu-oak-2',
+        studentName: 'Brian Ochieng',
+        studentCode: 'ADM-2602',
+        grade: 'Grade 9',
+        invoiceId: 'inv-oak-2',
+        invoiceNumber: 'INV-2026-8802',
+        term: 'Term 1 (Autumn)',
+        name: 'Academic Trip Fee',
+        amount: 3500,
+        paidAmount: 0,
+        balance: 3500,
+        status: 'Pending',
+        note: 'Naivasha Geothermal & Science Field Excursion',
+        payments: [],
+        recordedBy: 'Bursar Office',
+        createdAt: '2026-09-05T10:15:00Z',
+      },
+    ],
     expenses,
     etimsChecks,
     reconciliationLines,
