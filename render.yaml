@@ -17,6 +17,8 @@ services:
         sync: false # set this in the Render dashboard
       - key: APP_URL
         sync: false # set to your Render URL after first deploy
+      - key: AUTH_SESSION_SECRET
+        sync: false # required in production (min 32 random chars)
     disk:
       name: elimunest-data
       mountPath: /var/data

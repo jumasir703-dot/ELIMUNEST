@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import {
   buildDefaultLevelSubjectsMap,
   buildDefaultLevelWeeklyLessonsMap,
@@ -36,7 +37,7 @@ import {
   type TimetableSlot,
   type WhatsAppDispatchRecord,
 } from '../src/shared/types.ts';
-import { hashPassword } from './middleware/adminAuth.ts';
+import { generateOneTimePassword, hashPassword } from './middleware/adminAuth.ts';
 
 export function buildDefaultNonTeachingStaff(
   slug: string,
@@ -96,14 +97,21 @@ export function buildDefaultNonTeachingStaff(
 
 export interface StoredTenantUser extends TenantUser {
   passwordHash: string;
+  tokenVersion?: number;
 }
 
-export const DEFAULT_SEED_USER_PASSWORD = 'Elimu@2026';
+export interface DevSeedCredential {
+  email: string;
+  role: string;
+  password: string;
+}
 
-export function buildSeedUsers(): StoredTenantUser[] {
-  const defaultHash = hashPassword(DEFAULT_SEED_USER_PASSWORD);
+export async function buildSeedUsers(): Promise<{
+  users: StoredTenantUser[];
+  devCredentials: DevSeedCredential[];
+}> {
   const now = '2026-09-01T08:00:00Z';
-  return [
+  const specs: Array<Omit<StoredTenantUser, 'passwordHash' | 'status' | 'mustChangePassword' | 'tokenVersion' | 'createdAt'>> = [
     {
       id: 'usr-platform-dev',
       tenantId: 'platform',
@@ -111,9 +119,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'developer@elimunest.platform',
       phone: '+254 700 100 001',
       role: 'Developer',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-platform-super',
@@ -122,9 +127,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'super.admin@elimunest.platform',
       phone: '+254 700 100 002',
       role: 'Super Admin',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-oak-admin',
@@ -133,9 +135,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'helena.vance@oakridge.ac.ke',
       phone: '+254 712 408 100',
       role: 'Admin',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-oak-bursar',
@@ -144,9 +143,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'mary.wanjiru@oakridge.ac.ke',
       phone: '+254 722 408 101',
       role: 'Bursar',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-oak-teacher',
@@ -155,9 +151,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'kamau.njoroge@oakridge.ac.ke',
       phone: '+254 712 408 112',
       role: 'Teacher',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-oak-registrar',
@@ -166,9 +159,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'grace.admissions@oakridge.ac.ke',
       phone: '+254 733 408 103',
       role: 'Registrar',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-west-admin',
@@ -177,9 +167,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'david.chen@westfield.ac.ke',
       phone: '+254 711 204 510',
       role: 'Admin',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-west-bursar',
@@ -188,9 +175,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'elena.morales@westfield.ac.ke',
       phone: '+254 722 308 614',
       role: 'Bursar',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-sj-admin',
@@ -199,9 +183,6 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'arthur.pendelton@stjude.ac.ke',
       phone: '+254 715 630 142',
       role: 'Admin',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
     {
       id: 'usr-sj-teacher',
@@ -210,22 +191,31 @@ export function buildSeedUsers(): StoredTenantUser[] {
       email: 'priya.nair@stjude.ac.ke',
       phone: '+254 726 741 253',
       role: 'Teacher',
-      passwordHash: defaultHash,
-      status: 'Active',
-      createdAt: now,
     },
   ];
-}
 
-export interface StoredMpesaSecrets {
-  consumerSecret: string;
-  passkey: string;
+  const devCredentials: DevSeedCredential[] = [];
+  const users: StoredTenantUser[] = [];
+  for (const spec of specs) {
+    const pw = generateOneTimePassword();
+    const passwordHash = await hashPassword(pw);
+    devCredentials.push({ email: spec.email, role: spec.role, password: pw });
+    users.push({
+      ...spec,
+      passwordHash,
+      status: 'Active',
+      mustChangePassword: true,
+      tokenVersion: 0,
+      createdAt: now,
+    });
+  }
+  return { users, devCredentials };
 }
 
 export interface DatabaseState {
   tenants: Tenant[];
   users: StoredTenantUser[];
-  mpesaSecrets?: Record<string, StoredMpesaSecrets>;
+  mpesaWebhookHashes?: Record<string, string>;
   mpesaTransactions?: MpesaTransactionLog[];
   students: Student[];
   admissions: AdmissionApplication[];
@@ -659,7 +649,49 @@ function buildSeedGradeStreams(
   return map;
 }
 
-export function createSeedDatabase(): DatabaseState {
+export function createEmptyDatabase(): DatabaseState {
+  return {
+    tenants: [],
+    users: [],
+    mpesaWebhookHashes: {},
+    mpesaTransactions: [],
+    students: [],
+    admissions: [],
+    timetable: [],
+    attendance: [],
+    staffAttendance: [],
+    leaveOutChits: [],
+    examCycles: [],
+    examResults: [],
+    feeStructures: [],
+    invoices: [],
+    independentVotelines: [],
+    expenses: [],
+    etimsChecks: [],
+    reconciliationLines: [],
+    payrollEntries: [],
+    budgets: [],
+    approvalRecords: [],
+    announcements: [],
+    messages: [],
+    whatsappDispatches: [],
+    notifications: [],
+    adminAuditLogs: [],
+  };
+}
+
+export async function createSeedDatabase(options?: {
+  empty?: boolean;
+}): Promise<{ state: DatabaseState; devCredentials: DevSeedCredential[] }> {
+  if (options?.empty) {
+    return { state: createEmptyDatabase(), devCredentials: [] };
+  }
+
+  const oakWebhookSecret = randomBytes(24).toString('hex');
+  const westWebhookSecret = randomBytes(24).toString('hex');
+  const sjWebhookSecret = randomBytes(24).toString('hex');
+  const hashWebhook = (s: string) => createHash('sha256').update(s).digest('hex');
+
   const tenants: Tenant[] = [
     {
       id: 'tenant-oakridge',
@@ -692,12 +724,8 @@ export function createSeedDatabase(): DatabaseState {
         paybillNumber: '522522',
         accountName: 'Oakridge Preparatory Academy Fees',
         accountReferenceFormat: 'Student Code (e.g. ADM-2601)',
-        consumerKey: 'oakridge_daraja_live_key_01',
-        hasConsumerSecret: true,
-        consumerSecretMasked: '••••7a91',
-        hasPasskey: true,
-        passkeyMasked: '••••2c88',
-        callbackUrl: '/api/mpesa/c2b-callback?paybill=522522',
+        hasWebhookSecret: true,
+        callbackUrl: `/api/mpesa/c2b-callback/••••${oakWebhookSecret.slice(-4)}`,
         settlementBank: 'KCB School Collection A/C 1104829104',
         updatedAt: '2026-09-01T08:00:00Z',
         updatedBy: 'Dr. Helena Vance',
@@ -821,12 +849,8 @@ export function createSeedDatabase(): DatabaseState {
         paybillNumber: '522544',
         accountName: 'Westfield STEM High School Fees',
         accountReferenceFormat: 'Student Code (e.g. WHS-2601)',
-        consumerKey: 'westfield_daraja_key_02',
-        hasConsumerSecret: true,
-        consumerSecretMasked: '••••4b19',
-        hasPasskey: true,
-        passkeyMasked: '••••9e04',
-        callbackUrl: '/api/mpesa/c2b-callback?paybill=522544',
+        hasWebhookSecret: true,
+        callbackUrl: `/api/mpesa/c2b-callback/••••${westWebhookSecret.slice(-4)}`,
         settlementBank: 'Equity Bank Mombasa Collection A/C',
         updatedAt: '2026-09-01T08:00:00Z',
         updatedBy: 'David Chen',
@@ -885,12 +909,8 @@ export function createSeedDatabase(): DatabaseState {
         paybillNumber: '522566',
         accountName: 'St. Jude International Fees',
         accountReferenceFormat: 'Student Code (e.g. SJI-2601)',
-        consumerKey: 'stjude_daraja_key_03',
-        hasConsumerSecret: true,
-        consumerSecretMasked: '••••3f50',
-        hasPasskey: true,
-        passkeyMasked: '••••6d11',
-        callbackUrl: '/api/mpesa/c2b-callback?paybill=522566',
+        hasWebhookSecret: true,
+        callbackUrl: `/api/mpesa/c2b-callback/••••${sjWebhookSecret.slice(-4)}`,
         settlementBank: 'Stanbic Bank Kisumu KES Fee A/C',
         updatedAt: '2026-09-01T08:00:00Z',
         updatedBy: 'Arthur Pendelton',
@@ -2228,103 +2248,99 @@ export function createSeedDatabase(): DatabaseState {
     buildDefaultApprovalsForTenant(t.id, t.currency, t.slug.slice(0, 3).toUpperCase())
   );
 
+  const { users, devCredentials } = await buildSeedUsers();
+
   return {
-    tenants,
-    users: buildSeedUsers(),
-    mpesaSecrets: {
-      'tenant-oakridge': {
-        consumerSecret: 'oakridge-sandbox-secret-7a91',
-        passkey: 'oakridge-lipa-passkey-2c88',
+    devCredentials,
+    state: {
+      tenants,
+      users,
+      mpesaWebhookHashes: {
+        'tenant-oakridge': hashWebhook(oakWebhookSecret),
+        'tenant-westfield': hashWebhook(westWebhookSecret),
+        'tenant-stjude': hashWebhook(sjWebhookSecret),
       },
-      'tenant-westfield': {
-        consumerSecret: 'westfield-sandbox-secret-4b19',
-        passkey: 'westfield-lipa-passkey-9e04',
-      },
-      'tenant-stjude': {
-        consumerSecret: 'stjude-sandbox-secret-3f50',
-        passkey: 'stjude-lipa-passkey-6d11',
-      },
+      mpesaTransactions: [
+        {
+          id: 'mpesa-seed-oak-1',
+          tenantId: 'tenant-oakridge',
+          paybillNumber: '522522',
+          mpesaReceipt: 'UJK84M219P',
+          msisdn: '254712345678',
+          accountReference: 'ADM-2601',
+          amount: 25000,
+          studentId: 'stu-oak-1',
+          studentName: 'Wanjiku Kamau',
+          invoiceNumber: 'OAK-INV-202601',
+          status: 'Settled',
+          channel: 'Daraja C2B Webhook',
+          note: 'Routed via Paybill 522522 to Oakridge Preparatory Academy',
+          receivedAt: '2026-11-10T09:15:00Z',
+        },
+      ],
+      students,
+      admissions,
+      timetable,
+      attendance,
+      staffAttendance: [],
+      leaveOutChits: [],
+      examCycles,
+      examResults,
+      feeStructures,
+      invoices,
+      independentVotelines: [
+        {
+          id: 'ivl-oak-1',
+          tenantId: 'tenant-oakridge',
+          studentId: 'stu-oak-1',
+          studentName: 'Wanjiku Kamau',
+          studentCode: 'ADM-2601',
+          grade: 'Grade 9',
+          invoiceId: 'inv-oak-1',
+          invoiceNumber: 'INV-2026-8801',
+          term: 'Term 1 (Autumn)',
+          name: 'Transport Fee',
+          amount: 8500,
+          paidAmount: 0,
+          balance: 8500,
+          status: 'Pending',
+          note: 'Route A — Westlands Morning & Evening Shuttle',
+          payments: [],
+          recordedBy: 'Bursar Office',
+          createdAt: '2026-09-02T08:30:00Z',
+        },
+        {
+          id: 'ivl-oak-2',
+          tenantId: 'tenant-oakridge',
+          studentId: 'stu-oak-2',
+          studentName: 'Brian Ochieng',
+          studentCode: 'ADM-2602',
+          grade: 'Grade 9',
+          invoiceId: 'inv-oak-2',
+          invoiceNumber: 'INV-2026-8802',
+          term: 'Term 1 (Autumn)',
+          name: 'Academic Trip Fee',
+          amount: 3500,
+          paidAmount: 0,
+          balance: 3500,
+          status: 'Pending',
+          note: 'Naivasha Geothermal & Science Field Excursion',
+          payments: [],
+          recordedBy: 'Bursar Office',
+          createdAt: '2026-09-05T10:15:00Z',
+        },
+      ],
+      expenses,
+      etimsChecks,
+      reconciliationLines,
+      payrollEntries,
+      budgets,
+      approvalRecords,
+      announcements,
+      messages,
+      whatsappDispatches: [],
+      notifications,
+      adminAuditLogs: [],
     },
-    mpesaTransactions: [
-      {
-        id: 'mpesa-seed-oak-1',
-        tenantId: 'tenant-oakridge',
-        paybillNumber: '522522',
-        mpesaReceipt: 'UJK84M219P',
-        msisdn: '254712345678',
-        accountReference: 'ADM-2601',
-        amount: 25000,
-        studentId: 'stu-oak-1',
-        studentName: 'Wanjiku Kamau',
-        invoiceNumber: 'OAK-INV-202601',
-        status: 'Settled',
-        channel: 'Daraja C2B Webhook',
-        note: 'Routed via Paybill 522522 to Oakridge Preparatory Academy',
-        receivedAt: '2026-11-10T09:15:00Z',
-      },
-    ],
-    students,
-    admissions,
-    timetable,
-    attendance,
-    staffAttendance: [],
-    leaveOutChits: [],
-    examCycles,
-    examResults,
-    feeStructures,
-    invoices,
-    independentVotelines: [
-      {
-        id: 'ivl-oak-1',
-        tenantId: 'tenant-oakridge',
-        studentId: 'stu-oak-1',
-        studentName: 'Wanjiku Kamau',
-        studentCode: 'ADM-2601',
-        grade: 'Grade 9',
-        invoiceId: 'inv-oak-1',
-        invoiceNumber: 'INV-2026-8801',
-        term: 'Term 1 (Autumn)',
-        name: 'Transport Fee',
-        amount: 8500,
-        paidAmount: 0,
-        balance: 8500,
-        status: 'Pending',
-        note: 'Route A — Westlands Morning & Evening Shuttle',
-        payments: [],
-        recordedBy: 'Bursar Office',
-        createdAt: '2026-09-02T08:30:00Z',
-      },
-      {
-        id: 'ivl-oak-2',
-        tenantId: 'tenant-oakridge',
-        studentId: 'stu-oak-2',
-        studentName: 'Brian Ochieng',
-        studentCode: 'ADM-2602',
-        grade: 'Grade 9',
-        invoiceId: 'inv-oak-2',
-        invoiceNumber: 'INV-2026-8802',
-        term: 'Term 1 (Autumn)',
-        name: 'Academic Trip Fee',
-        amount: 3500,
-        paidAmount: 0,
-        balance: 3500,
-        status: 'Pending',
-        note: 'Naivasha Geothermal & Science Field Excursion',
-        payments: [],
-        recordedBy: 'Bursar Office',
-        createdAt: '2026-09-05T10:15:00Z',
-      },
-    ],
-    expenses,
-    etimsChecks,
-    reconciliationLines,
-    payrollEntries,
-    budgets,
-    approvalRecords,
-    announcements,
-    messages,
-    whatsappDispatches: [],
-    notifications,
-    adminAuditLogs: [],
   };
 }

@@ -1,51 +1,62 @@
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import type { NextFunction, Request, Response } from 'express';
-import type {
-  AdminSessionInfo,
-  AuthSessionInfo,
-  ImpersonatorMeta,
-  TenantStatus,
-  TenantUser,
-  UserRole,
+import {
+  getEffectiveUserModules,
+  type AuthSessionInfo,
+  type ImpersonatorMeta,
+  type TenantModulePermission,
+  type TenantStatus,
+  type TenantUser,
+  type UserRole,
 } from '../../src/shared/types.ts';
 
+const scryptAsync = promisify(scrypt);
+
 const USER_TOKEN_PREFIX = 'elimunest_v1';
-const ADMIN_TOKEN_PREFIX = 'admin_v1';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const IMPERSONATION_TTL_MS = 60 * 60 * 1000; // 1 hour scoped support token
 const EPHEMERAL_BOOT_SECRET = randomBytes(32).toString('hex');
+const MIN_SECRET_LENGTH = 32;
 
 function getConfiguredSecret(): string | null {
   const configured =
     process.env.AUTH_SESSION_SECRET?.trim() || process.env.ADMIN_SESSION_SECRET?.trim();
-  return configured && configured.length >= 16 ? configured : null;
+  return configured && configured.length >= MIN_SECRET_LENGTH ? configured : null;
 }
 
 export function isSessionSecretConfigured(): boolean {
   return getConfiguredSecret() !== null;
 }
 
+export function assertProductionSessionSecret(): void {
+  if (process.env.NODE_ENV === 'production' && !isSessionSecretConfigured()) {
+    throw new Error(
+      `[elimuNest] FATAL: AUTH_SESSION_SECRET must be set to at least ${MIN_SECRET_LENGTH} characters in production.`
+    );
+  }
+}
+
+assertProductionSessionSecret();
+
 function getSessionSecret(): string {
-  return getConfiguredSecret() ?? EPHEMERAL_BOOT_SECRET;
+  const configured = getConfiguredSecret();
+  if (configured) return configured;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      `[elimuNest] FATAL: AUTH_SESSION_SECRET must be set to at least ${MIN_SECRET_LENGTH} characters in production.`
+    );
+  }
+  return EPHEMERAL_BOOT_SECRET;
 }
 
-// Without a fixed secret every serverless instance signs tokens with its own random key,
-// so a token issued by one instance is rejected (401) by the next one and the client
-// bounces back to the sign-in screen. Make that impossible to miss in the logs.
-if (process.env.VERCEL && !isSessionSecretConfigured()) {
-  console.error(
-    '[elimuNest] AUTH_SESSION_SECRET is not set (min 16 chars). Sessions will be rejected ' +
-      'across serverless instances and the app will keep logging users out.'
-  );
-}
-
-export function hashPassword(password: string): string {
+export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16).toString('hex');
-  const derived = scryptSync(password, salt, 64).toString('hex');
-  return `scrypt:${salt}:${derived}`;
+  const derived = (await scryptAsync(password, salt, 64)) as Buffer;
+  return `scrypt:${salt}:${derived.toString('hex')}`;
 }
 
-export function verifyPassword(password: string, storedHash: string): boolean {
+export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   if (!storedHash || !storedHash.startsWith('scrypt:')) {
     return false;
   }
@@ -54,7 +65,7 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   const [, salt, expectedHex] = parts;
   if (!salt || !expectedHex) return false;
   try {
-    const derivedBuf = scryptSync(password, salt, 64);
+    const derivedBuf = (await scryptAsync(password, salt, 64)) as Buffer;
     const expectedBuf = Buffer.from(expectedHex, 'hex');
     if (derivedBuf.length !== expectedBuf.length) return false;
     return timingSafeEqual(derivedBuf, expectedBuf);
@@ -64,7 +75,8 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 }
 
 export function generateOneTimePassword(): string {
-  return `Otp-${randomBytes(4).toString('hex').toUpperCase()}`;
+  // Always >= 13 chars and guaranteed to contain letters + digits (satisfies 10-char password policy)
+  return `Otp1-${randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
 export type DeveloperPermission =
@@ -110,19 +122,10 @@ export interface UserTokenClaims {
   role: UserRole;
   email: string;
   name: string;
+  tv?: number;
   iat: number;
   exp: number;
   impersonatedBy?: ImpersonatorMeta;
-}
-
-interface AdminTokenClaims {
-  sub: string;
-  tenantId?: string;
-  role: UserRole;
-  email: string;
-  name: string;
-  iat: number;
-  exp: number;
 }
 
 const PRIVILEGED_ROLES: ReadonlySet<UserRole> = new Set<UserRole>([
@@ -169,6 +172,7 @@ export function createUserSessionToken(
     role: user.role,
     email: user.email,
     name: user.fullName,
+    tv: user.tokenVersion ?? 0,
     iat: now,
     exp,
     ...(meta?.impersonator ? { impersonatedBy: meta.impersonator } : {}),
@@ -221,80 +225,74 @@ export function verifyUserSessionToken(token: string): UserTokenClaims | null {
   }
 }
 
-export function createAdminSessionToken(actor: AdminActor): AdminSessionInfo {
-  const now = Date.now();
-  const exp = now + SESSION_TTL_MS;
-  const claims: AdminTokenClaims = {
-    sub: actor.id,
-    tenantId: actor.tenantId,
-    role: actor.role,
-    email: actor.email,
-    name: actor.name,
-    iat: now,
-    exp,
-  };
-  const encodedPayload = Buffer.from(JSON.stringify(claims), 'utf-8').toString('base64url');
-  const signature = signPrefixedPayload(ADMIN_TOKEN_PREFIX, encodedPayload);
-  return {
-    token: `${ADMIN_TOKEN_PREFIX}.${encodedPayload}.${signature}`,
-    expiresAt: new Date(exp).toISOString(),
-    actor: {
-      id: actor.id,
-      role: actor.role,
-      email: actor.email,
-      name: actor.name,
-    },
-  };
+export function resolveLiveSessionFromToken(
+  token: string,
+  resolveLiveUser: (userId: string) => TenantUser | null,
+  resolveTenantStatus?: (tenantId: string) => TenantStatus | null
+): {
+  ok: true;
+  claims: UserTokenClaims;
+  liveUser: TenantUser;
+} | {
+  ok: false;
+  status: 401 | 403;
+  error: string;
+} {
+  const claims = verifyUserSessionToken(token);
+  if (!claims) {
+    return { ok: false, status: 401, error: 'Session invalid or expired. Please sign in again.' };
+  }
+
+  const liveUser = resolveLiveUser(claims.sub);
+  if (!liveUser || liveUser.status !== 'Active') {
+    return { ok: false, status: 401, error: 'Account is disabled or no longer active.' };
+  }
+
+  const expectedTokenVersion = liveUser.tokenVersion ?? 0;
+  const presentedTokenVersion = claims.tv ?? 0;
+  if (presentedTokenVersion !== expectedTokenVersion) {
+    return {
+      ok: false,
+      status: 401,
+      error: 'Session invalidated after password update. Please sign in again.',
+    };
+  }
+
+  if (
+    liveUser.tenantId !== 'platform' &&
+    !claims.impersonatedBy &&
+    resolveTenantStatus &&
+    resolveTenantStatus(liveUser.tenantId) === 'Suspended'
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      error:
+        'Tenant Suspended (Kill Switch Active): This school workspace has been suspended by platform engineering.',
+    };
+  }
+
+  return { ok: true, claims, liveUser };
 }
 
-export function verifyAdminSessionToken(token: string): AdminActor | null {
-  const userClaims = verifyUserSessionToken(token);
-  if (userClaims && !userClaims.impersonatedBy && isPrivilegedAdminRole(userClaims.role)) {
-    return {
-      id: userClaims.sub,
-      tenantId: userClaims.tenantId,
-      role: userClaims.role,
-      email: userClaims.email,
-      name: userClaims.name,
-    };
-  }
-
-  const parts = token.split('.');
-  if (parts.length !== 3 || parts[0] !== ADMIN_TOKEN_PREFIX) {
+export function verifyAdminSessionToken(
+  token: string,
+  resolveLiveUser: (userId: string) => TenantUser | null,
+  resolveTenantStatus?: (tenantId: string) => TenantStatus | null
+): AdminActor | null {
+  const resolved = resolveLiveSessionFromToken(token, resolveLiveUser, resolveTenantStatus);
+  if (!resolved.ok) return null;
+  const { claims, liveUser } = resolved;
+  if (claims.impersonatedBy || !isPrivilegedAdminRole(liveUser.role)) {
     return null;
   }
-
-  const [, encodedPayload, providedSignature] = parts;
-  if (!encodedPayload || !providedSignature) {
-    return null;
-  }
-
-  const expectedSignature = signPrefixedPayload(ADMIN_TOKEN_PREFIX, encodedPayload);
-  const providedBuf = Buffer.from(providedSignature, 'utf-8');
-  const expectedBuf = Buffer.from(expectedSignature, 'utf-8');
-  if (providedBuf.length !== expectedBuf.length || !timingSafeEqual(providedBuf, expectedBuf)) {
-    return null;
-  }
-
-  try {
-    const raw = Buffer.from(encodedPayload, 'base64url').toString('utf-8');
-    const claims = JSON.parse(raw) as AdminTokenClaims;
-    if (!claims || typeof claims.exp !== 'number' || claims.exp <= Date.now()) {
-      return null;
-    }
-    if (!isPrivilegedAdminRole(claims.role)) {
-      return null;
-    }
-    return {
-      id: claims.sub || 'actor-admin',
-      tenantId: claims.tenantId,
-      role: claims.role,
-      email: claims.email || 'admin@elimunest.platform',
-      name: claims.name || claims.role,
-    };
-  } catch {
-    return null;
-  }
+  return {
+    id: liveUser.id,
+    tenantId: liveUser.tenantId,
+    role: liveUser.role,
+    email: liveUser.email,
+    name: liveUser.fullName,
+  };
 }
 
 export function extractBearerToken(req: Request): string | null {
@@ -317,35 +315,13 @@ export function createUserAuthMiddleware(
       return;
     }
 
-    const claims = verifyUserSessionToken(token);
-    if (!claims) {
-      res.status(401).json({
-        error: 'Session invalid or expired. Please sign in again.',
-      });
+    const resolved = resolveLiveSessionFromToken(token, resolveLiveUser, resolveTenantStatus);
+    if (!resolved.ok) {
+      res.status(resolved.status).json({ error: resolved.error });
       return;
     }
 
-    const liveUser = resolveLiveUser(claims.sub);
-    if (!liveUser || liveUser.status !== 'Active') {
-      res.status(401).json({
-        error: 'Account is disabled or no longer active.',
-      });
-      return;
-    }
-
-    // Immediate kill-switch enforcement across live tenant API traffic
-    if (
-      liveUser.tenantId !== 'platform' &&
-      !claims.impersonatedBy &&
-      resolveTenantStatus &&
-      resolveTenantStatus(liveUser.tenantId) === 'Suspended'
-    ) {
-      res.status(403).json({
-        error:
-          'Tenant Suspended (Kill Switch Active): This school workspace has been suspended by platform engineering.',
-      });
-      return;
-    }
+    const { claims, liveUser } = resolved;
 
     // Mandatory password rotation for 1-time password accounts
     if (
@@ -394,6 +370,42 @@ export function createUserAuthMiddleware(
   };
 }
 
+export function requireRole(...allowedRoles: UserRole[]) {
+  const allowedSet = new Set<UserRole>(allowedRoles);
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const authUser = req.authUser;
+    if (!authUser) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    if (!allowedSet.has(authUser.role)) {
+      res.status(403).json({
+        error: `Forbidden: Role "${authUser.role}" is not permitted to perform this action.`,
+      });
+      return;
+    }
+    next();
+  };
+}
+
+export function requireModule(moduleId: TenantModulePermission) {
+  return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const authUser = req.authUser;
+    if (!authUser) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const effective = getEffectiveUserModules(authUser);
+    if (!effective.includes(moduleId)) {
+      res.status(403).json({
+        error: `Forbidden: Account lacks access permission to module "${moduleId}".`,
+      });
+      return;
+    }
+    next();
+  };
+}
+
 export function requireDeveloperAuth(requiredPermission?: DeveloperPermission) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     const authUser = req.authUser;
@@ -430,41 +442,32 @@ export function requireDeveloperAuth(requiredPermission?: DeveloperPermission) {
   };
 }
 
-export function issueAdminSession(req: AuthenticatedRequest, res: Response) {
-  const token = extractBearerToken(req);
-  const userClaims = token ? verifyUserSessionToken(token) : null;
-  if (!userClaims || userClaims.impersonatedBy || !isPrivilegedAdminRole(userClaims.role)) {
-    res.status(401).json({
-      error: 'Unauthorized: Sign in as an Admin or Super Admin account first.',
-    });
-    return;
-  }
-
-  const session = createAdminSessionToken({
-    id: userClaims.sub,
-    tenantId: userClaims.tenantId,
-    role: userClaims.role,
-    email: userClaims.email,
-    name: userClaims.name,
-  });
-  res.json(session);
-}
-
-export function requireAdminAuth(allowedRoles: UserRole[] = ['Super Admin', 'Admin']) {
+export function requireAdminAuth(
+  allowedRoles: UserRole[] = ['Super Admin', 'Admin'],
+  resolveLiveUser?: (userId: string) => TenantUser | null,
+  resolveTenantStatus?: (tenantId: string) => TenantStatus | null
+) {
   const allowedSet = new Set<UserRole>(allowedRoles);
   return (req: AdminAuthenticatedRequest, res: Response, next: NextFunction) => {
-    const token = extractBearerToken(req);
-    if (!token) {
+    let actor = req.adminActor;
+
+    if (!actor && resolveLiveUser) {
+      const token = extractBearerToken(req);
+      if (token) {
+        actor = verifyAdminSessionToken(token, resolveLiveUser, resolveTenantStatus) ?? undefined;
+      }
+    }
+
+    if (!actor) {
       res.status(401).json({
-        error: 'Unauthorized: Missing or invalid Admin Bearer session token.',
+        error: 'Unauthorized: Valid live Administrator session is required.',
       });
       return;
     }
 
-    const actor = verifyAdminSessionToken(token);
-    if (!actor) {
-      res.status(401).json({
-        error: 'Unauthorized: Admin session token is invalid or has expired.',
+    if (req.impersonation) {
+      res.status(403).json({
+        error: 'Forbidden: Administrative endpoints cannot be invoked during impersonation.',
       });
       return;
     }

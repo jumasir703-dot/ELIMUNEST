@@ -3,13 +3,9 @@ import {
   AlertTriangle,
   CheckCircle2,
   Copy,
-  Eye,
-  EyeOff,
-  KeyRound,
-  Lock,
+  RefreshCw,
   Search,
   Send,
-  ShieldCheck,
   Smartphone,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
@@ -60,11 +56,7 @@ export function MpesaIntegrationPanel({
     existing?.accountReferenceFormat || 'Student Code (e.g. ADM-2601)'
   );
   const [settlementBank, setSettlementBank] = useState<string>(existing?.settlementBank || '');
-  const [consumerKey, setConsumerKey] = useState<string>(existing?.consumerKey || '');
-  const [consumerSecret, setConsumerSecret] = useState<string>('');
-  const [passkey, setPasskey] = useState<string>('');
-  const [showSecret, setShowSecret] = useState(false);
-  const [showPasskey, setShowPasskey] = useState(false);
+  const [revealedWebhookUrl, setRevealedWebhookUrl] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
 
@@ -86,7 +78,9 @@ export function MpesaIntegrationPanel({
 
   // Ledger filter state
   const [txSearch, setTxSearch] = useState('');
-  const [txStatusFilter, setTxStatusFilter] = useState<'All' | 'Settled' | 'Rejected'>('All');
+  const [txStatusFilter, setTxStatusFilter] = useState<
+    'All' | 'Settled' | 'Rejected' | 'Duplicate' | 'Unverified'
+  >('All');
 
   useEffect(() => {
     const cfg = tenant.mpesaConfig;
@@ -96,9 +90,7 @@ export function MpesaIntegrationPanel({
     setAccountName(cfg?.accountName || `${tenant.name} Fees`);
     setAccountReferenceFormat(cfg?.accountReferenceFormat || 'Student Code (e.g. ADM-2601)');
     setSettlementBank(cfg?.settlementBank || '');
-    setConsumerKey(cfg?.consumerKey || '');
-    setConsumerSecret('');
-    setPasskey('');
+    setRevealedWebhookUrl(null);
     setConfigError(null);
     setTestPaybill(cfg?.paybillNumber || '');
   }, [tenant.id, tenant.name, tenant.mpesaConfig]);
@@ -111,10 +103,14 @@ export function MpesaIntegrationPanel({
   }, [openInvoices, testAccountRef]);
 
   const cleanPaybillPreview = paybillNumber.replace(/\s+/g, '').trim() || '<PAYBILL>';
+  const callbackPath =
+    revealedWebhookUrl ||
+    existing?.callbackUrl ||
+    '/api/mpesa/c2b-callback/<generated-after-save>';
   const fullCallbackUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}/api/mpesa/c2b-callback?paybill=${cleanPaybillPreview}`
-      : `/api/mpesa/c2b-callback?paybill=${cleanPaybillPreview}`;
+    typeof window !== 'undefined' && callbackPath.startsWith('/')
+      ? `${window.location.origin}${callbackPath}`
+      : callbackPath;
 
   const filteredTransactions = useMemo(() => {
     const q = txSearch.trim().toLowerCase();
@@ -149,10 +145,9 @@ export function MpesaIntegrationPanel({
     }
   }
 
-  async function handleSaveConfig(e: React.FormEvent) {
-    e.preventDefault();
+  async function saveConfigWithOptions(regenerateSecret = false) {
     if (!canConfigure) {
-      onNotify('Only School Admin or Bursar accounts can save M-Pesa credentials.', 'error');
+      onNotify('Only School Admin or Bursar accounts can save M-Pesa settings.', 'error');
       return;
     }
     setConfigError(null);
@@ -164,17 +159,18 @@ export function MpesaIntegrationPanel({
         paybillNumber: paybillNumber.trim(),
         accountName: accountName.trim(),
         accountReferenceFormat: accountReferenceFormat.trim(),
-        consumerKey: consumerKey.trim(),
-        consumerSecret: consumerSecret.trim() || undefined,
-        passkey: passkey.trim() || undefined,
         settlementBank: settlementBank.trim() || undefined,
+        regenerateSecret,
       });
-      setConsumerSecret('');
-      setPasskey('');
+      if (res.webhookCallbackUrl) {
+        setRevealedWebhookUrl(res.webhookCallbackUrl);
+      }
       setTestPaybill(res.mpesaConfig.paybillNumber);
       await onRefresh();
       onNotify(
-        `M-Pesa Paybill ${res.mpesaConfig.paybillNumber} saved for ${tenant.name} (${res.mpesaConfig.environment}).`
+        regenerateSecret
+          ? `Rotated M-Pesa webhook secret for Paybill ${res.mpesaConfig.paybillNumber}. Copy the new callback URL now.`
+          : `M-Pesa Paybill ${res.mpesaConfig.paybillNumber} saved for ${tenant.name} (${res.mpesaConfig.environment}).`
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to save M-Pesa integration';
@@ -185,10 +181,15 @@ export function MpesaIntegrationPanel({
     }
   }
 
+  async function handleSaveConfig(e: React.FormEvent) {
+    e.preventDefault();
+    await saveConfigWithOptions(false);
+  }
+
   async function handleReceiveTestPayment(e: React.FormEvent) {
     e.preventDefault();
     if (!canConfigure) {
-      onNotify('Only School Admin or Bursar accounts can post M-Pesa test settlements.', 'error');
+      onNotify('Only School Admin or Bursar accounts can log manual M-Pesa entries.', 'error');
       return;
     }
     setPaymentFeedback(null);
@@ -209,14 +210,14 @@ export function MpesaIntegrationPanel({
       });
       setTestReceipt('');
       await onRefresh();
-      const msg = `Settled ${formatCurrency(
+      const msg = `Recorded manual M-Pesa entry (${res.status}) for ${formatCurrency(
         res.transaction.amount,
         tenant.currency
-      )} via Paybill ${res.paybillNumber} to ${res.invoice.studentName} (${res.invoice.invoiceNumber}). Receipt: ${res.transaction.mpesaReceipt}.`;
+      )} via Paybill ${res.paybillNumber}. Receipt: ${res.transaction.mpesaReceipt}. Match this entry in Reconciliation before applying to a student invoice.`;
       setPaymentFeedback({ tone: 'success', message: msg });
       onNotify(msg);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Paybill payment settlement failed';
+      const msg = err instanceof Error ? err.message : 'Manual M-Pesa entry failed';
       setPaymentFeedback({ tone: 'error', message: msg });
       onNotify(msg, 'error');
       await onRefresh();
@@ -272,13 +273,13 @@ export function MpesaIntegrationPanel({
 
       {!canConfigure && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
-          Viewing in read-only mode as <span className="font-semibold">{currentRole}</span>. Only School Admin or Bursar accounts can enter or modify Daraja API keys and Paybill numbers.
+          Viewing in read-only mode as <span className="font-semibold">{currentRole}</span>. Only School Admin or Bursar accounts can configure Paybill numbers or rotate webhook secrets.
         </div>
       )}
 
       {/* Configuration & Live Paybill Routing Grid */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
-        {/* Left 7 Cols: Daraja / Paybill Configuration Form */}
+        {/* Left 7 Cols: Paybill & Webhook Configuration Form */}
         <form
           onSubmit={handleSaveConfig}
           className="space-y-5 rounded-xl border border-slate-200 bg-white p-6 xl:col-span-7 dark:border-slate-800 dark:bg-slate-900"
@@ -286,10 +287,10 @@ export function MpesaIntegrationPanel({
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4 dark:border-slate-800">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                School Paybill &amp; Safaricom Daraja Credentials
+                School Paybill &amp; C2B Webhook Settings
               </h3>
               <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                Enter your school&apos;s Paybill shortcode and Daraja API credentials. Secrets are stored server-side and masked on read.
+                Configure your school&apos;s Paybill shortcode, account format, and tenant-scoped C2B webhook URL.
               </p>
             </div>
             <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
@@ -392,119 +393,48 @@ export function MpesaIntegrationPanel({
                 className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-600 focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
               />
             </div>
-
-            <div className="sm:col-span-2">
-              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-300">
-                <KeyRound className="h-3.5 w-3.5 text-slate-400" />
-                Daraja Consumer Key {enabled ? '*' : ''}
-              </label>
-              <input
-                required={enabled}
-                type="text"
-                disabled={!canConfigure}
-                value={consumerKey}
-                onChange={(e) => setConsumerKey(e.target.value)}
-                placeholder="Enter Safaricom Daraja App Consumer Key"
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 focus:border-blue-600 focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <label className="flex items-center gap-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  <Lock className="h-3 w-3 text-slate-400" />
-                  Consumer Secret {enabled && !existing?.hasConsumerSecret ? '*' : ''}
-                </label>
-                {existing?.hasConsumerSecret && (
-                  <span className="font-mono text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
-                    Saved ({existing.consumerSecretMasked})
-                  </span>
-                )}
-              </div>
-              <div className="relative mt-1">
-                <input
-                  required={enabled && !existing?.hasConsumerSecret}
-                  type={showSecret ? 'text' : 'password'}
-                  disabled={!canConfigure}
-                  value={consumerSecret}
-                  onChange={(e) => setConsumerSecret(e.target.value)}
-                  placeholder={
-                    existing?.hasConsumerSecret
-                      ? 'Leave blank to keep existing secret'
-                      : 'Enter Daraja Consumer Secret'
-                  }
-                  className="w-full rounded-lg border border-slate-200 bg-white py-2 pr-9 pl-3 font-mono text-xs text-slate-900 focus:border-blue-600 focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowSecret((prev) => !prev)}
-                  aria-label={showSecret ? 'Hide consumer secret' : 'Show consumer secret'}
-                  className="absolute top-1/2 right-2.5 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                >
-                  {showSecret ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <label className="flex items-center gap-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  <ShieldCheck className="h-3 w-3 text-slate-400" />
-                  Lipa Na M-Pesa Passkey {enabled && !existing?.hasPasskey ? '*' : ''}
-                </label>
-                {existing?.hasPasskey && (
-                  <span className="font-mono text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
-                    Saved ({existing.passkeyMasked})
-                  </span>
-                )}
-              </div>
-              <div className="relative mt-1">
-                <input
-                  required={enabled && !existing?.hasPasskey}
-                  type={showPasskey ? 'text' : 'password'}
-                  disabled={!canConfigure}
-                  value={passkey}
-                  onChange={(e) => setPasskey(e.target.value)}
-                  placeholder={
-                    existing?.hasPasskey
-                      ? 'Leave blank to keep existing passkey'
-                      : 'Enter STK Online Passkey'
-                  }
-                  className="w-full rounded-lg border border-slate-200 bg-white py-2 pr-9 pl-3 font-mono text-xs text-slate-900 focus:border-blue-600 focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPasskey((prev) => !prev)}
-                  aria-label={showPasskey ? 'Hide passkey' : 'Show passkey'}
-                  className="absolute top-1/2 right-2.5 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                >
-                  {showPasskey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-            </div>
           </div>
 
-          {/* Tenant-Scoped Callback URL */}
+          {/* Tenant-Scoped Secret Callback URL */}
           <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3.5 dark:border-slate-800 dark:bg-slate-800/40">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                Tenant-Scoped C2B Validation &amp; Confirmation Callback URL
+                Authenticated C2B Confirmation Callback URL
               </span>
-              <button
-                type="button"
-                onClick={handleCopyCallbackUrl}
-                className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-              >
-                <Copy className="h-3 w-3" />
-                Copy URL
-              </button>
+              <div className="flex items-center gap-1.5">
+                {canConfigure && existing?.hasWebhookSecret && (
+                  <button
+                    type="button"
+                    disabled={savingConfig}
+                    onClick={() => saveConfigWithOptions(true)}
+                    className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Rotate Secret
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleCopyCallbackUrl}
+                  className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  <Copy className="h-3 w-3" />
+                  Copy URL
+                </button>
+              </div>
             </div>
             <p className="mt-1.5 break-all font-mono text-[11px] text-slate-600 dark:text-slate-400">
               {fullCallbackUrl}
             </p>
-            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-              Register this endpoint in Safaricom Daraja C2B URL Registration. Incoming notifications inspect <code className="font-mono">BusinessShortCode</code> to route funds exclusively to {tenant.name}.
-            </p>
+            {revealedWebhookUrl ? (
+              <p className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] font-medium text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
+                Secret token shown once — copy and register this full URL in Safaricom Daraja C2B now. Only a masked path is displayed after reload.
+              </p>
+            ) : (
+              <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                Each tenant uses a unique hashed callback secret. Duplicate <code className="font-mono">TransID</code> payloads are automatically de-duplicated.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
@@ -563,17 +493,17 @@ export function MpesaIntegrationPanel({
             </div>
           </div>
 
-          {/* Receive / Verify Paybill Payment & Tenant Separation Terminal */}
+          {/* Manual M-Pesa Entry (Unverified until Reconciliation) */}
           <form
             onSubmit={handleReceiveTestPayment}
             className="space-y-3.5 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
           >
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                Receive / Test M-Pesa Paybill Payment
+                Manual M-Pesa Entry (Unverified)
               </h3>
               <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                Settle an open fee invoice using this school&apos;s Paybill or verify that another tenant&apos;s Paybill is blocked from crossing into {tenant.name}.
+                Record a manual M-Pesa confirmation slip for {tenant.name}. Entries stay marked as <span className="font-semibold">Unverified</span> until matched on the Bank &amp; M-Pesa Reconciliation screen.
               </p>
             </div>
 
@@ -688,7 +618,7 @@ export function MpesaIntegrationPanel({
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Send className="h-3.5 w-3.5" />
-              {postingPayment ? 'Processing Paybill Settlement...' : 'Post M-Pesa Paybill Payment'}
+              {postingPayment ? 'Logging Unverified Entry...' : 'Log Manual M-Pesa Entry'}
             </button>
           </form>
         </div>
@@ -706,8 +636,8 @@ export function MpesaIntegrationPanel({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
-              {(['All', 'Settled', 'Rejected'] as const).map((status) => (
+            <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+              {(['All', 'Settled', 'Unverified', 'Duplicate', 'Rejected'] as const).map((status) => (
                 <button
                   key={status}
                   type="button"
@@ -804,6 +734,8 @@ export function MpesaIntegrationPanel({
                         className={`font-semibold ${
                           tx.status === 'Settled'
                             ? 'text-emerald-700 dark:text-emerald-400'
+                            : tx.status === 'Unverified' || tx.status === 'Duplicate'
+                            ? 'text-amber-700 dark:text-amber-400'
                             : 'text-rose-700 dark:text-rose-400'
                         }`}
                       >

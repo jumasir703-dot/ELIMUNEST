@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   addDaysIso,
   ALL_TENANT_MODULES,
@@ -30,6 +30,7 @@ import {
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
   MAX_FEE_VOTELINES,
+  validatePasswordStrength,
   type AdminAuditEntry,
   type AdmissionApplication,
   type AdmissionStage,
@@ -105,11 +106,10 @@ import {
   buildDefaultNonTeachingStaff,
   buildDefaultPayrollForTenant,
   buildDefaultReconciliationForTenant,
-  buildSeedUsers,
   computeLetterGrade,
   computeStatutoryDeductions,
+  createEmptyDatabase,
   createSeedDatabase,
-  DEFAULT_SEED_USER_PASSWORD,
   PERIOD_TIMES,
   type DatabaseState,
   type StoredTenantUser,
@@ -120,6 +120,7 @@ import {
   isSessionSecretConfigured,
   verifyPassword,
 } from './middleware/adminAuth.ts';
+import { isSmsProviderConfigured, sendSms, SmsNotConfiguredError } from './lib/sms.ts';
 
 // Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
 // On Vercel the filesystem is read-only except /tmp, which is per-instance and
@@ -131,7 +132,6 @@ const DATA_DIR = process.env.DATA_DIR
   : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'elimunest-db.json');
 const LEGACY_DB_FILE = path.join(DATA_DIR, 'scholara-db.json');
-const BUNDLED_DB_FILE = path.resolve(process.cwd(), 'data', 'elimunest-db.json');
 const KV_STATE_KEY = process.env.ELIMUNEST_KV_KEY?.trim() || 'elimunest:db:v1';
 
 interface KvRestConfig {
@@ -238,12 +238,47 @@ export class TenantStore {
     string,
     { code: string; expiresAt: number; attempts: number }
   >();
+  private loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+  private resetRequestsByEmail = new Map<string, number[]>();
+  private resetRequestsByIp = new Map<string, number[]>();
+  private initPromise: Promise<void> | null = null;
   private kvHydrationPromise: Promise<void> | null = null;
   private kvSyncChain: Promise<void> = Promise.resolve();
 
   constructor(onBroadcast?: (tenantId: string, eventType: string, payload: unknown) => void) {
     this.onBroadcast = onBroadcast;
-    this.state = this.loadOrInitialize();
+    const loaded = this.loadExistingDatabase();
+    if (loaded) {
+      this.state = loaded;
+    } else {
+      this.state = createEmptyDatabase();
+      this.initPromise = this.initializeFreshDatabase();
+    }
+  }
+
+  private async initializeFreshDatabase(): Promise<void> {
+    const isProd = process.env.NODE_ENV === 'production';
+    const isTest = process.env.NODE_ENV === 'test';
+    const { state, devCredentials } = await createSeedDatabase({ empty: isProd || isTest });
+    // Only apply if no data was loaded in the meantime
+    if (this.state.tenants.length === 0 && this.state.users.length === 0) {
+      this.state = state;
+      if (!isProd && !isTest) {
+        this.persist(state);
+        if (devCredentials.length > 0) {
+          console.log('[elimuNest] Seeded development demo accounts (one-time random passwords, change required on first login):');
+          for (const cred of devCredentials) {
+            console.log(`  - ${cred.role.padEnd(11)} | ${cred.email} | ${cred.password}`);
+          }
+        }
+      }
+    }
+  }
+
+  async ensureInitialized(): Promise<void> {
+    if (this.initPromise) {
+      await this.initPromise;
+    }
   }
 
   setBroadcaster(fn: (tenantId: string, eventType: string, payload: unknown) => void) {
@@ -251,6 +286,7 @@ export class TenantStore {
   }
 
   async ensureHydrated(): Promise<void> {
+    await this.ensureInitialized();
     const kv = resolveKvConfig();
     if (!kv) return;
     if (!this.kvHydrationPromise) {
@@ -270,8 +306,10 @@ export class TenantStore {
               return;
             }
           }
-          // KV has no snapshot yet: seed it from current state
-          await this.writeStateToKv(this.state);
+          // KV has no snapshot yet: seed it from current state if non-empty
+          if (this.state.tenants.length > 0 || this.state.users.length > 0) {
+            await this.writeStateToKv(this.state);
+          }
         } catch (err) {
           console.warn('[elimuNest] Remote KV hydration skipped:', err);
         }
@@ -306,18 +344,17 @@ export class TenantStore {
     }
   }
 
-  private loadOrInitialize(): DatabaseState {
+  private loadExistingDatabase(): DatabaseState | null {
+    if (process.env.NODE_ENV === 'test') {
+      return null;
+    }
     try {
-      const candidateFiles = [
-        DB_FILE,
-        LEGACY_DB_FILE,
-        BUNDLED_DB_FILE !== DB_FILE ? BUNDLED_DB_FILE : '',
-      ].filter(Boolean);
+      const candidateFiles = [DB_FILE, LEGACY_DB_FILE].filter(Boolean);
       const sourceFile = candidateFiles.find((filePath) => fs.existsSync(filePath)) || null;
       if (sourceFile) {
         const raw = fs.readFileSync(sourceFile, 'utf-8');
         const parsed = JSON.parse(raw) as DatabaseState;
-        if (parsed && Array.isArray(parsed.tenants) && parsed.tenants.length > 0) {
+        if (parsed && Array.isArray(parsed.tenants)) {
           const { state: migrated, dirty } = this.migrateAndNormalizeState(
             parsed,
             sourceFile !== DB_FILE
@@ -338,9 +375,7 @@ export class TenantStore {
         // ignore backup error
       }
     }
-    const seed = createSeedDatabase();
-    this.persist(seed);
-    return seed;
+    return null;
   }
 
   private migrateAndNormalizeState(
@@ -870,8 +905,12 @@ export class TenantStore {
             parsed.whatsappDispatches = [];
             dirty = true;
           }
-          if (!parsed.mpesaSecrets || typeof parsed.mpesaSecrets !== 'object') {
-            parsed.mpesaSecrets = {};
+          if ('mpesaSecrets' in (parsed as unknown as Record<string, unknown>)) {
+            delete (parsed as unknown as Record<string, unknown>).mpesaSecrets;
+            dirty = true;
+          }
+          if (!parsed.mpesaWebhookHashes || typeof parsed.mpesaWebhookHashes !== 'object') {
+            parsed.mpesaWebhookHashes = {};
             dirty = true;
           }
           if (!Array.isArray(parsed.mpesaTransactions)) {
@@ -882,82 +921,36 @@ export class TenantStore {
             parsed.independentVotelines = [];
             dirty = true;
           }
-          // Backfill default distinct Paybill configs onto the 3 seeded demo campuses if unclaimed
-          const seedMpesaDefaults: Record<
-            string,
-            { paybill: string; key: string; secret: string; passkey: string; bank: string }
-          > = {
-            'tenant-oakridge': {
-              paybill: '522522',
-              key: 'oakridge_daraja_live_key_01',
-              secret: 'oakridge-sandbox-secret-7a91',
-              passkey: 'oakridge-lipa-passkey-2c88',
-              bank: 'KCB School Collection A/C 1104829104',
-            },
-            'tenant-westfield': {
-              paybill: '522544',
-              key: 'westfield_daraja_key_02',
-              secret: 'westfield-sandbox-secret-4b19',
-              passkey: 'westfield-lipa-passkey-9e04',
-              bank: 'Equity Bank Mombasa Collection A/C',
-            },
-            'tenant-stjude': {
-              paybill: '522566',
-              key: 'stjude_daraja_key_03',
-              secret: 'stjude-sandbox-secret-3f50',
-              passkey: 'stjude-lipa-passkey-6d11',
-              bank: 'Stanbic Bank Kisumu USD/KES Fee A/C',
-            },
-          };
           parsed.tenants.forEach((t) => {
-            const def = seedMpesaDefaults[t.id];
-            if (def && !t.mpesaConfig) {
-              const paybillClaimed = parsed.tenants.some(
-                (other) => other.id !== t.id && other.mpesaConfig?.paybillNumber === def.paybill
-              );
-              if (!paybillClaimed) {
-                t.mpesaConfig = {
-                  enabled: true,
-                  environment: 'Sandbox',
-                  paybillNumber: def.paybill,
-                  accountName: `${t.name} Fees`,
-                  accountReferenceFormat: 'Student Code',
-                  consumerKey: def.key,
-                  hasConsumerSecret: true,
-                  consumerSecretMasked: `••••${def.secret.slice(-4)}`,
-                  hasPasskey: true,
-                  passkeyMasked: `••••${def.passkey.slice(-4)}`,
-                  callbackUrl: `/api/mpesa/c2b-callback?paybill=${def.paybill}`,
-                  settlementBank: def.bank,
-                  updatedAt: '2026-09-01T08:00:00Z',
-                  updatedBy: 'System Seed',
-                };
-                parsed.mpesaSecrets![t.id] = {
-                  consumerSecret: def.secret,
-                  passkey: def.passkey,
-                };
+            if (t.mpesaConfig) {
+              const rawCfg = t.mpesaConfig as unknown as Record<string, unknown>;
+              for (const legacyKey of [
+                'consumerKey',
+                'hasConsumerSecret',
+                'consumerSecretMasked',
+                'hasPasskey',
+                'passkeyMasked',
+              ]) {
+                if (legacyKey in rawCfg) {
+                  delete rawCfg[legacyKey];
+                  dirty = true;
+                }
+              }
+              if (!parsed.mpesaWebhookHashes![t.id]) {
+                const secret = randomBytes(24).toString('hex');
+                parsed.mpesaWebhookHashes![t.id] = createHash('sha256').update(secret).digest('hex');
+                t.mpesaConfig.hasWebhookSecret = true;
+                t.mpesaConfig.callbackUrl = `/api/mpesa/c2b-callback/••••${secret.slice(-4)}`;
                 dirty = true;
+              } else {
+                t.mpesaConfig.hasWebhookSecret = true;
               }
             }
           });
-          if (!Array.isArray(parsed.users) || parsed.users.length === 0) {
-            parsed.users = buildSeedUsers();
+          if (!Array.isArray(parsed.users)) {
+            parsed.users = [];
             dirty = true;
           } else {
-            const seedUsers = buildSeedUsers();
-            const devUser = seedUsers.find((u) => u.role === 'Developer');
-            if (
-              devUser &&
-              !parsed.users.some(
-                (u) => u.role === 'Developer' || u.email.toLowerCase() === devUser.email.toLowerCase()
-              )
-            ) {
-              parsed.users.unshift(devUser);
-              dirty = true;
-            }
-            const seedPhonesByEmail = new Map(
-              seedUsers.map((su) => [su.email.toLowerCase(), su.phone])
-            );
             parsed.users.forEach((u) => {
               if (u.role === 'Super Admin' && (!u.tenantId || u.tenantId === 'platform')) {
                 u.tenantId = parsed.tenants[0]?.id || 'tenant-oakridge';
@@ -970,12 +963,9 @@ export class TenantStore {
                 u.allowedModules = [...(DEFAULT_ROLE_MODULES[u.role] || ['analytics'])];
                 dirty = true;
               }
-              if (!u.phone) {
-                const seededPhone = seedPhonesByEmail.get(u.email.toLowerCase());
-                if (seededPhone) {
-                  u.phone = seededPhone;
-                  dirty = true;
-                }
+              if (typeof u.tokenVersion !== 'number') {
+                u.tokenVersion = 0;
+                dirty = true;
               }
             });
           }
@@ -1383,43 +1373,196 @@ export class TenantStore {
     });
   }
 
-  getWorkspace(tenantId: string): TenantWorkspaceData {
+  getWorkspace(tenantId: string, authUser?: TenantUser): TenantWorkspaceData {
     const tenant = this.requireTenant(tenantId);
+    const allStudents = this.state.students.filter((s) => s.tenantId === tenantId);
+    const allAdmissions = this.state.admissions.filter((a) => a.tenantId === tenantId);
+    const allTimetable = this.state.timetable.filter((t) => t.tenantId === tenantId);
+    const allAttendance = this.state.attendance.filter((a) => a.tenantId === tenantId);
+    const allStaffAttendance = this.state.staffAttendance.filter((a) => a.tenantId === tenantId);
+    const allLeaveChits = this.state.leaveOutChits.filter((c) => c.tenantId === tenantId);
+    const allExamCycles = this.state.examCycles.filter((e) => e.tenantId === tenantId);
+    const allExamResults = this.state.examResults.filter((r) => r.tenantId === tenantId);
+    const allFeeStructures = this.state.feeStructures.filter((f) => f.tenantId === tenantId);
+    const allInvoices = this.state.invoices.filter((i) => i.tenantId === tenantId);
+    const allVotelines = (this.state.independentVotelines || []).filter(
+      (v) => v.tenantId === tenantId
+    );
+    const allMpesa = (this.state.mpesaTransactions || []).filter((m) => m.tenantId === tenantId);
+    const allExpenses = this.state.expenses.filter((e) => e.tenantId === tenantId);
+    const allEtims = (this.state.etimsChecks || []).filter((e) => e.tenantId === tenantId);
+    const allRecon = (this.state.reconciliationLines || []).filter((r) => r.tenantId === tenantId);
+    const allPayroll = (this.state.payrollEntries || []).filter((p) => p.tenantId === tenantId);
+    const allBudgets = (this.state.budgets || []).filter((b) => b.tenantId === tenantId);
+    const allApprovals = (this.state.approvalRecords || []).filter((a) => a.tenantId === tenantId);
+    const allAnnouncements = this.state.announcements.filter((a) => a.tenantId === tenantId);
+    const allMessages = this.state.messages.filter((m) => m.tenantId === tenantId);
+    const allWhatsapp = (this.state.whatsappDispatches || []).filter(
+      (w) => w.tenantId === tenantId
+    );
+    const allNotifications = this.state.notifications.filter((n) => n.tenantId === tenantId);
+
+    if (authUser?.role === 'Parent') {
+      const userEmail = authUser.email.trim().toLowerCase();
+      const linkedStudents = allStudents.filter(
+        (s) =>
+          s.parentUserId === authUser.id ||
+          (s.guardianEmail && s.guardianEmail.trim().toLowerCase() === userEmail)
+      );
+      const childIds = new Set(linkedStudents.map((s) => s.id));
+      const childGrades = new Set(linkedStudents.map((s) => s.grade));
+      const childGradeSections = new Set(linkedStudents.map((s) => `${s.grade}::${s.section}`));
+      const publishedCycles = allExamCycles.filter((c) => c.status === 'Published');
+      const publishedCycleIds = new Set(publishedCycles.map((c) => c.id));
+
+      return {
+        tenant,
+        tenants: [tenant],
+        students: linkedStudents,
+        admissions: [],
+        timetable: allTimetable.filter((slot) =>
+          childGradeSections.has(`${slot.grade}::${slot.section}`)
+        ),
+        attendance: allAttendance.filter((a) => childIds.has(a.studentId)),
+        staffAttendance: [],
+        leaveOutChits: allLeaveChits.filter((c) => childIds.has(c.studentId)),
+        examCycles: publishedCycles,
+        examResults: allExamResults.filter(
+          (r) => childIds.has(r.studentId) && publishedCycleIds.has(r.examCycleId)
+        ),
+        feeStructures: allFeeStructures.filter((f) => childGrades.has(f.grade)),
+        invoices: allInvoices.filter((i) => childIds.has(i.studentId)),
+        independentVotelines: allVotelines.filter((v) => childIds.has(v.studentId)),
+        mpesaTransactions: [],
+        expenses: [],
+        etimsChecks: [],
+        reconciliationLines: [],
+        payrollEntries: [],
+        budgets: [],
+        approvalRecords: [],
+        announcements: allAnnouncements.filter(
+          (a) => a.audience === 'All School' || a.audience === 'Parents & Guardians'
+        ),
+        messages: [],
+        whatsappDispatches: [],
+        notifications: allNotifications.filter(
+          (n) => n.category === 'announcement' || n.category === 'exam'
+        ),
+      };
+    }
+
+    if (authUser?.role === 'Teacher') {
+      return {
+        tenant,
+        tenants: [tenant],
+        students: allStudents,
+        admissions: allAdmissions,
+        timetable: allTimetable,
+        attendance: allAttendance,
+        staffAttendance: allStaffAttendance,
+        leaveOutChits: allLeaveChits,
+        examCycles: allExamCycles,
+        examResults: allExamResults,
+        feeStructures: [],
+        invoices: [],
+        independentVotelines: [],
+        mpesaTransactions: [],
+        expenses: [],
+        etimsChecks: [],
+        reconciliationLines: [],
+        payrollEntries: [],
+        budgets: [],
+        approvalRecords: [],
+        announcements: allAnnouncements,
+        messages: allMessages,
+        whatsappDispatches: [],
+        notifications: allNotifications.filter((n) => n.category !== 'fee'),
+      };
+    }
+
+    if (authUser?.role === 'Bursar') {
+      return {
+        tenant,
+        tenants: [tenant],
+        students: allStudents,
+        admissions: [],
+        timetable: [],
+        attendance: [],
+        staffAttendance: [],
+        leaveOutChits: [],
+        examCycles: [],
+        examResults: [],
+        feeStructures: allFeeStructures,
+        invoices: allInvoices,
+        independentVotelines: allVotelines,
+        mpesaTransactions: allMpesa,
+        expenses: allExpenses,
+        etimsChecks: allEtims,
+        reconciliationLines: allRecon,
+        payrollEntries: allPayroll,
+        budgets: allBudgets,
+        approvalRecords: allApprovals,
+        announcements: allAnnouncements,
+        messages: allMessages,
+        whatsappDispatches: allWhatsapp,
+        notifications: allNotifications,
+      };
+    }
+
+    if (authUser?.role === 'Registrar') {
+      return {
+        tenant,
+        tenants: [tenant],
+        students: allStudents,
+        admissions: allAdmissions,
+        timetable: allTimetable,
+        attendance: allAttendance,
+        staffAttendance: [],
+        leaveOutChits: allLeaveChits,
+        examCycles: allExamCycles,
+        examResults: allExamResults,
+        feeStructures: [],
+        invoices: [],
+        independentVotelines: [],
+        mpesaTransactions: [],
+        expenses: [],
+        etimsChecks: [],
+        reconciliationLines: [],
+        payrollEntries: [],
+        budgets: [],
+        approvalRecords: [],
+        announcements: allAnnouncements,
+        messages: allMessages,
+        whatsappDispatches: allWhatsapp,
+        notifications: allNotifications.filter((n) => n.category !== 'fee'),
+      };
+    }
+
     return {
       tenant,
       tenants: this.state.tenants,
-      students: this.state.students.filter((s) => s.tenantId === tenantId),
-      admissions: this.state.admissions.filter((a) => a.tenantId === tenantId),
-      timetable: this.state.timetable.filter((t) => t.tenantId === tenantId),
-      attendance: this.state.attendance.filter((a) => a.tenantId === tenantId),
-      staffAttendance: this.state.staffAttendance.filter((a) => a.tenantId === tenantId),
-      leaveOutChits: this.state.leaveOutChits.filter((c) => c.tenantId === tenantId),
-      examCycles: this.state.examCycles.filter((e) => e.tenantId === tenantId),
-      examResults: this.state.examResults.filter((r) => r.tenantId === tenantId),
-      feeStructures: this.state.feeStructures.filter((f) => f.tenantId === tenantId),
-      invoices: this.state.invoices.filter((i) => i.tenantId === tenantId),
-      independentVotelines: (this.state.independentVotelines || []).filter(
-        (v) => v.tenantId === tenantId
-      ),
-      mpesaTransactions: (this.state.mpesaTransactions || []).filter(
-        (m) => m.tenantId === tenantId
-      ),
-      expenses: this.state.expenses.filter((e) => e.tenantId === tenantId),
-      etimsChecks: (this.state.etimsChecks || []).filter((e) => e.tenantId === tenantId),
-      reconciliationLines: (this.state.reconciliationLines || []).filter(
-        (r) => r.tenantId === tenantId
-      ),
-      payrollEntries: (this.state.payrollEntries || []).filter((p) => p.tenantId === tenantId),
-      budgets: (this.state.budgets || []).filter((b) => b.tenantId === tenantId),
-      approvalRecords: (this.state.approvalRecords || []).filter(
-        (a) => a.tenantId === tenantId
-      ),
-      announcements: this.state.announcements.filter((a) => a.tenantId === tenantId),
-      messages: this.state.messages.filter((m) => m.tenantId === tenantId),
-      whatsappDispatches: (this.state.whatsappDispatches || []).filter(
-        (w) => w.tenantId === tenantId
-      ),
-      notifications: this.state.notifications.filter((n) => n.tenantId === tenantId),
+      students: allStudents,
+      admissions: allAdmissions,
+      timetable: allTimetable,
+      attendance: allAttendance,
+      staffAttendance: allStaffAttendance,
+      leaveOutChits: allLeaveChits,
+      examCycles: allExamCycles,
+      examResults: allExamResults,
+      feeStructures: allFeeStructures,
+      invoices: allInvoices,
+      independentVotelines: allVotelines,
+      mpesaTransactions: allMpesa,
+      expenses: allExpenses,
+      etimsChecks: allEtims,
+      reconciliationLines: allRecon,
+      payrollEntries: allPayroll,
+      budgets: allBudgets,
+      approvalRecords: allApprovals,
+      announcements: allAnnouncements,
+      messages: allMessages,
+      whatsappDispatches: allWhatsapp,
+      notifications: allNotifications,
     };
   }
 
@@ -1818,8 +1961,8 @@ export class TenantStore {
     this.state.mpesaTransactions = (this.state.mpesaTransactions || []).filter(
       (m) => m.tenantId !== tenantId
     );
-    if (this.state.mpesaSecrets) {
-      delete this.state.mpesaSecrets[tenantId];
+    if (this.state.mpesaWebhookHashes) {
+      delete this.state.mpesaWebhookHashes[tenantId];
     }
     this.state.notifications = this.state.notifications.filter((n) => n.tenantId !== tenantId);
     this.state.users = (this.state.users || []).filter((u) => u.tenantId !== tenantId);
@@ -1837,10 +1980,18 @@ export class TenantStore {
     return {
       ...publicUser,
       mustChangePassword: Boolean(publicUser.mustChangePassword),
+      tokenVersion: typeof publicUser.tokenVersion === 'number' ? publicUser.tokenVersion : 0,
       allowedModules: Array.isArray(publicUser.allowedModules)
         ? publicUser.allowedModules
         : [...(DEFAULT_ROLE_MODULES[publicUser.role] || ['analytics'])],
     };
+  }
+
+  private assertStrongPassword(password: string) {
+    const err = validatePasswordStrength(password);
+    if (err) {
+      throw new ConflictError(err, 400);
+    }
   }
 
   private resolveTenantEmailDomain(tenant: Tenant): string {
@@ -1898,44 +2049,35 @@ export class TenantStore {
       .map((u) => this.toPublicUser(u));
   }
 
-  registerUserAccount(input: {
+  async registerUserAccount(input: {
     tenantId?: string;
     fullName: string;
     email: string;
     phone?: string;
     role?: UserRole;
     password: string;
-  }): { user: TenantUser; tenant: Tenant } {
+  }): Promise<{ user: TenantUser; tenant: Tenant }> {
     const fullName = (input.fullName || '').trim();
     if (fullName.length < 2) {
       throw new ConflictError('Full name must be at least 2 characters.', 400);
     }
 
     const password = input.password || '';
-    if (password.length < 6) {
-      throw new ConflictError('Password must be at least 6 characters.', 400);
-    }
+    this.assertStrongPassword(password);
 
-    const allowedSignupRoles = new Set<UserRole>([
-      'Admin',
-      'Registrar',
-      'Teacher',
-      'Bursar',
-      'Parent',
-    ]);
-    const requestedRole: UserRole = input.role || 'Teacher';
-    if (!allowedSignupRoles.has(requestedRole)) {
+    if (input.role && input.role !== 'Parent') {
       throw new ConflictError(
-        'Self-registration is restricted to Admin, Registrar, Teacher, Bursar, or Parent accounts.',
+        'Public self-registration is restricted to Parent accounts. Staff accounts must be created by a School Admin.',
         403
       );
     }
+    const requestedRole: UserRole = 'Parent';
 
     const rawEmail = (input.email || '').trim().toLowerCase();
     const atIndex = rawEmail.indexOf('@');
     if (atIndex === -1 || atIndex !== rawEmail.lastIndexOf('@')) {
       throw new ConflictError(
-        'Sign up with your institutional email formatted as yourname@theirschool.',
+        'Sign up with your school-linked email formatted as yourname@theirschool.',
         400
       );
     }
@@ -1958,7 +2100,7 @@ export class TenantStore {
       tenant = this.state.tenants.find((t) => this.resolveTenantEmailDomain(t) === emailDomain);
       if (!tenant) {
         throw new ConflictError(
-          `No registered school uses "@${emailDomain}". Select a school or register a new school tenant first.`,
+          `No registered school uses "@${emailDomain}". Select a registered school first.`,
           404
         );
       }
@@ -1987,8 +2129,11 @@ export class TenantStore {
       email: rawEmail,
       phone: (input.phone || '').trim() || undefined,
       role: requestedRole,
-      passwordHash: hashPassword(password),
+      passwordHash: await hashPassword(password),
       status: 'Active',
+      mustChangePassword: false,
+      tokenVersion: 0,
+      allowedModules: [...(DEFAULT_ROLE_MODULES.Parent || ['analytics', 'fees', 'exams', 'communications'])],
       createdAt: now,
       lastLoginAt: now,
     };
@@ -2008,7 +2153,7 @@ export class TenantStore {
     return { user: this.toPublicUser(newUser), tenant };
   }
 
-  registerTenantWithAdmin(input: {
+  async registerTenantWithAdmin(input: {
     schoolName: string;
     emailDomain: string;
     location?: string;
@@ -2021,7 +2166,7 @@ export class TenantStore {
     email: string;
     password: string;
     branding?: Partial<TenantBranding>;
-  }): { user: TenantUser; tenant: Tenant } {
+  }): Promise<{ user: TenantUser; tenant: Tenant }> {
     const schoolName = (input.schoolName || '').trim();
     if (schoolName.length < 2) {
       throw new ConflictError('School name must be at least 2 characters.', 400);
@@ -2044,7 +2189,7 @@ export class TenantStore {
     );
     if (existingDomainTenant) {
       throw new ConflictError(
-        `School domain "@${normalizedDomain}" is already registered to ${existingDomainTenant.name}. Sign in or create a user under that school instead.`,
+        `School domain "@${normalizedDomain}" is already registered to ${existingDomainTenant.name}.`,
         409
       );
     }
@@ -2055,9 +2200,7 @@ export class TenantStore {
     }
 
     const password = input.password || '';
-    if (password.length < 6) {
-      throw new ConflictError('Password must be at least 6 characters.', 400);
-    }
+    this.assertStrongPassword(password);
 
     const rawEmail = (input.email || '').trim().toLowerCase();
     const atIndex = rawEmail.indexOf('@');
@@ -2108,8 +2251,11 @@ export class TenantStore {
       fullName,
       email: rawEmail,
       role: 'Admin',
-      passwordHash: hashPassword(password),
+      passwordHash: await hashPassword(password),
       status: 'Active',
+      mustChangePassword: false,
+      tokenVersion: 0,
+      allowedModules: [...DEFAULT_ROLE_MODULES.Admin],
       createdAt: now,
       lastLoginAt: now,
     };
@@ -2121,14 +2267,14 @@ export class TenantStore {
     return { user: this.toPublicUser(adminUser), tenant };
   }
 
-  provisionTenantAdminAccount(
+  async provisionTenantAdminAccount(
     tenant: Tenant,
     adminName: string,
     adminEmail: string,
     password?: string,
-    mustChangePassword = false,
+    mustChangePassword = true,
     adminPhone?: string
-  ): { user: TenantUser; oneTimePassword: string } {
+  ): Promise<{ user: TenantUser; oneTimePassword: string }> {
     const domain = this.resolveTenantEmailDomain(tenant);
     const cleanedEmail = (adminEmail || '').trim().toLowerCase();
     const fallbackLocal =
@@ -2142,15 +2288,16 @@ export class TenantStore {
     if (existing) {
       return {
         user: this.toPublicUser(existing),
-        oneTimePassword: password || '',
+        oneTimePassword: '',
       };
     }
-    const assignedPassword =
-      password && password.length >= 6
-        ? password
-        : mustChangePassword
-        ? generateOneTimePassword()
-        : DEFAULT_SEED_USER_PASSWORD;
+    let assignedPassword: string;
+    if (password && password.trim()) {
+      this.assertStrongPassword(password.trim());
+      assignedPassword = password.trim();
+    } else {
+      assignedPassword = generateOneTimePassword();
+    }
     const now = new Date().toISOString();
     const created: StoredTenantUser = {
       id: `usr-${randomUUID().slice(0, 8)}`,
@@ -2159,9 +2306,10 @@ export class TenantStore {
       email,
       phone: (adminPhone || '').trim() || tenant.contactPhone || undefined,
       role: 'Admin',
-      passwordHash: hashPassword(assignedPassword),
+      passwordHash: await hashPassword(assignedPassword),
       status: 'Active',
       mustChangePassword: Boolean(mustChangePassword),
+      tokenVersion: 0,
       allowedModules: [...DEFAULT_ROLE_MODULES.Admin],
       createdAt: now,
     };
@@ -2170,31 +2318,30 @@ export class TenantStore {
     return { user: this.toPublicUser(created), oneTimePassword: assignedPassword };
   }
 
-  changeUserPassword(
+  async changeUserPassword(
     userId: string,
     currentPassword: string,
     newPassword: string
-  ): { user: TenantUser; tenant?: Tenant; emailDomain?: string } {
+  ): Promise<{ user: TenantUser; tenant?: Tenant; emailDomain?: string }> {
     const stored = (this.state.users || []).find((u) => u.id === userId);
     if (!stored || stored.status !== 'Active') {
       throw new ConflictError('Account not found or no longer active.', 404);
     }
-    if (!currentPassword || !verifyPassword(currentPassword, stored.passwordHash)) {
+    if (!currentPassword || !(await verifyPassword(currentPassword, stored.passwordHash))) {
       throw new ConflictError('Current password is incorrect.', 400);
     }
     const trimmedNew = newPassword || '';
-    if (trimmedNew.length < 8) {
-      throw new ConflictError('New password must be at least 8 characters.', 400);
-    }
+    this.assertStrongPassword(trimmedNew);
     if (trimmedNew === currentPassword) {
       throw new ConflictError(
-        'Choose a new password that differs from your temporary 1-time password.',
+        'Choose a new password that differs from your current password.',
         400
       );
     }
 
-    stored.passwordHash = hashPassword(trimmedNew);
+    stored.passwordHash = await hashPassword(trimmedNew);
     stored.mustChangePassword = false;
+    stored.tokenVersion = (stored.tokenVersion ?? 0) + 1;
     stored.lastLoginAt = new Date().toISOString();
     this.persist();
 
@@ -2248,68 +2395,90 @@ export class TenantStore {
     return a.length >= 9 && b.length >= 9 && a.slice(-9) === b.slice(-9);
   }
 
-  private maskPhoneNumber(phone: string): string {
-    const clean = phone.trim();
-    if (clean.length <= 5) return '••••';
-    return `${clean.slice(0, 5)}•••${clean.slice(-3)}`;
+  private enforceSlidingRateLimit(
+    bucket: Map<string, number[]>,
+    key: string,
+    maxRequests: number,
+    windowMs: number,
+    message: string
+  ) {
+    const now = Date.now();
+    const recent = (bucket.get(key) || []).filter((ts) => now - ts < windowMs);
+    if (recent.length >= maxRequests) {
+      bucket.set(key, recent);
+      throw new ConflictError(message, 429);
+    }
+    recent.push(now);
+    bucket.set(key, recent);
   }
 
-  requestPasswordResetByPhone(input: { email: string; phone: string }): {
+  async requestPasswordResetByPhone(
+    input: { email: string; phone: string },
+    clientIp = 'unknown'
+  ): Promise<{
     ok: boolean;
-    maskedPhone: string;
     expiresInMinutes: number;
     deliveryChannel: string;
-    verificationCode: string;
-  } {
+    message: string;
+  }> {
     const email = (input.email || '').trim().toLowerCase();
     const phone = (input.phone || '').trim();
     if (!email || !phone) {
       throw new ConflictError('Enter both your account email and registered phone number.', 400);
     }
 
-    const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
-    if (!stored || stored.status !== 'Active') {
-      throw new ConflictError('No active account matches those credentials.', 404);
+    const windowMs = 15 * 60_000;
+    this.enforceSlidingRateLimit(
+      this.resetRequestsByEmail,
+      email,
+      5,
+      windowMs,
+      'Too many password reset requests for this email. Please wait 15 minutes and try again.'
+    );
+    this.enforceSlidingRateLimit(
+      this.resetRequestsByIp,
+      clientIp || 'unknown',
+      10,
+      windowMs,
+      'Too many password reset requests from this network. Please try again later.'
+    );
+
+    if (process.env.NODE_ENV === 'production' && !isSmsProviderConfigured()) {
+      throw new SmsNotConfiguredError();
     }
 
-    const registeredPhone = this.resolveAccountRecoveryPhone(stored);
-    if (!registeredPhone) {
-      throw new ConflictError(
-        'No recovery phone number is registered on this account. Contact your school or platform administrator.',
-        400
-      );
-    }
-
-    if (!this.phonesMatch(phone, registeredPhone)) {
-      throw new ConflictError(
-        'Phone number does not match the registered number on file for this account.',
-        403
-      );
-    }
-
-    const code = String(Math.floor(100000 + Math.random() * 900000));
     const expiresInMinutes = 10;
-    this.passwordResetChallenges.set(email, {
-      code,
-      expiresAt: Date.now() + expiresInMinutes * 60_000,
-      attempts: 0,
-    });
+    const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
+    const registeredPhone = stored && stored.status === 'Active' ? this.resolveAccountRecoveryPhone(stored) : '';
+
+    if (stored && stored.status === 'Active' && registeredPhone && this.phonesMatch(phone, registeredPhone)) {
+      const code = String(randomInt(100000, 1000000));
+      this.passwordResetChallenges.set(email, {
+        code,
+        expiresAt: Date.now() + expiresInMinutes * 60_000,
+        attempts: 0,
+      });
+      await sendSms(
+        registeredPhone,
+        `elimuNest verification code: ${code}. Expires in ${expiresInMinutes} minutes. Do not share this code.`
+      );
+    }
 
     return {
       ok: true,
-      maskedPhone: this.maskPhoneNumber(registeredPhone),
       expiresInMinutes,
       deliveryChannel: 'SMS Phone Verification',
-      verificationCode: code,
+      message:
+        'If an active account matches those details, a 6-digit verification code has been sent via SMS.',
     };
   }
 
-  verifyPasswordResetByPhone(input: {
+  async verifyPasswordResetByPhone(input: {
     email: string;
     phone: string;
     code: string;
     newPassword: string;
-  }): { ok: boolean; email: string } {
+  }): Promise<{ ok: boolean; email: string }> {
     const email = (input.email || '').trim().toLowerCase();
     const phone = (input.phone || '').trim();
     const code = (input.code || '').trim();
@@ -2321,14 +2490,12 @@ export class TenantStore {
         400
       );
     }
-    if (newPassword.length < 8) {
-      throw new ConflictError('New password must be at least 8 characters.', 400);
-    }
+    this.assertStrongPassword(newPassword);
 
     const challenge = this.passwordResetChallenges.get(email);
     if (!challenge) {
       throw new ConflictError(
-        'No active password reset request found for this email. Request a verification code first.',
+        'Invalid or expired verification details. Request a fresh verification code.',
         400
       );
     }
@@ -2348,21 +2515,32 @@ export class TenantStore {
     }
 
     const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
-    if (!stored || stored.status !== 'Active') {
-      throw new ConflictError('Account not found or no longer active.', 404);
-    }
-    const registeredPhone = this.resolveAccountRecoveryPhone(stored);
-    if (!registeredPhone || !this.phonesMatch(phone, registeredPhone)) {
-      throw new ConflictError('Phone number verification failed for this account.', 403);
-    }
+    const registeredPhone =
+      stored && stored.status === 'Active' ? this.resolveAccountRecoveryPhone(stored) : '';
+    const phoneOk = Boolean(stored && registeredPhone && this.phonesMatch(phone, registeredPhone));
+    const codeBuf = Buffer.from(code, 'utf-8');
+    const expectedBuf = Buffer.from(challenge.code, 'utf-8');
+    const codeOk =
+      codeBuf.length === expectedBuf.length && timingSafeEqual(codeBuf, expectedBuf);
 
-    if (challenge.code !== code) {
+    if (!stored || stored.status !== 'Active' || !phoneOk || !codeOk) {
       challenge.attempts += 1;
-      throw new ConflictError('Invalid 6-digit phone verification code.', 400);
+      if (challenge.attempts >= 5) {
+        this.passwordResetChallenges.delete(email);
+        throw new ConflictError(
+          'Too many invalid verification attempts. Request a fresh verification code.',
+          429
+        );
+      }
+      throw new ConflictError(
+        'Invalid verification details. Check your phone number and 6-digit SMS code.',
+        400
+      );
     }
 
-    stored.passwordHash = hashPassword(newPassword);
+    stored.passwordHash = await hashPassword(newPassword);
     stored.mustChangePassword = false;
+    stored.tokenVersion = (stored.tokenVersion ?? 0) + 1;
     stored.lastLoginAt = new Date().toISOString();
     this.passwordResetChallenges.delete(email);
     this.persist();
@@ -2392,7 +2570,7 @@ export class TenantStore {
     return filtered;
   }
 
-  createTenantStaffUser(
+  async createTenantStaffUser(
     actor: TenantUser,
     tenantId: string,
     input: {
@@ -2402,7 +2580,7 @@ export class TenantStore {
       role: UserRole;
       allowedModules?: TenantModulePermission[];
     }
-  ): { user: TenantUser; oneTimePassword: string } {
+  ): Promise<{ user: TenantUser; oneTimePassword: string }> {
     if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
       throw new ConflictError('Forbidden: Only School Admins can provision staff accounts.', 403);
     }
@@ -2465,9 +2643,10 @@ export class TenantStore {
       email: finalEmail,
       phone: (input.phone || '').trim() || undefined,
       role,
-      passwordHash: hashPassword(oneTimePassword),
+      passwordHash: await hashPassword(oneTimePassword),
       status: 'Active',
       mustChangePassword: true,
+      tokenVersion: 0,
       allowedModules,
       createdAt: now,
     };
@@ -2487,7 +2666,7 @@ export class TenantStore {
     return { user: this.toPublicUser(created), oneTimePassword };
   }
 
-  updateTenantUserAccess(
+  async updateTenantUserAccess(
     actor: TenantUser,
     tenantId: string,
     targetUserId: string,
@@ -2498,7 +2677,7 @@ export class TenantStore {
       status?: 'Active' | 'Disabled';
       resetOneTimePassword?: boolean;
     }
-  ): { user: TenantUser; oneTimePassword?: string } {
+  ): Promise<{ user: TenantUser; oneTimePassword?: string }> {
     if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
       throw new ConflictError('Forbidden: Only School Admins can assign staff access rights.', 403);
     }
@@ -2547,13 +2726,17 @@ export class TenantStore {
         throw new ConflictError('You cannot disable your own active Admin account.', 400);
       }
       target.status = patch.status;
+      if (patch.status === 'Disabled') {
+        target.tokenVersion = (target.tokenVersion ?? 0) + 1;
+      }
     }
 
     let oneTimePassword: string | undefined;
     if (patch.resetOneTimePassword) {
       oneTimePassword = generateOneTimePassword();
-      target.passwordHash = hashPassword(oneTimePassword);
+      target.passwordHash = await hashPassword(oneTimePassword);
       target.mustChangePassword = true;
+      target.tokenVersion = (target.tokenVersion ?? 0) + 1;
     }
 
     this.persist();
@@ -2571,21 +2754,45 @@ export class TenantStore {
     };
   }
 
-  authenticateUser(input: { email: string; password: string }): {
+  async authenticateUser(input: { email: string; password: string }): Promise<{
     user: TenantUser;
     tenant?: Tenant;
     emailDomain?: string;
-  } {
+  }> {
     const email = (input.email || '').trim().toLowerCase();
     const password = input.password || '';
     if (!email || !password) {
       throw new ConflictError('Enter both your email and password.', 400);
     }
 
+    const attempt = this.loginAttempts.get(email);
+    if (attempt && attempt.lockedUntil > Date.now()) {
+      const mins = Math.max(1, Math.ceil((attempt.lockedUntil - Date.now()) / 60_000));
+      throw new ConflictError(
+        `Too many failed sign-in attempts for this account. Try again in ${mins} minute(s).`,
+        429
+      );
+    }
+
     const stored = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
-    if (!stored || !verifyPassword(password, stored.passwordHash)) {
+    const valid = stored ? await verifyPassword(password, stored.passwordHash) : false;
+    if (!stored || !valid) {
+      const nextCount = (attempt && attempt.lockedUntil <= Date.now() ? 0 : attempt?.count || 0) + 1;
+      if (nextCount >= 5) {
+        this.loginAttempts.set(email, {
+          count: nextCount,
+          lockedUntil: Date.now() + 15 * 60_000,
+        });
+        throw new ConflictError(
+          'Too many failed sign-in attempts for this account. Try again in 15 minutes.',
+          429
+        );
+      }
+      this.loginAttempts.set(email, { count: nextCount, lockedUntil: 0 });
       throw new ConflictError('Invalid email or password.', 401);
     }
+
+    this.loginAttempts.delete(email);
 
     if (stored.status !== 'Active') {
       throw new ConflictError('This user account has been disabled by your school administrator.', 403);
@@ -5103,11 +5310,23 @@ export class TenantStore {
     return { deleted: true };
   }
 
-  private maskMpesaSecret(secret: string): string {
-    const clean = secret.trim();
-    if (!clean) return '';
-    if (clean.length <= 4) return '••••';
-    return `••••${clean.slice(-4)}`;
+  private hashWebhookSecret(secret: string): string {
+    return createHash('sha256').update(secret).digest('hex');
+  }
+
+  verifyMpesaWebhookSecret(tenantSecret: string): Tenant | null {
+    const raw = (tenantSecret || '').trim();
+    if (!raw || !this.state.mpesaWebhookHashes) return null;
+    const candidateHash = this.hashWebhookSecret(raw);
+    const candidateBuf = Buffer.from(candidateHash, 'utf-8');
+    for (const [tenantId, storedHash] of Object.entries(this.state.mpesaWebhookHashes)) {
+      if (!storedHash) continue;
+      const storedBuf = Buffer.from(storedHash, 'utf-8');
+      if (candidateBuf.length === storedBuf.length && timingSafeEqual(candidateBuf, storedBuf)) {
+        return this.state.tenants.find((t) => t.id === tenantId) || null;
+      }
+    }
+    return null;
   }
 
   private normalizePaybillNumber(raw: string): string {
@@ -5130,12 +5349,10 @@ export class TenantStore {
       paybillNumber?: string;
       accountName?: string;
       accountReferenceFormat?: string;
-      consumerKey?: string;
-      consumerSecret?: string;
-      passkey?: string;
       settlementBank?: string;
+      regenerateSecret?: boolean;
     }
-  ): { tenant: Tenant; mpesaConfig: TenantMpesaConfig } {
+  ): { tenant: Tenant; mpesaConfig: TenantMpesaConfig; webhookCallbackUrl?: string } {
     if (
       actor.role !== 'Admin' &&
       actor.role !== 'Super Admin' &&
@@ -5165,43 +5382,25 @@ export class TenantStore {
     const accountName = (input.accountName || '').trim() || `${tenant.name} Fees`;
     const accountReferenceFormat =
       (input.accountReferenceFormat || '').trim() || 'Student Code (e.g. ADM-2601)';
-    const consumerKey = (input.consumerKey || '').trim();
     const enabled = input.enabled !== undefined ? Boolean(input.enabled) : true;
     const environment: MpesaEnvironment =
       input.environment === 'Production' ? 'Production' : 'Sandbox';
 
-    if (!this.state.mpesaSecrets || typeof this.state.mpesaSecrets !== 'object') {
-      this.state.mpesaSecrets = {};
-    }
-    const existingSecrets = this.state.mpesaSecrets[tenantId];
-    const resolvedSecret = (input.consumerSecret || '').trim() || existingSecrets?.consumerSecret || '';
-    const resolvedPasskey = (input.passkey || '').trim() || existingSecrets?.passkey || '';
-
-    if (enabled) {
-      if (!consumerKey) {
-        throw new ConflictError(
-          'Daraja Consumer Key is required when enabling M-Pesa Paybill integration.',
-          400
-        );
-      }
-      if (!resolvedSecret) {
-        throw new ConflictError(
-          'Daraja Consumer Secret is required when enabling M-Pesa Paybill integration.',
-          400
-        );
-      }
-      if (!resolvedPasskey) {
-        throw new ConflictError(
-          'Lipa Na M-Pesa Online Passkey is required when enabling M-Pesa Paybill integration.',
-          400
-        );
-      }
+    if (!this.state.mpesaWebhookHashes || typeof this.state.mpesaWebhookHashes !== 'object') {
+      this.state.mpesaWebhookHashes = {};
     }
 
-    this.state.mpesaSecrets[tenantId] = {
-      consumerSecret: resolvedSecret,
-      passkey: resolvedPasskey,
-    };
+    let plainWebhookSecret: string | undefined;
+    if (!this.state.mpesaWebhookHashes[tenantId] || input.regenerateSecret) {
+      plainWebhookSecret = randomBytes(24).toString('hex');
+      this.state.mpesaWebhookHashes[tenantId] = this.hashWebhookSecret(plainWebhookSecret);
+    }
+
+    const maskedCallbackPath = plainWebhookSecret
+      ? `/api/mpesa/c2b-callback/••••${plainWebhookSecret.slice(-4)}`
+      : tenant.mpesaConfig?.callbackUrl && !tenant.mpesaConfig.callbackUrl.includes('?paybill=')
+      ? tenant.mpesaConfig.callbackUrl
+      : `/api/mpesa/c2b-callback/••••${this.state.mpesaWebhookHashes[tenantId].slice(-4)}`;
 
     const config: TenantMpesaConfig = {
       enabled,
@@ -5209,12 +5408,8 @@ export class TenantStore {
       paybillNumber,
       accountName,
       accountReferenceFormat,
-      consumerKey,
-      hasConsumerSecret: Boolean(resolvedSecret),
-      consumerSecretMasked: resolvedSecret ? this.maskMpesaSecret(resolvedSecret) : undefined,
-      hasPasskey: Boolean(resolvedPasskey),
-      passkeyMasked: resolvedPasskey ? this.maskMpesaSecret(resolvedPasskey) : undefined,
-      callbackUrl: `/api/mpesa/c2b-callback?paybill=${paybillNumber}`,
+      hasWebhookSecret: true,
+      callbackUrl: maskedCallbackPath,
       settlementBank: (input.settlementBank || '').trim() || undefined,
       updatedAt: new Date().toISOString(),
       updatedBy: actor.fullName || actor.email || actor.role,
@@ -5231,80 +5426,231 @@ export class TenantStore {
     );
     this.syncTenant(tenantId, 'finance:mpesa-config-updated');
 
-    return { tenant, mpesaConfig: config };
+    return {
+      tenant,
+      mpesaConfig: config,
+      ...(plainWebhookSecret
+        ? { webhookCallbackUrl: `/api/mpesa/c2b-callback/${plainWebhookSecret}` }
+        : {}),
+    };
+  }
+
+  recordManualMpesaEntry(
+    tenantId: string,
+    actor: Pick<TenantUser, 'role' | 'fullName' | 'email'>,
+    input: {
+      paybillNumber?: string;
+      accountReference?: string;
+      amount?: number;
+      msisdn?: string;
+      mpesaReceipt?: string;
+    }
+  ): {
+    status: 'Unverified';
+    transaction: MpesaTransactionLog;
+    reconciliationLine: ReconciliationLine;
+  } {
+    const tenant = this.requireTenant(tenantId);
+    const paybillNumber = this.normalizePaybillNumber(
+      input.paybillNumber || tenant.mpesaConfig?.paybillNumber || ''
+    );
+    if (tenant.mpesaConfig?.paybillNumber && tenant.mpesaConfig.paybillNumber !== paybillNumber) {
+      throw new ConflictError(
+        `Tenant Isolation Blocked: Paybill "${paybillNumber}" does not match ${tenant.name}'s configured Paybill (${tenant.mpesaConfig.paybillNumber}).`,
+        403
+      );
+    }
+
+    const accountReference = (input.accountReference || '').trim();
+    if (!accountReference) {
+      throw new ConflictError('Account Reference (Student Code or Invoice #) is required.', 400);
+    }
+
+    const amount = Number(input.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new ConflictError('Enter a valid positive payment amount.', 400);
+    }
+
+    const msisdn = (input.msisdn || '').trim() || '254700000000';
+    const mpesaReceipt =
+      (input.mpesaReceipt || '').trim().toUpperCase() ||
+      `MAN${randomBytes(4).toString('hex').toUpperCase()}`;
+
+    if (!Array.isArray(this.state.mpesaTransactions)) {
+      this.state.mpesaTransactions = [];
+    }
+
+    const duplicate = this.state.mpesaTransactions.some(
+      (tx) =>
+        tx.tenantId === tenantId &&
+        tx.mpesaReceipt.trim().toUpperCase() === mpesaReceipt &&
+        tx.status !== 'Rejected'
+    );
+    if (duplicate) {
+      throw new ConflictError(
+        `M-Pesa receipt "${mpesaReceipt}" has already been logged for ${tenant.name}.`,
+        409
+      );
+    }
+
+    const refLower = accountReference.toLowerCase();
+    const matchedStudent = this.state.students.find(
+      (s) =>
+        s.tenantId === tenantId &&
+        (s.studentCode.trim().toLowerCase() === refLower ||
+          s.upi.trim().toLowerCase() === refLower)
+    );
+    const matchedInvoice = this.state.invoices.find(
+      (i) =>
+        i.tenantId === tenantId &&
+        (i.invoiceNumber.trim().toLowerCase() === refLower ||
+          (matchedStudent && i.studentId === matchedStudent.id && i.balance > 0))
+    );
+
+    const now = new Date().toISOString();
+    const txLog: MpesaTransactionLog = {
+      id: `mpesa-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      paybillNumber,
+      mpesaReceipt,
+      msisdn,
+      accountReference,
+      amount: Math.round(amount),
+      studentId: matchedStudent?.id || matchedInvoice?.studentId,
+      studentName: matchedStudent?.fullName || matchedInvoice?.studentName,
+      invoiceId: matchedInvoice?.id,
+      invoiceNumber: matchedInvoice?.invoiceNumber,
+      status: 'Unverified',
+      channel: 'Manual Entry',
+      note: `Manual M-Pesa entry by ${actor.fullName} — awaiting reconciliation verification.`,
+      receivedAt: now,
+    };
+
+    const reconLine: ReconciliationLine = {
+      id: `rec-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      channel: 'M-Pesa',
+      accountName: tenant.mpesaConfig?.accountName || `Paybill ${paybillNumber}`,
+      transactionDate: now.slice(0, 10),
+      statementRef: mpesaReceipt,
+      narration: `Manual M-Pesa (${accountReference}) · MSISDN ${msisdn}`,
+      direction: 'Credit',
+      amount: Math.round(amount),
+      status: 'Unmatched',
+      notes: `Queued from manual M-Pesa entry by ${actor.fullName}. Verify on Reconciliation before posting.`,
+      importedAt: now,
+    };
+
+    this.state.mpesaTransactions.unshift(txLog);
+    if (!Array.isArray(this.state.reconciliationLines)) {
+      this.state.reconciliationLines = [];
+    }
+    this.state.reconciliationLines.unshift(reconLine);
+    this.persist();
+    this.syncTenant(tenantId, 'finance:mpesa-manual-unverified');
+
+    return { status: 'Unverified', transaction: txLog, reconciliationLine: reconLine };
   }
 
   processMpesaPaybillPayment(input: {
+    tenantId?: string;
     paybillNumber?: string;
     accountReference?: string;
     amount?: number;
     msisdn?: string;
     mpesaReceipt?: string;
-    channel?: 'Daraja C2B Webhook' | 'STK / Paybill Terminal';
-    expectedTenantId?: string;
+    channel?: 'Daraja C2B Webhook';
     recordedBy?: string;
   }): {
+    duplicate?: boolean;
     tenantId: string;
     tenantName: string;
     paybillNumber: string;
-    invoice: FeeInvoice;
+    invoice?: FeeInvoice;
     transaction: MpesaTransactionLog;
   } {
-    const paybillNumber = this.normalizePaybillNumber(input.paybillNumber || '');
+    const paybillInput = (input.paybillNumber || '').replace(/\s+/g, '').trim();
+    let matchedTenant: Tenant | undefined;
+    if (input.tenantId) {
+      matchedTenant = this.requireTenant(input.tenantId);
+      if (
+        paybillInput &&
+        matchedTenant.mpesaConfig?.paybillNumber &&
+        matchedTenant.mpesaConfig.paybillNumber !== paybillInput
+      ) {
+        throw new ConflictError(
+          `Paybill "${paybillInput}" does not match configured Paybill for ${matchedTenant.name}.`,
+          403
+        );
+      }
+    } else {
+      const normalizedPaybill = this.normalizePaybillNumber(paybillInput);
+      matchedTenant = this.state.tenants.find(
+        (t) => t.mpesaConfig?.paybillNumber === normalizedPaybill
+      );
+    }
+
+    if (!matchedTenant) {
+      throw new ConflictError('No school tenant matched M-Pesa webhook configuration.', 404);
+    }
+
+    const paybillNumber =
+      matchedTenant.mpesaConfig?.paybillNumber || this.normalizePaybillNumber(paybillInput);
     const accountReference = (input.accountReference || '').trim();
     const msisdn = (input.msisdn || '').trim() || '254700000000';
-    const requestedAmount = Math.round(Number(input.amount));
+    const requestedAmount = Number(input.amount);
     const channel = input.channel || 'Daraja C2B Webhook';
-    const mpesaReceipt =
-      (input.mpesaReceipt || '').trim().toUpperCase() ||
-      `MPE${Math.random().toString(36).slice(2, 9).toUpperCase()}`;
+    const mpesaReceipt = (input.mpesaReceipt || '').trim().toUpperCase();
 
+    if (!mpesaReceipt) {
+      throw new ConflictError('TransID / M-Pesa receipt code is required.', 400);
+    }
     if (!accountReference) {
-      throw new ConflictError(
-        'Account Reference (Student Code or Invoice Number) is required to match the student fee ledger.',
-        400
-      );
+      throw new ConflictError('BillRefNumber / Account Reference is required.', 400);
     }
     if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
-      throw new ConflictError('Enter a positive payment amount for M-Pesa Paybill settlement.', 400);
-    }
-
-    const matchedTenant = this.state.tenants.find(
-      (t) => t.mpesaConfig?.paybillNumber === paybillNumber
-    );
-    if (!matchedTenant) {
-      throw new ConflictError(
-        `No school tenant is registered with M-Pesa Paybill "${paybillNumber}". Configure the school's Paybill under Fee & Billing -> M-Pesa Integration first.`,
-        404
-      );
+      throw new ConflictError('TransAmount must be a positive number.', 400);
     }
 
     if (!Array.isArray(this.state.mpesaTransactions)) {
       this.state.mpesaTransactions = [];
     }
 
-    // Strict tenant separation guard when called from inside a tenant's workspace
-    if (input.expectedTenantId && matchedTenant.id !== input.expectedTenantId) {
-      const rejectedEntry: MpesaTransactionLog = {
+    // Deduplicate on TransID per tenant: never credit twice
+    const existingSettled = this.state.mpesaTransactions.find(
+      (tx) =>
+        tx.tenantId === matchedTenant!.id &&
+        tx.mpesaReceipt.trim().toUpperCase() === mpesaReceipt &&
+        tx.status === 'Settled'
+    );
+    if (existingSettled) {
+      const duplicateEntry: MpesaTransactionLog = {
         id: `mpesa-${randomUUID().slice(0, 8)}`,
-        tenantId: input.expectedTenantId,
+        tenantId: matchedTenant.id,
         paybillNumber,
         mpesaReceipt,
         msisdn,
         accountReference,
-        amount: requestedAmount,
-        status: 'Rejected',
+        amount: Math.round(requestedAmount),
+        studentId: existingSettled.studentId,
+        studentName: existingSettled.studentName,
+        invoiceId: existingSettled.invoiceId,
+        invoiceNumber: existingSettled.invoiceNumber,
+        status: 'Duplicate',
         channel,
-        note: `Blocked cross-tenant payment: Paybill ${paybillNumber} belongs to ${matchedTenant.name}.`,
+        note: `Duplicate TransID ${mpesaReceipt} ignored — already settled on ${existingSettled.receivedAt}.`,
         receivedAt: new Date().toISOString(),
       };
-      this.state.mpesaTransactions.unshift(rejectedEntry);
+      this.state.mpesaTransactions.unshift(duplicateEntry);
       this.persist();
-      this.syncTenant(input.expectedTenantId, 'finance:mpesa-blocked-cross-tenant');
-      throw new ConflictError(
-        `Tenant Isolation Blocked: Paybill "${paybillNumber}" belongs to ${matchedTenant.name}, not the active school workspace.`,
-        403
-      );
+      this.syncTenant(matchedTenant.id, 'finance:mpesa-duplicate');
+      return {
+        duplicate: true,
+        tenantId: matchedTenant.id,
+        tenantName: matchedTenant.name,
+        paybillNumber,
+        transaction: duplicateEntry,
+      };
     }
 
     if (matchedTenant.status === 'Suspended') {
@@ -5324,7 +5670,7 @@ export class TenantStore {
     // Look up student & open invoice strictly within matchedTenant.id
     let targetInvoice = this.state.invoices.find(
       (i) =>
-        i.tenantId === matchedTenant.id &&
+        i.tenantId === matchedTenant!.id &&
         i.balance > 0 &&
         (i.studentCode.trim().toLowerCase() === refLower ||
           i.invoiceNumber.trim().toLowerCase() === refLower)
@@ -5333,15 +5679,14 @@ export class TenantStore {
     if (!targetInvoice) {
       const matchedStudent = this.state.students.find(
         (s) =>
-          s.tenantId === matchedTenant.id &&
+          s.tenantId === matchedTenant!.id &&
           (s.studentCode.trim().toLowerCase() === refLower ||
-            s.upi.trim().toLowerCase() === refLower ||
-            s.fullName.trim().toLowerCase() === refLower)
+            s.upi.trim().toLowerCase() === refLower)
       );
       if (matchedStudent) {
         targetInvoice = this.state.invoices.find(
           (i) =>
-            i.tenantId === matchedTenant.id &&
+            i.tenantId === matchedTenant!.id &&
             i.studentId === matchedStudent.id &&
             i.balance > 0
         );
@@ -5356,7 +5701,7 @@ export class TenantStore {
         mpesaReceipt,
         msisdn,
         accountReference,
-        amount: requestedAmount,
+        amount: Math.round(requestedAmount),
         status: 'Rejected',
         channel,
         note: `No open fee invoice matched "${accountReference}" within ${matchedTenant.name}.`,
@@ -5365,21 +5710,23 @@ export class TenantStore {
       this.state.mpesaTransactions.unshift(rejectedEntry);
       this.persist();
       this.syncTenant(matchedTenant.id, 'finance:mpesa-unmatched-ref');
-      throw new ConflictError(
-        `No open student fee balance matched account reference "${accountReference}" in ${matchedTenant.name} (Paybill ${paybillNumber}).`,
-        404
-      );
+      return {
+        tenantId: matchedTenant.id,
+        tenantName: matchedTenant.name,
+        paybillNumber,
+        transaction: rejectedEntry,
+      };
     }
 
     const updatedInvoice = this.recordPayment(matchedTenant.id, targetInvoice.id, {
-      amount: requestedAmount,
+      amount: Math.round(requestedAmount),
       method: 'Mobile Money',
       reference: mpesaReceipt,
       recordedBy: input.recordedBy || `M-Pesa Paybill ${paybillNumber}`,
     });
 
     const latestPayment = updatedInvoice.payments[updatedInvoice.payments.length - 1];
-    const settledAmount = latestPayment ? latestPayment.amount : requestedAmount;
+    const settledAmount = latestPayment ? latestPayment.amount : Math.round(requestedAmount);
     const txLog: MpesaTransactionLog = {
       id: `mpesa-${randomUUID().slice(0, 8)}`,
       tenantId: matchedTenant.id,

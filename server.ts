@@ -2,6 +2,9 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
   ConflictError,
@@ -13,12 +16,15 @@ import {
   createUserSessionToken,
   isDeveloperRole,
   isSessionSecretConfigured,
-  issueAdminSession,
   requireAdminAuth,
   requireDeveloperAuth,
+  requireModule,
+  requireRole,
+  resolveLiveSessionFromToken,
   type AdminAuthenticatedRequest,
   type AuthenticatedRequest,
 } from './server/middleware/adminAuth.ts';
+import { SmsNotConfiguredError } from './server/lib/sms.ts';
 import { PlatformAdminService } from './server/services/adminService.ts';
 import { PlatformDeveloperService } from './server/services/developerService.ts';
 import type { WsServerEvent } from './src/shared/types.ts';
@@ -39,17 +45,69 @@ function resolveServerPort(): number {
 
 const PORT = resolveServerPort();
 const IS_PROD = process.env.NODE_ENV === 'production';
+const IS_TEST = process.env.NODE_ENV === 'test';
 // On Vercel the app runs as a serverless function: no listen(), no WebSockets,
 // and static files are served by Vercel itself.
 const IS_VERCEL = Boolean(process.env.VERCEL);
 
 interface TenantWebSocket extends WebSocket {
   tenantId?: string;
+  authenticated?: boolean;
+  isDeveloper?: boolean;
   isAlive?: boolean;
 }
 
 const app = express();
-app.use(express.json({ limit: '12mb' }));
+app.set('trust proxy', 1);
+
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
+const configuredOrigins = (process.env.APP_URL || '')
+  .split(',')
+  .map((o) => o.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      const normalized = origin.replace(/\/+$/, '');
+      if (configuredOrigins.includes(normalized)) {
+        callback(null, true);
+        return;
+      }
+      if (!IS_PROD && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
+        callback(null, true);
+        return;
+      }
+      callback(new ConflictError(`CORS origin "${origin}" is not allowed.`, 403));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
+  })
+);
+
+const standardJsonParser = express.json({ limit: '1mb' });
+const largeJsonParser = express.json({ limit: '12mb' });
+const LARGE_PAYLOAD_ROUTE_RE =
+  /^\/api\/(finance\/expenses(\/[^/]+\/attachments)?|finance\/reconciliation\/import|exams\/scores\/batch|fees\/payments\/batch|students\/import|dev\/database\/restore|admin\/tenants(\/[^/]+\/(branding|metadata))?|tenants(\/[^/]+\/branding)?)$/i;
+
+app.use((req, res, next) => {
+  if (LARGE_PAYLOAD_ROUTE_RE.test(req.path)) {
+    largeJsonParser(req, res, next);
+  } else {
+    standardJsonParser(req, res, next);
+  }
+});
 
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -63,7 +121,11 @@ function broadcastToTenant(tenantId: string, eventType: WsServerEvent['type'], p
   const serialized = JSON.stringify(envelope);
   wss.clients.forEach((client) => {
     const wsClient = client as TenantWebSocket;
-    if (wsClient.readyState === WebSocket.OPEN && wsClient.tenantId === tenantId) {
+    if (
+      wsClient.readyState === WebSocket.OPEN &&
+      wsClient.authenticated &&
+      wsClient.tenantId === tenantId
+    ) {
       wsClient.send(serialized);
     }
   });
@@ -73,20 +135,105 @@ store.setBroadcaster((tenantId, eventType, payload) => {
   broadcastToTenant(tenantId, eventType as WsServerEvent['type'], payload);
 });
 
-wss.on('connection', (ws: TenantWebSocket) => {
+function authenticateWsSocket(token: string, ws: TenantWebSocket): boolean {
+  const clean = (token || '').trim();
+  if (!clean) return false;
+  const resolved = resolveLiveSessionFromToken(
+    clean,
+    (userId) => store.getUserById(userId),
+    (tid) => store.getTenantStatus(tid)
+  );
+  if (!resolved.ok) return false;
+  if (resolved.liveUser.mustChangePassword && !resolved.claims.impersonatedBy) {
+    return false;
+  }
+  const devUser = isDeveloperRole(resolved.liveUser.role) && !resolved.claims.impersonatedBy;
+  ws.authenticated = true;
+  ws.isDeveloper = devUser;
+  ws.tenantId = devUser
+    ? store.listTenants()[0]?.id || 'tenant-oakridge'
+    : resolved.liveUser.tenantId;
+  return true;
+}
+
+wss.on('connection', async (ws: TenantWebSocket, req) => {
   ws.isAlive = true;
-  ws.send(JSON.stringify({ type: 'connected', payload: { timestamp: new Date().toISOString() } }));
+  ws.authenticated = false;
+  await store.ensureHydrated();
+
+  let initialToken = '';
+  try {
+    const parsedUrl = new URL(req.url || '/ws', 'http://localhost');
+    initialToken = parsedUrl.searchParams.get('token') || '';
+  } catch {
+    initialToken = '';
+  }
+
+  let authTimer: ReturnType<typeof setTimeout> | null = null;
+  if (initialToken) {
+    if (!authenticateWsSocket(initialToken, ws)) {
+      ws.close(4401, 'Unauthorized');
+      return;
+    }
+    ws.send(
+      JSON.stringify({
+        type: 'connected',
+        tenantId: ws.tenantId,
+        payload: { timestamp: new Date().toISOString() },
+      })
+    );
+  } else {
+    authTimer = setTimeout(() => {
+      if (!ws.authenticated && ws.readyState === WebSocket.OPEN) {
+        ws.close(4401, 'Authentication timeout');
+      }
+    }, 5000);
+  }
 
   ws.on('pong', () => {
     ws.isAlive = true;
   });
 
+  ws.on('close', () => {
+    if (authTimer) clearTimeout(authTimer);
+  });
+
   ws.on('message', (raw) => {
     try {
-      const msg = JSON.parse(raw.toString()) as { type?: string; tenantId?: string };
+      const msg = JSON.parse(raw.toString()) as {
+        type?: string;
+        token?: string;
+        tenantId?: string;
+      };
+
+      if (!ws.authenticated) {
+        if (msg.type === 'auth' && typeof msg.token === 'string') {
+          if (authTimer) clearTimeout(authTimer);
+          if (!authenticateWsSocket(msg.token, ws)) {
+            ws.close(4401, 'Unauthorized');
+            return;
+          }
+          if (ws.isDeveloper && typeof msg.tenantId === 'string' && msg.tenantId.trim()) {
+            ws.tenantId = msg.tenantId.trim();
+          }
+          ws.send(
+            JSON.stringify({
+              type: 'connected',
+              tenantId: ws.tenantId,
+              payload: { timestamp: new Date().toISOString() },
+            })
+          );
+        } else {
+          ws.close(4401, 'Authentication required');
+        }
+        return;
+      }
+
       if (msg.type === 'subscribe' && typeof msg.tenantId === 'string') {
-        ws.tenantId = msg.tenantId;
-        ws.send(JSON.stringify({ type: 'subscribed', tenantId: msg.tenantId }));
+        if (ws.isDeveloper && msg.tenantId.trim()) {
+          ws.tenantId = msg.tenantId.trim();
+        }
+        ws.send(JSON.stringify({ type: 'subscribed', tenantId: ws.tenantId }));
       }
     } catch {
       // Ignore malformed client frames
@@ -94,7 +241,7 @@ wss.on('connection', (ws: TenantWebSocket) => {
   });
 });
 
-if (!IS_VERCEL) {
+if (!IS_VERCEL && !IS_TEST) {
   const heartbeatInterval = setInterval(() => {
     wss.clients.forEach((client) => {
       const wsClient = client as TenantWebSocket;
@@ -164,6 +311,39 @@ app.use('/api', async (_req, _res, next) => {
   }
 });
 
+// Rate Limiters
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login requests from this IP. Try again in 15 minutes.' },
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many registration attempts from this IP. Try again later.' },
+});
+
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password reset requests from this IP. Try again later.' },
+});
+
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Webhook rate limit exceeded.' },
+});
+
 // Public Health & Auth Directory / Onboarding Routes
 app.get('/api/health', (_req, res) => {
   const persistenceMeta = getStoragePersistenceMeta();
@@ -182,9 +362,9 @@ app.get('/api/auth/schools', (_req, res) => {
   res.json({ schools: store.getPublicSchoolDirectory() });
 });
 
-app.post('/api/auth/login', (req, res, next) => {
+app.post('/api/auth/login', loginLimiter, async (req, res, next) => {
   try {
-    const { user, tenant, emailDomain } = store.authenticateUser(req.body || {});
+    const { user, tenant, emailDomain } = await store.authenticateUser(req.body || {});
     const session = createUserSessionToken(user, {
       tenantName: tenant ? tenant.name : 'elimuNest Platform Control',
       emailDomain,
@@ -195,9 +375,9 @@ app.post('/api/auth/login', (req, res, next) => {
   }
 });
 
-app.post('/api/auth/register', async (req, res, next) => {
+app.post('/api/auth/register', registerLimiter, async (req, res, next) => {
   try {
-    const { user, tenant } = store.registerUserAccount(req.body || {});
+    const { user, tenant } = await store.registerUserAccount(req.body || {});
     await store.flushRemotePersist();
     const session = createUserSessionToken(user, {
       tenantName: tenant.name,
@@ -209,9 +389,9 @@ app.post('/api/auth/register', async (req, res, next) => {
   }
 });
 
-app.post('/api/auth/register-tenant', async (req, res, next) => {
+app.post('/api/auth/register-tenant', registerLimiter, async (req, res, next) => {
   try {
-    const { user, tenant } = store.registerTenantWithAdmin(req.body || {});
+    const { user, tenant } = await store.registerTenantWithAdmin(req.body || {});
     await store.flushRemotePersist();
     const session = createUserSessionToken(user, {
       tenantName: tenant.name,
@@ -223,18 +403,18 @@ app.post('/api/auth/register-tenant', async (req, res, next) => {
   }
 });
 
-app.post('/api/auth/forgot-password/request', (req, res, next) => {
+app.post('/api/auth/forgot-password/request', passwordResetLimiter, async (req, res, next) => {
   try {
-    const result = store.requestPasswordResetByPhone(req.body || {});
+    const result = await store.requestPasswordResetByPhone(req.body || {}, req.ip || 'unknown');
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-app.post('/api/auth/forgot-password/verify', async (req, res, next) => {
+app.post('/api/auth/forgot-password/verify', passwordResetLimiter, async (req, res, next) => {
   try {
-    const result = store.verifyPasswordResetByPhone(req.body || {});
+    const result = await store.verifyPasswordResetByPhone(req.body || {});
     await store.flushRemotePersist();
     res.json(result);
   } catch (err) {
@@ -246,18 +426,18 @@ app.post('/api/auth/logout', (_req, res) => {
   res.json({ ok: true });
 });
 
-// Public Safaricom Daraja C2B Paybill Webhook (routes strictly by Paybill / BusinessShortCode)
-app.post('/api/mpesa/c2b-callback', (req, res, next) => {
+// Authenticated Per-Tenant Safaricom Daraja C2B Paybill Webhook (secret path param)
+app.post('/api/mpesa/c2b-callback/:tenantSecret', webhookLimiter, (req, res, next) => {
   try {
+    const matchedTenant = store.verifyMpesaWebhookSecret(String(req.params.tenantSecret || ''));
+    if (!matchedTenant) {
+      res.status(401).json({ error: 'Unauthorized M-Pesa webhook secret.' });
+      return;
+    }
+
     const body = (req.body || {}) as Record<string, unknown>;
-    const queryPaybill =
-      typeof req.query.paybill === 'string' ? req.query.paybill.trim() : undefined;
     const paybillNumber = String(
-      body.BusinessShortCode ??
-        body.ShortCode ??
-        body.paybillNumber ??
-        queryPaybill ??
-        ''
+      body.BusinessShortCode ?? body.ShortCode ?? body.paybillNumber ?? ''
     );
     const accountReference = String(
       body.BillRefNumber ?? body.accountReference ?? body.AccountReference ?? ''
@@ -268,26 +448,22 @@ app.post('/api/mpesa/c2b-callback', (req, res, next) => {
       ? String(body.TransID)
       : body.mpesaReceipt
       ? String(body.mpesaReceipt)
-      : undefined;
+      : '';
 
-    const result = store.processMpesaPaybillPayment({
-      paybillNumber,
+    store.processMpesaPaybillPayment({
+      tenantId: matchedTenant.id,
+      paybillNumber: paybillNumber || undefined,
       accountReference,
       amount,
       msisdn,
       mpesaReceipt,
       channel: 'Daraja C2B Webhook',
-      recordedBy: `M-Pesa Paybill ${paybillNumber.trim()}`,
+      recordedBy: `M-Pesa Paybill ${matchedTenant.mpesaConfig?.paybillNumber || paybillNumber}`,
     });
 
     res.status(200).json({
       ResultCode: 0,
       ResultDesc: 'Accepted',
-      tenantId: result.tenantId,
-      tenantName: result.tenantName,
-      paybillNumber: result.paybillNumber,
-      invoice: result.invoice,
-      transaction: result.transaction,
     });
   } catch (err) {
     next(err);
@@ -323,7 +499,7 @@ app.post('/api/auth/change-password', async (req: AuthenticatedRequest, res, nex
       currentPassword?: string;
       newPassword?: string;
     };
-    const { user, tenant, emailDomain } = store.changeUserPassword(
+    const { user, tenant, emailDomain } = await store.changeUserPassword(
       req.authUser!.id,
       currentPassword || '',
       newPassword || ''
@@ -368,7 +544,7 @@ app.post('/api/auth/users', async (req: AuthenticatedRequest, res, next) => {
       throw new ConflictError('Forbidden: Only School Admins can provision staff accounts.', 403);
     }
     const targetTenantId = getTenantId(req);
-    const result = store.createTenantStaffUser(authUser, targetTenantId, req.body || {});
+    const result = await store.createTenantStaffUser(authUser, targetTenantId, req.body || {});
     await store.flushRemotePersist();
     res.status(201).json(result);
   } catch (err) {
@@ -387,7 +563,7 @@ app.patch('/api/auth/users/:userId/access', async (req: AuthenticatedRequest, re
       throw new ConflictError('Forbidden: Only School Admins can assign staff access rights.', 403);
     }
     const targetTenantId = getTenantId(req);
-    const result = store.updateTenantUserAccess(
+    const result = await store.updateTenantUserAccess(
       authUser,
       targetTenantId,
       String(req.params.userId),
@@ -432,7 +608,7 @@ app.post(
   requireDeveloperAuth('dev:tenants'),
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const result = developerService.onboardTenant(req.authUser!, req.body || {});
+      const result = await developerService.onboardTenant(req.authUser!, req.body || {});
       await store.flushRemotePersist();
       res.status(201).json(result);
     } catch (err) {
@@ -491,9 +667,9 @@ app.get(
 app.post(
   '/api/dev/impersonate',
   requireDeveloperAuth('dev:impersonate'),
-  (req: AuthenticatedRequest, res, next) => {
+  async (req: AuthenticatedRequest, res, next) => {
     try {
-      const result = developerService.startImpersonation(req.authUser!, req.body || {});
+      const result = await developerService.startImpersonation(req.authUser!, req.body || {});
       res.json(result);
     } catch (err) {
       next(err);
@@ -558,10 +734,12 @@ app.post(
   }
 );
 
-// Admin Auth & Service Layer Endpoints
-const adminGuard = requireAdminAuth(['Developer', 'Super Admin', 'Admin']);
-
-app.post('/api/admin/session', issueAdminSession);
+// Admin Auth & Service Layer Endpoints (live-user checked via unified session token)
+const adminGuard = requireAdminAuth(
+  ['Developer', 'Super Admin', 'Admin'],
+  (userId) => store.getUserById(userId),
+  (tenantId) => store.getTenantStatus(tenantId)
+);
 
 app.get('/api/admin/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
   try {
@@ -581,9 +759,10 @@ app.get('/api/admin/tenants/:id/metadata', adminGuard, (req: AdminAuthenticatedR
   }
 });
 
-app.post('/api/admin/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+app.post('/api/admin/tenants', adminGuard, async (req: AdminAuthenticatedRequest, res, next) => {
   try {
-    const result = adminService.provisionTenant(req.adminActor!, req.body);
+    const result = await adminService.provisionTenant(req.adminActor!, req.body);
+    await store.flushRemotePersist();
     res.status(201).json(result);
   } catch (err) {
     next(err);
@@ -649,9 +828,10 @@ app.get('/api/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) 
   }
 });
 
-app.post('/api/tenants', adminGuard, (req: AdminAuthenticatedRequest, res, next) => {
+app.post('/api/tenants', adminGuard, async (req: AdminAuthenticatedRequest, res, next) => {
   try {
-    const result = adminService.provisionTenant(req.adminActor!, req.body);
+    const result = await adminService.provisionTenant(req.adminActor!, req.body);
+    await store.flushRemotePersist();
     res.status(201).json(result);
   } catch (err) {
     next(err);
@@ -685,70 +865,91 @@ app.delete('/api/tenants/:id', adminGuard, (req: AdminAuthenticatedRequest, res,
   }
 });
 
-app.put('/api/tenants/:id/streams', (req: AuthenticatedRequest, res, next) => {
+const settingsGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin'),
+  requireModule('settings'),
+];
+
+app.put('/api/tenants/:id/streams', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
-    assertTenantParamAccess(req, req.params.id);
-    const tenant = store.updateStreams(req.params.id, req.body);
+    assertTenantParamAccess(req, String(req.params.id));
+    const tenant = store.updateStreams(String(req.params.id), req.body);
     res.json({ tenant });
   } catch (err) {
     next(err);
   }
 });
 
-app.put('/api/tenants/:id/subjects', (req: AuthenticatedRequest, res, next) => {
+app.put('/api/tenants/:id/subjects', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
-    assertTenantParamAccess(req, req.params.id);
-    const tenant = store.updateSubjects(req.params.id, req.body);
+    assertTenantParamAccess(req, String(req.params.id));
+    const tenant = store.updateSubjects(String(req.params.id), req.body);
     res.json({ tenant });
   } catch (err) {
     next(err);
   }
 });
 
-app.post('/api/tenants/:id/teachers', (req: AuthenticatedRequest, res, next) => {
+app.post('/api/tenants/:id/teachers', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
-    assertTenantParamAccess(req, req.params.id);
-    const result = store.addTeacher(req.params.id, req.body);
+    assertTenantParamAccess(req, String(req.params.id));
+    const result = store.addTeacher(String(req.params.id), req.body);
     res.status(201).json(result);
   } catch (err) {
     next(err);
   }
 });
 
-app.put('/api/tenants/:id/teachers/:teacherId', (req: AuthenticatedRequest, res, next) => {
-  try {
-    assertTenantParamAccess(req, req.params.id);
-    const result = store.updateTeacher(req.params.id, req.params.teacherId, req.body);
-    res.json(result);
-  } catch (err) {
-    next(err);
+app.put(
+  '/api/tenants/:id/teachers/:teacherId',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      assertTenantParamAccess(req, String(req.params.id));
+      const result = store.updateTeacher(
+        String(req.params.id),
+        String(req.params.teacherId),
+        req.body
+      );
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
-app.delete('/api/tenants/:id/teachers/:teacherId', (req: AuthenticatedRequest, res, next) => {
-  try {
-    assertTenantParamAccess(req, req.params.id);
-    const result = store.deleteTeacher(req.params.id, req.params.teacherId);
-    res.json(result);
-  } catch (err) {
-    next(err);
+app.delete(
+  '/api/tenants/:id/teachers/:teacherId',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      assertTenantParamAccess(req, String(req.params.id));
+      const result = store.deleteTeacher(String(req.params.id), String(req.params.teacherId));
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
-app.post('/api/tenants/:id/non-teaching-staff', (req: AuthenticatedRequest, res, next) => {
-  try {
-    assertTenantParamAccess(req, req.params.id);
-    const result = store.addNonTeachingStaff(req.params.id, req.body);
-    res.status(201).json(result);
-  } catch (err) {
-    next(err);
+app.post(
+  '/api/tenants/:id/non-teaching-staff',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      assertTenantParamAccess(req, String(req.params.id));
+      const result = store.addNonTeachingStaff(String(req.params.id), req.body);
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
 app.get('/api/workspace', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const workspace = store.getWorkspace(tenantId);
+    const workspace = store.getWorkspace(tenantId, req.authUser);
     if (!(isDeveloperRole(req.authUser?.role) && !req.impersonation)) {
       workspace.tenants = [workspace.tenant];
     }
@@ -759,7 +960,12 @@ app.get('/api/workspace', (req: AuthenticatedRequest, res, next) => {
 });
 
 // Admissions & Direct Enrollment
-app.post('/api/students/enroll', (req, res, next) => {
+const admissionsGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Registrar'),
+  requireModule('admissions'),
+];
+
+app.post('/api/students/enroll', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const result = store.enrollStudent(tenantId, req.body);
@@ -769,7 +975,7 @@ app.post('/api/students/enroll', (req, res, next) => {
   }
 });
 
-app.post('/api/admissions', (req, res, next) => {
+app.post('/api/admissions', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const application = store.createAdmission(tenantId, req.body);
@@ -779,10 +985,10 @@ app.post('/api/admissions', (req, res, next) => {
   }
 });
 
-app.patch('/api/admissions/:id', (req, res, next) => {
+app.patch('/api/admissions/:id', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.updateAdmission(tenantId, req.params.id, req.body);
+    const result = store.updateAdmission(tenantId, String(req.params.id), req.body);
     res.json(result);
   } catch (err) {
     next(err);
@@ -790,7 +996,12 @@ app.patch('/api/admissions/:id', (req, res, next) => {
 });
 
 // Timetable
-app.post('/api/timetable', (req, res, next) => {
+const timetableGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Teacher'),
+  requireModule('timetable'),
+];
+
+app.post('/api/timetable', ...timetableGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const slot = store.upsertTimetableSlot(tenantId, req.body);
@@ -800,27 +1011,30 @@ app.post('/api/timetable', (req, res, next) => {
   }
 });
 
-app.put('/api/timetable/:id', (req, res, next) => {
+app.put('/api/timetable/:id', ...timetableGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const slot = store.upsertTimetableSlot(tenantId, { ...req.body, id: req.params.id });
+    const slot = store.upsertTimetableSlot(tenantId, {
+      ...req.body,
+      id: String(req.params.id),
+    });
     res.json({ slot });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/timetable/:id', (req, res, next) => {
+app.delete('/api/timetable/:id', ...timetableGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    store.deleteTimetableSlot(tenantId, req.params.id);
+    store.deleteTimetableSlot(tenantId, String(req.params.id));
     res.json({ deleted: true });
   } catch (err) {
     next(err);
   }
 });
 
-app.post('/api/timetable/generate', (req, res, next) => {
+app.post('/api/timetable/generate', ...timetableGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const result = store.generateTimetable(tenantId, req.body);
@@ -831,7 +1045,12 @@ app.post('/api/timetable/generate', (req, res, next) => {
 });
 
 // Attendance & Leave Out Chits
-app.post('/api/attendance/batch', (req, res, next) => {
+const attendanceGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Registrar', 'Teacher'),
+  requireModule('attendance'),
+];
+
+app.post('/api/attendance/batch', ...attendanceGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const records = store.saveAttendanceBatch(tenantId, req.body);
@@ -841,38 +1060,59 @@ app.post('/api/attendance/batch', (req, res, next) => {
   }
 });
 
-app.post('/api/attendance/staff/batch', (req, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const records = store.saveStaffAttendanceBatch(tenantId, req.body);
-    res.json({ records });
-  } catch (err) {
-    next(err);
+app.post(
+  '/api/attendance/staff/batch',
+  ...attendanceGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const records = store.saveStaffAttendanceBatch(tenantId, req.body);
+      res.json({ records });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
-app.post('/api/attendance/leave-chits', (req, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const chit = store.createLeaveOutChit(tenantId, req.body);
-    res.status(201).json({ chit });
-  } catch (err) {
-    next(err);
+app.post(
+  '/api/attendance/leave-chits',
+  ...attendanceGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const chit = store.createLeaveOutChit(tenantId, req.body);
+      res.status(201).json({ chit });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
-app.delete('/api/attendance/leave-chits/:id', (req, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    store.deleteLeaveOutChit(tenantId, req.params.id);
-    res.json({ deleted: true });
-  } catch (err) {
-    next(err);
+app.delete(
+  '/api/attendance/leave-chits/:id',
+  ...attendanceGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      store.deleteLeaveOutChit(tenantId, String(req.params.id));
+      res.json({ deleted: true });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
 // Exams & Assessment
-app.post('/api/exams/cycles', (req, res, next) => {
+const examsWriteGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Teacher'),
+  requireModule('exams'),
+];
+const examsPublishGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin'),
+  requireModule('exams'),
+];
+
+app.post('/api/exams/cycles', ...examsWriteGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const cycle = store.createExamCycle(tenantId, req.body);
@@ -882,7 +1122,7 @@ app.post('/api/exams/cycles', (req, res, next) => {
   }
 });
 
-app.post('/api/exams/scores', (req, res, next) => {
+app.post('/api/exams/scores', ...examsWriteGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const result = store.upsertExamScore(tenantId, req.body);
@@ -892,7 +1132,7 @@ app.post('/api/exams/scores', (req, res, next) => {
   }
 });
 
-app.post('/api/exams/scores/batch', (req, res, next) => {
+app.post('/api/exams/scores/batch', ...examsWriteGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const result = store.saveExamScoresBatch(tenantId, req.body);
@@ -902,18 +1142,29 @@ app.post('/api/exams/scores/batch', (req, res, next) => {
   }
 });
 
-app.post('/api/exams/cycles/:id/publish', (req, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const cycle = store.publishExamCycle(tenantId, req.params.id);
-    res.json({ cycle });
-  } catch (err) {
-    next(err);
+app.post(
+  '/api/exams/cycles/:id/publish',
+  ...examsPublishGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const cycle = store.publishExamCycle(tenantId, String(req.params.id));
+      res.json({ cycle });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
-// Fees & Billing
-app.post('/api/fees/structures', (req, res, next) => {
+// Fees, Billing & Finance Controls (Admin & Bursar only)
+const financeGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Bursar'),
+  requireModule('fees'),
+];
+app.use('/api/fees', ...financeGuard);
+app.use('/api/finance', ...financeGuard);
+
+app.post('/api/fees/structures', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const feeStructure = store.upsertFeeStructure(tenantId, req.body);
@@ -923,7 +1174,7 @@ app.post('/api/fees/structures', (req, res, next) => {
   }
 });
 
-app.post('/api/fees/invoices', (req, res, next) => {
+app.post('/api/fees/invoices', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const invoice = store.createInvoice(tenantId, req.body);
@@ -933,17 +1184,17 @@ app.post('/api/fees/invoices', (req, res, next) => {
   }
 });
 
-app.post('/api/fees/invoices/:id/payments', (req, res, next) => {
+app.post('/api/fees/invoices/:id/payments', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const invoice = store.recordPayment(tenantId, req.params.id, req.body);
+    const invoice = store.recordPayment(tenantId, String(req.params.id), req.body);
     res.json({ invoice });
   } catch (err) {
     next(err);
   }
 });
 
-app.post('/api/fees/payments/batch', (req, res, next) => {
+app.post('/api/fees/payments/batch', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const result = store.recordPaymentsBatch(tenantId, req.body);
@@ -970,7 +1221,7 @@ app.post('/api/fees/independent-votelines', (req: AuthenticatedRequest, res, nex
 app.post('/api/fees/independent-votelines/:id/payments', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const item = store.recordIndependentVotelinePayment(tenantId, req.params.id, {
+    const item = store.recordIndependentVotelinePayment(tenantId, String(req.params.id), {
       ...(req.body || {}),
       recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
     });
@@ -980,17 +1231,17 @@ app.post('/api/fees/independent-votelines/:id/payments', (req: AuthenticatedRequ
   }
 });
 
-app.delete('/api/fees/independent-votelines/:id', (req, res, next) => {
+app.delete('/api/fees/independent-votelines/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteIndependentVoteline(tenantId, req.params.id);
+    const result = store.deleteIndependentVoteline(tenantId, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-// Fees & Billing: Per-Tenant M-Pesa Paybill Integration & Paybill-Separated Settlement
+// Fees & Billing: Per-Tenant M-Pesa Paybill Integration & Unverified Manual Entry
 app.put('/api/finance/mpesa/config', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
@@ -1011,16 +1262,7 @@ app.post('/api/finance/mpesa/receive', (req: AuthenticatedRequest, res, next) =>
       msisdn?: string;
       mpesaReceipt?: string;
     };
-    const result = store.processMpesaPaybillPayment({
-      paybillNumber: body.paybillNumber,
-      accountReference: body.accountReference,
-      amount: body.amount,
-      msisdn: body.msisdn,
-      mpesaReceipt: body.mpesaReceipt,
-      channel: 'STK / Paybill Terminal',
-      expectedTenantId: tenantId,
-      recordedBy: `${req.authUser!.fullName} (M-Pesa Paybill)`,
-    });
+    const result = store.recordManualMpesaEntry(tenantId, req.authUser!, body);
     res.status(201).json(result);
   } catch (err) {
     next(err);
@@ -1028,7 +1270,7 @@ app.post('/api/finance/mpesa/receive', (req: AuthenticatedRequest, res, next) =>
 });
 
 // Finance & Accounting: Expensing
-app.post('/api/finance/expenses', (req, res, next) => {
+app.post('/api/finance/expenses', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const expense = store.createExpense(tenantId, req.body);
@@ -1038,52 +1280,55 @@ app.post('/api/finance/expenses', (req, res, next) => {
   }
 });
 
-app.patch('/api/finance/expenses/:id', (req, res, next) => {
+app.patch('/api/finance/expenses/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const expense = store.updateExpenseStatus(tenantId, req.params.id, req.body?.status);
+    const expense = store.updateExpenseStatus(tenantId, String(req.params.id), req.body?.status);
     res.json({ expense });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/finance/expenses/:id', (req, res, next) => {
+app.delete('/api/finance/expenses/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteExpense(tenantId, req.params.id);
+    const result = store.deleteExpense(tenantId, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-app.post('/api/finance/expenses/:id/attachments', (req, res, next) => {
+app.post('/api/finance/expenses/:id/attachments', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const expense = store.addExpenseAttachment(tenantId, req.params.id, req.body);
+    const expense = store.addExpenseAttachment(tenantId, String(req.params.id), req.body);
     res.status(201).json({ expense });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/finance/expenses/:id/attachments/:attachmentId', (req, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const expense = store.deleteExpenseAttachment(
-      tenantId,
-      req.params.id,
-      req.params.attachmentId
-    );
-    res.json({ expense });
-  } catch (err) {
-    next(err);
+app.delete(
+  '/api/finance/expenses/:id/attachments/:attachmentId',
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const expense = store.deleteExpenseAttachment(
+        tenantId,
+        String(req.params.id),
+        String(req.params.attachmentId)
+      );
+      res.json({ expense });
+    } catch (err) {
+      next(err);
+    }
   }
-});
+);
 
 // Finance Controls: eTIMS Receipt Check
-app.post('/api/finance/etims/verify', (req, res, next) => {
+app.post('/api/finance/etims/verify', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const record = store.verifyEtimsReceipt(tenantId, req.body);
@@ -1093,10 +1338,10 @@ app.post('/api/finance/etims/verify', (req, res, next) => {
   }
 });
 
-app.delete('/api/finance/etims/:id', (req, res, next) => {
+app.delete('/api/finance/etims/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteEtimsCheck(tenantId, req.params.id);
+    const result = store.deleteEtimsCheck(tenantId, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);
@@ -1104,7 +1349,7 @@ app.delete('/api/finance/etims/:id', (req, res, next) => {
 });
 
 // Finance Controls: M-Pesa & Bank Statement Reconciliation
-app.post('/api/finance/reconciliation/import', (req, res, next) => {
+app.post('/api/finance/reconciliation/import', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const lines = Array.isArray(req.body?.lines) ? req.body.lines : req.body;
@@ -1115,7 +1360,7 @@ app.post('/api/finance/reconciliation/import', (req, res, next) => {
   }
 });
 
-app.post('/api/finance/reconciliation/auto-match', (req, res, next) => {
+app.post('/api/finance/reconciliation/auto-match', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const result = store.autoMatchReconciliation(tenantId);
@@ -1125,20 +1370,20 @@ app.post('/api/finance/reconciliation/auto-match', (req, res, next) => {
   }
 });
 
-app.patch('/api/finance/reconciliation/:id', (req, res, next) => {
+app.patch('/api/finance/reconciliation/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const line = store.updateReconciliationLine(tenantId, req.params.id, req.body);
+    const line = store.updateReconciliationLine(tenantId, String(req.params.id), req.body);
     res.json({ line });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/finance/reconciliation/:id', (req, res, next) => {
+app.delete('/api/finance/reconciliation/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteReconciliationLine(tenantId, req.params.id);
+    const result = store.deleteReconciliationLine(tenantId, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);
@@ -1146,7 +1391,7 @@ app.delete('/api/finance/reconciliation/:id', (req, res, next) => {
 });
 
 // Finance Controls: Payroll & Statutory Deductions
-app.post('/api/finance/payroll/generate', (req, res, next) => {
+app.post('/api/finance/payroll/generate', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const entries = store.generatePayrollRun(tenantId, req.body?.payPeriod);
@@ -1156,7 +1401,7 @@ app.post('/api/finance/payroll/generate', (req, res, next) => {
   }
 });
 
-app.post('/api/finance/payroll', (req, res, next) => {
+app.post('/api/finance/payroll', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const entry = store.upsertPayrollEntry(tenantId, req.body);
@@ -1166,20 +1411,20 @@ app.post('/api/finance/payroll', (req, res, next) => {
   }
 });
 
-app.patch('/api/finance/payroll/:id/status', (req, res, next) => {
+app.patch('/api/finance/payroll/:id/status', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const entry = store.updatePayrollStatus(tenantId, req.params.id, req.body?.status);
+    const entry = store.updatePayrollStatus(tenantId, String(req.params.id), req.body?.status);
     res.json({ entry });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/finance/payroll/:id', (req, res, next) => {
+app.delete('/api/finance/payroll/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deletePayrollEntry(tenantId, req.params.id);
+    const result = store.deletePayrollEntry(tenantId, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);
@@ -1187,7 +1432,7 @@ app.delete('/api/finance/payroll/:id', (req, res, next) => {
 });
 
 // Finance Controls: Departmental Budget Allocations
-app.post('/api/finance/budgets', (req, res, next) => {
+app.post('/api/finance/budgets', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const budget = store.upsertBudgetAllocation(tenantId, req.body);
@@ -1211,7 +1456,7 @@ app.patch('/api/finance/budgets/approval', (req: AuthenticatedRequest, res, next
 });
 
 // Finance Controls: Board & Procurement Approvals Sign-Off
-app.post('/api/finance/approvals', (req, res, next) => {
+app.post('/api/finance/approvals', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const record = store.createApprovalRecord(tenantId, req.body);
@@ -1221,20 +1466,20 @@ app.post('/api/finance/approvals', (req, res, next) => {
   }
 });
 
-app.patch('/api/finance/approvals/:id', (req, res, next) => {
+app.patch('/api/finance/approvals/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const record = store.updateApprovalDecision(tenantId, req.params.id, req.body);
+    const record = store.updateApprovalDecision(tenantId, String(req.params.id), req.body);
     res.json({ record });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/finance/approvals/:id', (req, res, next) => {
+app.delete('/api/finance/approvals/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteApprovalRecord(tenantId, req.params.id);
+    const result = store.deleteApprovalRecord(tenantId, String(req.params.id));
     res.json(result);
   } catch (err) {
     next(err);
@@ -1242,7 +1487,13 @@ app.delete('/api/finance/approvals/:id', (req, res, next) => {
 });
 
 // Communications & Notifications
-app.post('/api/communications/announcements', (req, res, next) => {
+const communicationsGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Registrar', 'Teacher', 'Bursar'),
+  requireModule('communications'),
+];
+app.use('/api/communications', ...communicationsGuard);
+
+app.post('/api/communications/announcements', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const announcement = store.createAnnouncement(tenantId, req.body);
@@ -1252,7 +1503,7 @@ app.post('/api/communications/announcements', (req, res, next) => {
   }
 });
 
-app.post('/api/communications/messages', (req, res, next) => {
+app.post('/api/communications/messages', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const message = store.createMessage(tenantId, req.body);
@@ -1262,7 +1513,7 @@ app.post('/api/communications/messages', (req, res, next) => {
   }
 });
 
-app.post('/api/communications/whatsapp-log', (req, res, next) => {
+app.post('/api/communications/whatsapp-log', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const record = store.logWhatsAppDispatch(tenantId, req.body);
@@ -1272,7 +1523,7 @@ app.post('/api/communications/whatsapp-log', (req, res, next) => {
   }
 });
 
-app.post('/api/notifications/read', (req, res, next) => {
+app.post('/api/notifications/read', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const notificationId = typeof req.body?.notificationId === 'string' ? req.body.notificationId : undefined;
@@ -1286,6 +1537,10 @@ app.post('/api/notifications/read', (req, res, next) => {
 // Error Handler
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ConflictError) {
+    res.status(err.statusCode).json({ error: err.message });
+    return;
+  }
+  if (err instanceof SmsNotConfiguredError) {
     res.status(err.statusCode).json({ error: err.message });
     return;
   }
@@ -1320,9 +1575,10 @@ async function attachFrontend() {
   });
 }
 
-if (!IS_VERCEL) {
+if (!IS_VERCEL && !IS_TEST) {
   attachFrontend();
 }
 
+export { app, httpServer, wss, store };
 // Used by the Vercel serverless function entry.
 export default app;

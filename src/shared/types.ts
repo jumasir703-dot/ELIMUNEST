@@ -589,6 +589,20 @@ export function suggestNameEmailLocalPart(fullName: string): string {
   return `${tokens[0]}.${tokens[tokens.length - 1]}`.slice(0, 48);
 }
 
+export const PASSWORD_MIN_LENGTH = 10;
+export const PASSWORD_POLICY_MESSAGE =
+  'Password must be at least 10 characters long and contain at least one letter and one number.';
+
+export function validatePasswordStrength(password: string): string | null {
+  if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
+    return PASSWORD_POLICY_MESSAGE;
+  }
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return PASSWORD_POLICY_MESSAGE;
+  }
+  return null;
+}
+
 export type MpesaEnvironment = 'Sandbox' | 'Production';
 
 export interface TenantMpesaConfig {
@@ -597,11 +611,7 @@ export interface TenantMpesaConfig {
   paybillNumber: string;
   accountName: string;
   accountReferenceFormat: string;
-  consumerKey: string;
-  hasConsumerSecret: boolean;
-  consumerSecretMasked?: string;
-  hasPasskey: boolean;
-  passkeyMasked?: string;
+  hasWebhookSecret?: boolean;
   callbackUrl?: string;
   settlementBank?: string;
   updatedAt?: string;
@@ -620,8 +630,8 @@ export interface MpesaTransactionLog {
   studentName?: string;
   invoiceId?: string;
   invoiceNumber?: string;
-  status: 'Settled' | 'Rejected';
-  channel: 'Daraja C2B Webhook' | 'STK / Paybill Terminal';
+  status: 'Settled' | 'Rejected' | 'Duplicate' | 'Unverified';
+  channel: 'Daraja C2B Webhook' | 'STK / Paybill Terminal' | 'Manual Entry';
   note?: string;
   receivedAt: string;
 }
@@ -671,6 +681,7 @@ export interface TenantUser {
   role: UserRole;
   status: 'Active' | 'Disabled';
   mustChangePassword?: boolean;
+  tokenVersion?: number;
   allowedModules?: TenantModulePermission[];
   createdAt: string;
   lastLoginAt?: string;
@@ -739,17 +750,6 @@ export interface AdminAuditEntry {
   tenantId: string;
   tenantName: string;
   summary: string;
-}
-
-export interface AdminSessionInfo {
-  token: string;
-  expiresAt: string;
-  actor: {
-    id: string;
-    role: UserRole;
-    email: string;
-    name: string;
-  };
 }
 
 export interface DevCollectionStorageStat {
@@ -1039,6 +1039,7 @@ export interface Student {
   fullName: string;
   grade: string;
   section: string;
+  parentUserId?: string;
   guardianName: string;
   guardianEmail: string;
   guardianPhone: string;

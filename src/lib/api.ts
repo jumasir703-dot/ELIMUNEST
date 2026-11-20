@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   AdminAuditEntry,
-  AdminSessionInfo,
   AdmissionApplication,
   AdmissionStage,
   Announcement,
@@ -65,10 +64,8 @@ import type {
 
 const AUTH_SESSION_STORAGE_KEY = 'elimunest_auth_session_v1';
 const DEV_RESTORE_SESSION_STORAGE_KEY = 'elimunest_dev_restore_session_v1';
-const ADMIN_SESSION_STORAGE_KEY = 'elimunest_admin_session_v1';
 
 let memoryAuthSession: AuthSessionInfo | null = null;
-let memoryAdminSession: AdminSessionInfo | null = null;
 let unauthorizedHandler: (() => void) | null = null;
 
 export function setUnauthorizedHandler(fn: (() => void) | null) {
@@ -157,35 +154,6 @@ function writeDevRestoreSession(session: AuthSessionInfo | null) {
   }
 }
 
-function readStoredAdminSession(): AdminSessionInfo | null {
-  if (memoryAdminSession) return memoryAdminSession;
-  try {
-    const raw = window.sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as AdminSessionInfo;
-    if (parsed && typeof parsed.token === 'string' && parsed.expiresAt) {
-      memoryAdminSession = parsed;
-      return parsed;
-    }
-  } catch {
-    // ignore storage failures
-  }
-  return null;
-}
-
-function writeStoredAdminSession(session: AdminSessionInfo | null) {
-  memoryAdminSession = session;
-  try {
-    if (session) {
-      window.sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
-    } else {
-      window.sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
-    }
-  } catch {
-    // ignore storage failures
-  }
-}
-
 async function apiRequest<T>(
   url: string,
   options: RequestInit & { tenantId?: string; skipAuth?: boolean } = {}
@@ -219,7 +187,6 @@ async function apiRequest<T>(
     }
     if (response.status === 401 && !skipAuth) {
       writeStoredAuthSession(null);
-      writeStoredAdminSession(null);
       unauthorizedHandler?.();
     }
     throw new Error(message);
@@ -272,7 +239,6 @@ export const saasApi = {
   clearAuthSession() {
     writeStoredAuthSession(null);
     writeDevRestoreSession(null);
-    writeStoredAdminSession(null);
   },
 
   getAuthSchools() {
@@ -288,7 +254,6 @@ export const saasApi = {
       body: JSON.stringify(payload),
     });
     writeStoredAuthSession(session);
-    writeStoredAdminSession(null);
     return session;
   },
 
@@ -305,7 +270,6 @@ export const saasApi = {
       body: JSON.stringify(payload),
     });
     writeStoredAuthSession(session);
-    writeStoredAdminSession(null);
     return session;
   },
 
@@ -329,7 +293,6 @@ export const saasApi = {
       body: JSON.stringify(payload),
     });
     writeStoredAuthSession(session);
-    writeStoredAdminSession(null);
     return session;
   },
 
@@ -354,7 +317,6 @@ export const saasApi = {
       return updated;
     } catch {
       writeStoredAuthSession(null);
-      writeStoredAdminSession(null);
       return null;
     }
   },
@@ -367,7 +329,6 @@ export const saasApi = {
     }
     writeStoredAuthSession(null);
     writeDevRestoreSession(null);
-    writeStoredAdminSession(null);
   },
 
   async changePassword(payload: {
@@ -379,17 +340,15 @@ export const saasApi = {
       body: JSON.stringify(payload),
     });
     writeStoredAuthSession(session);
-    writeStoredAdminSession(null);
     return session;
   },
 
   requestPasswordResetByPhone(payload: { email: string; phone: string }) {
     return apiRequest<{
       ok: boolean;
-      maskedPhone: string;
       expiresInMinutes: number;
       deliveryChannel: string;
-      verificationCode: string;
+      message: string;
     }>('/api/auth/forgot-password/request', {
       method: 'POST',
       skipAuth: true,
@@ -450,31 +409,6 @@ export const saasApi = {
         body: JSON.stringify(payload),
       }
     );
-  },
-
-  async syncRoleSession(role: UserRole): Promise<AdminSessionInfo | null> {
-    if (!isPrivilegedRole(role)) {
-      writeStoredAdminSession(null);
-      return null;
-    }
-    const auth = readStoredAuthSession();
-    if (!auth || !isPrivilegedRole(auth.user.role)) {
-      return null;
-    }
-    const existing = readStoredAdminSession();
-    if (existing && Date.parse(existing.expiresAt) > Date.now() + 30_000) {
-      return existing;
-    }
-    try {
-      const session = await apiRequest<AdminSessionInfo>('/api/admin/session', {
-        method: 'POST',
-        body: JSON.stringify({ role: auth.user.role }),
-      });
-      writeStoredAdminSession(session);
-      return session;
-    } catch {
-      return null;
-    }
   },
 
   getWorkspace(tenantId?: string) {
@@ -1087,20 +1021,19 @@ export const saasApi = {
       paybillNumber: string;
       accountName: string;
       accountReferenceFormat: string;
-      consumerKey: string;
-      consumerSecret?: string;
-      passkey?: string;
       settlementBank?: string;
+      regenerateSecret?: boolean;
     }
   ) {
-    return apiRequest<{ tenant: Tenant; mpesaConfig: TenantMpesaConfig }>(
-      '/api/finance/mpesa/config',
-      {
-        method: 'PUT',
-        tenantId,
-        body: JSON.stringify(payload),
-      }
-    );
+    return apiRequest<{
+      tenant: Tenant;
+      mpesaConfig: TenantMpesaConfig;
+      webhookCallbackUrl?: string;
+    }>('/api/finance/mpesa/config', {
+      method: 'PUT',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
   },
 
   receiveMpesaPaybillPayment(
@@ -1117,8 +1050,9 @@ export const saasApi = {
       tenantId: string;
       tenantName: string;
       paybillNumber: string;
-      invoice: FeeInvoice;
+      status: 'Unverified';
       transaction: MpesaTransactionLog;
+      reconciliationLine: ReconciliationLine;
     }>('/api/finance/mpesa/receive', {
       method: 'POST',
       tenantId,
@@ -1561,7 +1495,6 @@ export const saasApi = {
     );
     writeDevRestoreSession(currentDevSession);
     writeStoredAuthSession(result.session);
-    writeStoredAdminSession(null);
     return result;
   },
 
@@ -1573,7 +1506,6 @@ export const saasApi = {
       return active;
     }
     writeStoredAuthSession(restore);
-    writeStoredAdminSession(null);
     try {
       await apiRequest<{ auditEntry: AdminAuditEntry }>('/api/dev/impersonate/end', {
         method: 'POST',
@@ -1629,15 +1561,18 @@ export const saasApi = {
 
 export function useTenantSocket(
   tenantId: string,
-  onEvent: (event: WsServerEvent) => void
+  onEvent: (event: WsServerEvent) => void,
+  authToken?: string
 ) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
 
+  const effectiveToken = authToken || readStoredAuthSession()?.token || '';
+
   useEffect(() => {
-    if (!tenantId) {
+    if (!tenantId || !effectiveToken) {
       setConnected(false);
       return;
     }
@@ -1646,9 +1581,11 @@ export function useTenantSocket(
     let retryDelay = 1000;
 
     function connect() {
-      if (!active || !tenantId) return;
+      if (!active || !tenantId || !effectiveToken) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(`${proto}//${window.location.host}/ws`);
+      const socket = new WebSocket(
+        `${proto}//${window.location.host}/ws?token=${encodeURIComponent(effectiveToken)}`
+      );
       wsRef.current = socket;
 
       socket.onopen = () => {
@@ -1688,13 +1625,13 @@ export function useTenantSocket(
       if (reconnectTimer) clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };
-  }, [Boolean(tenantId)]);
+  }, [Boolean(tenantId), effectiveToken]);
 
   useEffect(() => {
-    if (tenantId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    if (tenantId && effectiveToken && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'subscribe', tenantId }));
     }
-  }, [tenantId]);
+  }, [tenantId, effectiveToken]);
 
   return { connected };
 }

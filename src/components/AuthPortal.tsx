@@ -12,7 +12,11 @@ import {
   Sun,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
-import type { AuthSessionInfo } from '../shared/types';
+import {
+  PASSWORD_MIN_LENGTH,
+  validatePasswordStrength,
+  type AuthSessionInfo,
+} from '../shared/types';
 
 interface AuthPortalProps {
   darkMode: boolean;
@@ -42,8 +46,7 @@ export function AuthPortal({
   const [resetNewPassword, setResetNewPassword] = useState('');
   const [resetConfirmPassword, setResetConfirmPassword] = useState('');
   const [showResetPassword, setShowResetPassword] = useState(false);
-  const [maskedPhone, setMaskedPhone] = useState('');
-  const [demoOtpHint, setDemoOtpHint] = useState('');
+  const [resetNotice, setResetNotice] = useState('');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -76,8 +79,7 @@ export function AuthPortal({
     setResetCode('');
     setResetNewPassword('');
     setResetConfirmPassword('');
-    setMaskedPhone('');
-    setDemoOtpHint('');
+    setResetNotice('');
     setView('forgot-request');
   }
 
@@ -97,8 +99,7 @@ export function AuthPortal({
         email: cleanEmail,
         phone: cleanPhone,
       });
-      setMaskedPhone(res.maskedPhone);
-      setDemoOtpHint(res.verificationCode);
+      setResetNotice(res.message);
       setResetCode('');
       setView('forgot-verify');
     } catch (err) {
@@ -115,8 +116,9 @@ export function AuthPortal({
       setErrorMsg('Enter the 6-digit phone verification code.');
       return;
     }
-    if (resetNewPassword.length < 8) {
-      setErrorMsg('New password must be at least 8 characters.');
+    const passwordPolicyErr = validatePasswordStrength(resetNewPassword);
+    if (passwordPolicyErr) {
+      setErrorMsg(passwordPolicyErr);
       return;
     }
     if (resetNewPassword !== resetConfirmPassword) {
@@ -333,12 +335,10 @@ export function AuthPortal({
         {view === 'forgot-verify' && (
           <form onSubmit={handleVerifyPhoneReset} className="mt-6 space-y-4">
             <div className="rounded-lg border border-blue-200 bg-blue-50/70 px-3.5 py-2.5 text-xs text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
-              <p className="font-semibold">
-                Phone Verified: <span className="font-mono">{maskedPhone}</span>
-              </p>
+              <p className="font-semibold">SMS Verification Requested</p>
               <p className="mt-0.5 text-[11px] text-blue-800/90 dark:text-blue-300/90">
-                Verification code dispatched via SMS:{' '}
-                <span className="font-mono font-bold tracking-wider">{demoOtpHint}</span>
+                {resetNotice ||
+                  'If an active account matches those details, a 6-digit SMS verification code has been sent.'}
               </p>
             </div>
 
@@ -368,14 +368,14 @@ export function AuthPortal({
                 htmlFor="reset-new-password"
                 className="block text-xs font-medium text-slate-700 dark:text-slate-300"
               >
-                New Password (min 8 chars)
+                New Password (min {PASSWORD_MIN_LENGTH} chars, letter + number)
               </label>
               <div className="relative mt-1.5">
                 <input
                   id="reset-new-password"
                   type={showResetPassword ? 'text' : 'password'}
                   required
-                  minLength={8}
+                  minLength={PASSWORD_MIN_LENGTH}
                   value={resetNewPassword}
                   onChange={(e) => setResetNewPassword(e.target.value)}
                   placeholder="Enter new password"
@@ -403,7 +403,7 @@ export function AuthPortal({
                 id="reset-confirm-password"
                 type={showResetPassword ? 'text' : 'password'}
                 required
-                minLength={8}
+                minLength={PASSWORD_MIN_LENGTH}
                 value={resetConfirmPassword}
                 onChange={(e) => setResetConfirmPassword(e.target.value)}
                 placeholder="Confirm new password"

@@ -100,14 +100,14 @@ export class PlatformDeveloperService {
     return this.store.listAdminAuditLogs(limit);
   }
 
-  onboardTenant(
+  async onboardTenant(
     actor: TenantUser,
     raw: DeveloperOnboardTenantPayload
-  ): {
+  ): Promise<{
     tenant: Tenant;
     adminUser: { fullName: string; email: string; oneTimePassword: string };
     auditEntry: AdminAuditEntry;
-  } {
+  }> {
     const verified = this.assertDeveloperActor(actor);
 
     const name = typeof raw.name === 'string' ? raw.name.trim() : '';
@@ -237,7 +237,7 @@ export class PlatformDeveloperService {
       leadTeacherPhone: raw.adminPhone?.trim() || raw.contactPhone?.trim(),
     });
 
-    const provisionedAdmin = this.store.provisionTenantAdminAccount(
+    const provisionedAdmin = await this.store.provisionTenantAdminAccount(
       tenant,
       adminFullName,
       finalAdminEmail,
@@ -351,10 +351,10 @@ export class PlatformDeveloperService {
     }));
   }
 
-  startImpersonation(
+  async startImpersonation(
     actor: TenantUser,
     payload: { tenantId: string; userId?: string; readOnly?: boolean }
-  ): { session: AuthSessionInfo; auditEntry: AdminAuditEntry } {
+  ): Promise<{ session: AuthSessionInfo; auditEntry: AdminAuditEntry }> {
     const verified = this.assertDeveloperActor(actor);
     const tenant = this.store.getTenantById(payload.tenantId);
     const tenantUsers = this.store.listUsersForTenant(tenant.id).filter((u) => u.status === 'Active');
@@ -378,10 +378,12 @@ export class PlatformDeveloperService {
     if (!targetUser) {
       const lead = tenant.teachers[0];
       const emailDomain = tenant.emailDomain || deriveSchoolEmailDomain(tenant.slug);
-      this.store.provisionTenantAdminAccount(
+      await this.store.provisionTenantAdminAccount(
         tenant,
         lead?.name || 'School Administrator',
-        lead?.email || `admin@${emailDomain}`
+        lead?.email || `admin@${emailDomain}`,
+        undefined,
+        true
       );
       targetUser = this.store.listUsersForTenant(tenant.id).find((u) => u.status === 'Active');
     }

@@ -52,6 +52,8 @@ import {
 import {
   DEFAULT_TENANT_BRANDING,
   getEffectiveUserModules,
+  PASSWORD_MIN_LENGTH,
+  validatePasswordStrength,
   type AuthSessionInfo,
   type NotificationItem,
   type TenantBranding,
@@ -229,13 +231,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!authSession || requiresPasswordChange) return;
-    saasApi.syncRoleSession(authSession.user.role).catch(() => {
-      // ignore initial sync error
-    });
-  }, [authSession, requiresPasswordChange]);
-
-  useEffect(() => {
     setPreviewBrandingOverride(null);
   }, [tenantId, activeModule]);
 
@@ -290,7 +285,8 @@ export default function App() {
 
   const { connected: wsConnected } = useTenantSocket(
     authSession && !requiresPasswordChange ? tenantId : '',
-    handleWsEvent
+    handleWsEvent,
+    authSession?.token
   );
 
   const unreadCount = useMemo(
@@ -379,8 +375,9 @@ export default function App() {
       setOtpError('Enter the 1-time password provided to you.');
       return;
     }
-    if (otpNewPassword.length < 8) {
-      setOtpError('New password must be at least 8 characters.');
+    const passwordPolicyErr = validatePasswordStrength(otpNewPassword);
+    if (passwordPolicyErr) {
+      setOtpError(passwordPolicyErr);
       return;
     }
     if (otpNewPassword !== otpConfirmPassword) {
@@ -546,14 +543,14 @@ export default function App() {
                 htmlFor="otp-new"
                 className="block text-xs font-medium text-slate-700 dark:text-slate-300"
               >
-                New Password (min. 8 characters)
+                New Password (min. {PASSWORD_MIN_LENGTH} chars, letter + number)
               </label>
               <div className="relative mt-1.5">
                 <input
                   id="otp-new"
                   type={otpShowPasswords ? 'text' : 'password'}
                   required
-                  minLength={8}
+                  minLength={PASSWORD_MIN_LENGTH}
                   value={otpNewPassword}
                   onChange={(e) => setOtpNewPassword(e.target.value)}
                   placeholder="Create a strong password"
@@ -581,7 +578,7 @@ export default function App() {
                 id="otp-confirm"
                 type={otpShowPasswords ? 'text' : 'password'}
                 required
-                minLength={8}
+                minLength={PASSWORD_MIN_LENGTH}
                 value={otpConfirmPassword}
                 onChange={(e) => setOtpConfirmPassword(e.target.value)}
                 placeholder="Repeat new password"

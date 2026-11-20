@@ -34,14 +34,6 @@ await build({
   logLevel: 'info',
 });
 
-// Copy bundled data/elimunest-db.json as initial fallback seed if present
-const bundledDbSrc = path.join(root, 'data', 'elimunest-db.json');
-if (fs.existsSync(bundledDbSrc)) {
-  const funcDataDir = path.join(funcDir, 'data');
-  fs.mkdirSync(funcDataDir, { recursive: true });
-  fs.copyFileSync(bundledDbSrc, path.join(funcDataDir, 'elimunest-db.json'));
-}
-
 fs.writeFileSync(
   path.join(funcDir, '.vc-config.json'),
   JSON.stringify(

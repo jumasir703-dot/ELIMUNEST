@@ -258,10 +258,10 @@ export class PlatformAdminService {
     return logs.filter((entry) => entry.tenantId === verified.tenantId);
   }
 
-  provisionTenant(
+  async provisionTenant(
     actor: AdminActor,
     rawInput: ProvisionTenantPayload
-  ): { tenant: Tenant; auditEntry: AdminAuditEntry } {
+  ): Promise<{ tenant: Tenant; auditEntry: AdminAuditEntry }> {
     const verifiedActor = this.assertAuthorized(actor);
     this.assertPlatformDeveloper(verifiedActor);
     const name = typeof rawInput?.name === 'string' ? rawInput.name.trim() : '';
@@ -332,10 +332,12 @@ export class PlatformAdminService {
       leadTeacherEmail: (rawInput.leadTeacherEmail || '').trim() || 'principal@school.ac.ke',
     });
 
-    this.repository.provisionTenantAdminAccount(
+    await this.repository.provisionTenantAdminAccount(
       tenant,
       tenant.teachers[0]?.name || 'Principal Admin',
-      tenant.teachers[0]?.email || ''
+      tenant.teachers[0]?.email || '',
+      undefined,
+      true
     );
 
     const auditEntry = this.recordAudit(
