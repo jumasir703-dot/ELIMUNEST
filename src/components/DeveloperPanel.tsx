@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Copy,
   Database,
+  Download,
   Eye,
   KeyRound,
   Layers,
@@ -23,6 +24,7 @@ import {
   Sliders,
   Sun,
   Terminal,
+  Upload,
   UserCheck,
   Users,
 } from 'lucide-react';
@@ -203,6 +205,10 @@ export function DeveloperPanel({
   const [impUserId, setImpUserId] = useState<string>('');
   const [impReadOnly, setImpReadOnly] = useState<boolean>(true);
   const [impLaunching, setImpLaunching] = useState<boolean>(false);
+
+  // Database Snapshot Export / Restore
+  const [dbBackupBusy, setDbBackupBusy] = useState<boolean>(false);
+  const dbRestoreInputRef = useRef<HTMLInputElement | null>(null);
 
   const isAuthorizedDeveloper = Boolean(
     authSession && !authSession.impersonator && isDeveloperRoleClient(authSession.user.role)
@@ -454,6 +460,48 @@ export function DeveloperPanel({
     }
   }
 
+  async function handleExportDatabaseSnapshot() {
+    setDbBackupBusy(true);
+    try {
+      const snapshot = await saasApi.devExportDatabase();
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = snapshot.fileName || `elimunest-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      onNotify('Downloaded full platform database snapshot (.json).', 'success');
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Database export failed.', 'error');
+    } finally {
+      setDbBackupBusy(false);
+    }
+  }
+
+  async function handleRestoreDatabaseFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setDbBackupBusy(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const res = await saasApi.devRestoreDatabase(parsed);
+      onNotify(
+        `Restored ${res.restoredTenants} tenants, ${res.restoredUsers} accounts, and ${res.restoredStudents} learners.`,
+        'success'
+      );
+      await loadControlPlaneData();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Database snapshot restore failed.', 'error');
+    } finally {
+      setDbBackupBusy(false);
+    }
+  }
+
   // CASE 1: Active Impersonation session (requires exiting impersonation before /dev)
   if (authSession?.impersonator) {
     return (
@@ -482,6 +530,14 @@ export function DeveloperPanel({
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 School Portal
+              </button>
+              <button
+                type="button"
+                onClick={() => onSignOut()}
+                className="flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                Sign Out
               </button>
               <button
                 type="button"
@@ -523,6 +579,14 @@ export function DeveloperPanel({
                   >
                     Continue in Tenant View
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => onSignOut()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    Sign Out
+                  </button>
                 </div>
               </div>
             </div>
@@ -540,6 +604,37 @@ export function DeveloperPanel({
   if (!isAuthorizedDeveloper) {
     return (
       <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+        <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          <div className="mx-auto flex h-16 max-w-4xl items-center justify-between px-4 sm:px-8">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 text-white dark:bg-blue-600">
+                <Terminal className="h-4 w-4" />
+              </div>
+              <span className="font-display text-sm font-bold tracking-tight">
+                elimuNest // DEV
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onExitToSchoolPortal}
+                className="flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                School Portal
+              </button>
+              <button
+                type="button"
+                onClick={() => onSignOut()}
+                className="flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                Sign Out
+              </button>
+            </div>
+          </div>
+        </header>
+
         <main className="mx-auto max-w-xl px-4 py-16">
           <div className="rounded-xl border border-red-200 bg-white p-8 dark:border-red-900/70 dark:bg-slate-900">
             <div className="flex items-center gap-2.5 text-red-600 dark:text-red-400">
@@ -692,6 +787,14 @@ export function DeveloperPanel({
               className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 lg:hidden dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               School Portal
+            </button>
+            <button
+              type="button"
+              onClick={() => onSignOut()}
+              className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>Sign Out</span>
             </button>
             <button
               type="button"
@@ -990,21 +1093,81 @@ export function DeveloperPanel({
                     </div>
                   </div>
 
+                  {/* Storage Durability & Snapshot Controls Banner */}
+                  {telemetry.database.persistentStorage === false && (
+                    <div className="rounded-xl border border-amber-300 bg-amber-50/80 px-5 py-4 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex items-start gap-2.5">
+                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                          <div>
+                            <p className="font-semibold">
+                              Ephemeral Deployment Storage Active ({telemetry.database.storageMode})
+                            </p>
+                            <p className="mt-0.5 text-[11px] leading-relaxed text-amber-900/90 dark:text-amber-200/90">
+                              On serverless instances without <span className="font-mono">DATA_DIR</span> or{' '}
+                              <span className="font-mono">KV_REST_API_URL</span> +{' '}
+                              <span className="font-mono">KV_REST_API_TOKEN</span>, pushing new code resets{' '}
+                              <span className="font-mono">/tmp</span>. Set those env vars (and{' '}
+                              <span className="font-mono">AUTH_SESSION_SECRET</span>) or export a DB snapshot before redeploying.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleExportDatabaseSnapshot}
+                          disabled={dbBackupBusy}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:bg-slate-900 dark:text-amber-200"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Export DB Backup
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Database Storage Breakdown + Developer Audit Feed */}
                   <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
                     <div className="rounded-xl border border-slate-200 bg-white xl:col-span-7 dark:border-slate-800 dark:bg-slate-900">
-                      <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800">
                         <div>
                           <h2 className="font-display text-sm font-bold">
                             Database Collections & Record Size Breakdown
                           </h2>
                           <p className="text-xs text-slate-500 dark:text-slate-400">
-                            {telemetry.database.engine} · {telemetry.database.filePathName}
+                            {telemetry.database.engine} · {telemetry.database.storageMode || 'Local JSON Store'} ·{' '}
+                            {telemetry.database.filePathName} ·{' '}
+                            <span className="font-mono tabular-nums">
+                              {formatBytes(telemetry.database.serializedBytes)} raw JSON
+                            </span>
                           </p>
                         </div>
-                        <span className="font-mono text-xs font-semibold tabular-nums">
-                          {formatBytes(telemetry.database.serializedBytes)} raw JSON
-                        </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            ref={dbRestoreInputRef}
+                            type="file"
+                            accept=".json,application/json"
+                            onChange={handleRestoreDatabaseFile}
+                            className="hidden"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleExportDatabaseSnapshot}
+                            disabled={dbBackupBusy}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            Export Snapshot
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => dbRestoreInputRef.current?.click()}
+                            disabled={dbBackupBusy}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                          >
+                            <Upload className="h-3.5 w-3.5" />
+                            Restore Snapshot
+                          </button>
+                        </div>
                       </div>
                       <div className="max-h-96 overflow-y-auto">
                         <table className="w-full text-left text-xs">

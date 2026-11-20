@@ -1594,6 +1594,37 @@ export const saasApi = {
   getDevAuditLogs(limit = 80) {
     return devApiRequest<{ logs: AdminAuditEntry[] }>(`/api/dev/audit-logs?limit=${limit}`);
   },
+
+  getSystemHealth() {
+    return apiRequest<{
+      status: string;
+      tenants: number;
+      sessionSecretConfigured: boolean;
+      persistentStorage: boolean;
+      kvConfigured?: boolean;
+      storageMode?: string;
+    }>('/api/health', { skipAuth: true });
+  },
+
+  devExportDatabase() {
+    return devApiRequest<{
+      exportedAt: string;
+      fileName: string;
+      state: unknown;
+    }>('/api/dev/database/export');
+  },
+
+  devRestoreDatabase(snapshot: unknown) {
+    return devApiRequest<{
+      restoredTenants: number;
+      restoredUsers: number;
+      restoredStudents: number;
+      auditEntry: AdminAuditEntry;
+    }>('/api/dev/database/restore', {
+      method: 'POST',
+      body: JSON.stringify(snapshot),
+    });
+  },
 };
 
 export function useTenantSocket(

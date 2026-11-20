@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   AlertTriangle,
@@ -26,9 +26,19 @@ import {
   type UserRole,
 } from '../shared/types';
 
+export interface ExamEntryPrefillTarget {
+  cycleId?: string;
+  examTitle?: string;
+  grade: string;
+  stream: string;
+  subject: string;
+  requestKey: number;
+}
+
 interface ExamResultsEntryPanelProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
+  prefillTarget?: ExamEntryPrefillTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
   onViewResults?: (cycleId: string, grade: string) => void;
@@ -82,6 +92,7 @@ function normalizeHeader(h: string): string {
 export function ExamResultsEntryPanel({
   workspace,
   currentRole,
+  prefillTarget,
   onRefresh,
   onNotify,
   onViewResults,
@@ -108,6 +119,36 @@ export function ExamResultsEntryPanel({
   const [saving, setSaving] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!prefillTarget) return;
+    setSelectedGrade(prefillTarget.grade);
+    setSelectedStream(prefillTarget.stream);
+    setSelectedSubject(prefillTarget.subject);
+    if (prefillTarget.examTitle) {
+      const lower = prefillTarget.examTitle.toLowerCase();
+      if (lower.includes('opening')) setSelectedExamType('Term Opening Exam');
+      else if (lower.includes('mid-term') || lower.includes('midterm')) setSelectedExamType('Mid-Term Exam');
+      else if (lower.includes('end of term')) setSelectedExamType('End of Term Exam');
+      else setSelectedExamType(prefillTarget.examTitle);
+    }
+    const assignedTeacher = tenant.teachers.find((t) =>
+      getTeacherAssignedSubjectsForCohort(
+        tenant,
+        t,
+        prefillTarget.grade,
+        prefillTarget.stream,
+        timetable
+      ).some((s) => s.toLowerCase() === prefillTarget.subject.toLowerCase())
+    );
+    if (assignedTeacher) {
+      setSelectedTeacherId(assignedTeacher.id);
+    } else if (isAdminRole) {
+      setSelectedTeacherId('__ADMIN__');
+    }
+    setStagedEntries({});
+    setExcelSummary(null);
+  }, [prefillTarget?.requestKey]);
 
   const availableStreams = useMemo(
     () => getStreamsForGrade(tenant, selectedGrade),

@@ -117,12 +117,13 @@ import {
 import {
   generateOneTimePassword,
   hashPassword,
+  isSessionSecretConfigured,
   verifyPassword,
 } from './middleware/adminAuth.ts';
 
 // Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
 // On Vercel the filesystem is read-only except /tmp, which is per-instance and
-// temporary: fine for a demo, not for real data.
+// temporary unless backed by KV_REST_API_URL + KV_REST_API_TOKEN (or UPSTASH_REDIS_REST_*).
 const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : process.env.VERCEL
@@ -130,6 +131,59 @@ const DATA_DIR = process.env.DATA_DIR
   : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'elimunest-db.json');
 const LEGACY_DB_FILE = path.join(DATA_DIR, 'scholara-db.json');
+const BUNDLED_DB_FILE = path.resolve(process.cwd(), 'data', 'elimunest-db.json');
+const KV_STATE_KEY = process.env.ELIMUNEST_KV_KEY?.trim() || 'elimunest:db:v1';
+
+interface KvRestConfig {
+  url: string;
+  token: string;
+}
+
+function resolveKvConfig(): KvRestConfig | null {
+  const url = (
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  const token = (
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    ''
+  ).trim();
+  return url && token ? { url, token } : null;
+}
+
+export function isKvConfigured(): boolean {
+  return resolveKvConfig() !== null;
+}
+
+export function getStoragePersistenceMeta(): {
+  storageMode: 'Persistent Disk' | 'KV Durable Sync' | 'Ephemeral (/tmp)' | 'Local JSON Store';
+  persistentStorage: boolean;
+  kvConfigured: boolean;
+  sessionSecretConfigured: boolean;
+  dataDir: string;
+} {
+  const kvConfigured = isKvConfigured();
+  const isVercel = Boolean(process.env.VERCEL);
+  const hasExplicitDataDir = Boolean(process.env.DATA_DIR?.trim());
+  const storageMode = kvConfigured
+    ? 'KV Durable Sync'
+    : hasExplicitDataDir
+    ? 'Persistent Disk'
+    : isVercel
+    ? 'Ephemeral (/tmp)'
+    : 'Local JSON Store';
+  return {
+    storageMode,
+    persistentStorage: !isVercel || hasExplicitDataDir || kvConfigured,
+    kvConfigured,
+    sessionSecretConfigured: isSessionSecretConfigured(),
+    dataDir: DATA_DIR,
+  };
+}
 
 const LEGACY_SUBJECT_ALIASES: Record<string, string> = {
   'CRE / IRE': 'Religious Education (CRE / IRE / HRE)',
@@ -184,6 +238,8 @@ export class TenantStore {
     string,
     { code: string; expiresAt: number; attempts: number }
   >();
+  private kvHydrationPromise: Promise<void> | null = null;
+  private kvSyncChain: Promise<void> = Promise.resolve();
 
   constructor(onBroadcast?: (tenantId: string, eventType: string, payload: unknown) => void) {
     this.onBroadcast = onBroadcast;
@@ -194,46 +250,207 @@ export class TenantStore {
     this.onBroadcast = fn;
   }
 
+  async ensureHydrated(): Promise<void> {
+    const kv = resolveKvConfig();
+    if (!kv) return;
+    if (!this.kvHydrationPromise) {
+      this.kvHydrationPromise = (async () => {
+        try {
+          const resp = await fetch(`${kv.url}/get/${encodeURIComponent(KV_STATE_KEY)}`, {
+            headers: { Authorization: `Bearer ${kv.token}` },
+          });
+          if (!resp.ok) return;
+          const body = (await resp.json()) as { result?: string | null };
+          if (typeof body?.result === 'string' && body.result.trim()) {
+            const parsed = JSON.parse(body.result) as DatabaseState;
+            if (parsed && Array.isArray(parsed.tenants) && parsed.tenants.length > 0) {
+              const { state: migrated } = this.migrateAndNormalizeState(parsed, false);
+              this.state = migrated;
+              this.writeDiskOnly(migrated);
+              return;
+            }
+          }
+          // KV has no snapshot yet: seed it from current state
+          await this.writeStateToKv(this.state);
+        } catch (err) {
+          console.warn('[elimuNest] Remote KV hydration skipped:', err);
+        }
+      })();
+    }
+    await this.kvHydrationPromise;
+  }
+
+  async flushRemotePersist(): Promise<void> {
+    try {
+      await this.kvSyncChain;
+    } catch {
+      // ignore remote sync wait errors
+    }
+  }
+
+  private async writeStateToKv(nextState: DatabaseState): Promise<void> {
+    const kv = resolveKvConfig();
+    if (!kv) return;
+    try {
+      const serialized = JSON.stringify(nextState);
+      await fetch(`${kv.url}/set/${encodeURIComponent(KV_STATE_KEY)}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${kv.token}`,
+          'Content-Type': 'text/plain',
+        },
+        body: serialized,
+      });
+    } catch (err) {
+      console.warn('[elimuNest] Remote KV persist failed:', err);
+    }
+  }
+
   private loadOrInitialize(): DatabaseState {
     try {
-      const sourceFile = fs.existsSync(DB_FILE)
-        ? DB_FILE
-        : fs.existsSync(LEGACY_DB_FILE)
-        ? LEGACY_DB_FILE
-        : null;
+      const candidateFiles = [
+        DB_FILE,
+        LEGACY_DB_FILE,
+        BUNDLED_DB_FILE !== DB_FILE ? BUNDLED_DB_FILE : '',
+      ].filter(Boolean);
+      const sourceFile = candidateFiles.find((filePath) => fs.existsSync(filePath)) || null;
       if (sourceFile) {
         const raw = fs.readFileSync(sourceFile, 'utf-8');
         const parsed = JSON.parse(raw) as DatabaseState;
-        if (
-          parsed &&
-          Array.isArray(parsed.tenants) &&
-          parsed.tenants.length > 0 &&
-          Array.isArray(parsed.students) &&
-          parsed.students.every((s) => typeof s.upi === 'string' && s.upi.length > 0) &&
-          parsed.tenants.every((t) => Array.isArray(t.grades) && t.grades.includes('Playgroup'))
-        ) {
-          let dirty = sourceFile !== DB_FILE;
+        if (parsed && Array.isArray(parsed.tenants) && parsed.tenants.length > 0) {
+          const { state: migrated, dirty } = this.migrateAndNormalizeState(
+            parsed,
+            sourceFile !== DB_FILE
+          );
+          if (dirty) {
+            this.persist(migrated);
+          }
+          return migrated;
+        }
+      }
+    } catch (err) {
+      console.warn('Database read/parse issue; backing up before re-initializing:', err);
+      try {
+        if (fs.existsSync(DB_FILE)) {
+          fs.copyFileSync(DB_FILE, `${DB_FILE}.corrupt.${Date.now()}`);
+        }
+      } catch {
+        // ignore backup error
+      }
+    }
+    const seed = createSeedDatabase();
+    this.persist(seed);
+    return seed;
+  }
 
-          // Normalize legacy subject labels in timetable & examResults
-          parsed.timetable.forEach((slot) => {
-            if (LEGACY_SUBJECT_ALIASES[slot.subject]) {
-              slot.subject = LEGACY_SUBJECT_ALIASES[slot.subject];
-              dirty = true;
-            }
-          });
-          parsed.examResults.forEach((res) => {
-            if (LEGACY_SUBJECT_ALIASES[res.subject]) {
-              res.subject = LEGACY_SUBJECT_ALIASES[res.subject];
-              dirty = true;
-            }
-          });
+  private migrateAndNormalizeState(
+    parsed: DatabaseState,
+    initiallyDirty: boolean
+  ): { state: DatabaseState; dirty: boolean } {
+    let dirty = initiallyDirty;
 
-          parsed.tenants.forEach((t) => {
-            if (!t.gradeStreams) {
-              const fallback = t.sections.length > 0 ? t.sections : ['A'];
-              t.gradeStreams = Object.fromEntries(t.grades.map((g) => [g, [...fallback]]));
-              dirty = true;
-            }
+    if (!Array.isArray(parsed.students)) {
+      parsed.students = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.admissions)) {
+      parsed.admissions = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.timetable)) {
+      parsed.timetable = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.attendance)) {
+      parsed.attendance = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.staffAttendance)) {
+      parsed.staffAttendance = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.leaveOutChits)) {
+      parsed.leaveOutChits = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.examCycles)) {
+      parsed.examCycles = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.examResults)) {
+      parsed.examResults = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.feeStructures)) {
+      parsed.feeStructures = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.invoices)) {
+      parsed.invoices = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.announcements)) {
+      parsed.announcements = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.messages)) {
+      parsed.messages = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.notifications)) {
+      parsed.notifications = [];
+      dirty = true;
+    }
+
+    // Backfill missing student UPI codes without ever discarding existing tenants/learners
+    parsed.students.forEach((s, idx) => {
+      if (typeof s.upi !== 'string' || !s.upi.trim()) {
+        const cleanCode = (s.studentCode || `${idx + 1001}`).replace(/[^A-Z0-9]/gi, '').toUpperCase();
+        s.upi = `KEN-${cleanCode || `LRN${idx + 1}`}`;
+        dirty = true;
+      }
+    });
+
+    // Normalize legacy subject labels in timetable & examResults
+    parsed.timetable.forEach((slot) => {
+      if (LEGACY_SUBJECT_ALIASES[slot.subject]) {
+        slot.subject = LEGACY_SUBJECT_ALIASES[slot.subject];
+        dirty = true;
+      }
+    });
+    parsed.examResults.forEach((res) => {
+      if (LEGACY_SUBJECT_ALIASES[res.subject]) {
+        res.subject = LEGACY_SUBJECT_ALIASES[res.subject];
+        dirty = true;
+      }
+    });
+
+    parsed.tenants.forEach((t) => {
+      if (!Array.isArray(t.grades) || t.grades.length === 0) {
+        t.grades = [...KENYAN_CBC_GRADES];
+        dirty = true;
+      }
+      if (!Array.isArray(t.sections) || t.sections.length === 0) {
+        t.sections = ['A', 'B'];
+        dirty = true;
+      }
+      if (!Array.isArray(t.subjects)) {
+        t.subjects = [...KENYAN_CBC_SUBJECTS];
+        dirty = true;
+      }
+      if (!Array.isArray(t.teachers)) {
+        t.teachers = [];
+        dirty = true;
+      }
+      if (!Array.isArray(t.rooms)) {
+        t.rooms = ['Room 101', 'Room 102'];
+        dirty = true;
+      }
+      if (!t.gradeStreams) {
+        const fallback = t.sections.length > 0 ? t.sections : ['A'];
+        t.gradeStreams = Object.fromEntries(t.grades.map((g) => [g, [...fallback]]));
+        dirty = true;
+      }
             // Rename legacy subject tokens cleanly
             t.subjects = Array.from(
               new Set(t.subjects.map((sub) => LEGACY_SUBJECT_ALIASES[sub] || sub))
@@ -763,27 +980,68 @@ export class TenantStore {
             });
           }
 
-          if (dirty) {
-            this.persist(parsed);
-          }
-          return parsed;
-        }
-      }
-    } catch (err) {
-      console.warn('Initializing fresh database state:', err);
-    }
-    const seed = createSeedDatabase();
-    this.persist(seed);
-    return seed;
+    return { state: parsed, dirty };
   }
 
-  private persist(nextState: DatabaseState = this.state) {
+  private writeDiskOnly(nextState: DatabaseState) {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     const tmpFile = `${DB_FILE}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(nextState, null, 2), 'utf-8');
     fs.renameSync(tmpFile, DB_FILE);
+  }
+
+  private persist(nextState: DatabaseState = this.state) {
+    this.writeDiskOnly(nextState);
+    if (isKvConfigured()) {
+      this.kvSyncChain = this.kvSyncChain.then(() => this.writeStateToKv(nextState));
+    }
+  }
+
+  exportDatabaseState(): { exportedAt: string; fileName: string; state: DatabaseState } {
+    return {
+      exportedAt: new Date().toISOString(),
+      fileName: `elimunest-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      state: JSON.parse(JSON.stringify(this.state)) as DatabaseState,
+    };
+  }
+
+  restoreDatabaseState(rawInput: unknown): {
+    restoredTenants: number;
+    restoredUsers: number;
+    restoredStudents: number;
+  } {
+    const candidate =
+      rawInput && typeof rawInput === 'object' && 'state' in rawInput
+        ? (rawInput as { state: unknown }).state
+        : rawInput;
+    if (
+      !candidate ||
+      typeof candidate !== 'object' ||
+      !Array.isArray((candidate as DatabaseState).tenants) ||
+      (candidate as DatabaseState).tenants.length === 0
+    ) {
+      throw new ConflictError(
+        'Invalid database snapshot: expected a JSON export containing a non-empty tenants array.',
+        400
+      );
+    }
+
+    const cloned = JSON.parse(JSON.stringify(candidate)) as DatabaseState;
+    const { state: migrated } = this.migrateAndNormalizeState(cloned, true);
+    this.state = migrated;
+    this.persist(migrated);
+
+    migrated.tenants.forEach((t) => {
+      this.syncTenant(t.id, 'database:restored');
+    });
+
+    return {
+      restoredTenants: migrated.tenants.length,
+      restoredUsers: (migrated.users || []).length,
+      restoredStudents: migrated.students.length,
+    };
   }
 
   private pushNotification(
@@ -1021,6 +1279,7 @@ export class TenantStore {
       (u) => u.tenantId !== 'platform'
     ).length;
     const mem = process.memoryUsage();
+    const persistenceMeta = getStoragePersistenceMeta();
 
     return {
       generatedAt: new Date().toISOString(),
@@ -1042,11 +1301,17 @@ export class TenantStore {
         totalTeachers,
       },
       database: {
-        engine: 'JSON File Store (Atomic Write)',
+        engine: persistenceMeta.kvConfigured
+          ? 'JSON Store + KV Durable Sync'
+          : 'JSON File Store (Atomic Write)',
         filePathName: path.basename(DB_FILE),
         diskBytes,
         serializedBytes,
         totalRecords,
+        storageMode: persistenceMeta.storageMode,
+        persistentStorage: persistenceMeta.persistentStorage,
+        kvConfigured: persistenceMeta.kvConfigured,
+        sessionSecretConfigured: persistenceMeta.sessionSecretConfigured,
         collections,
       },
       runtime: {

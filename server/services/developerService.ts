@@ -443,4 +443,30 @@ export class PlatformDeveloperService {
     );
     return { auditEntry };
   }
+
+  exportDatabaseSnapshot(actor: TenantUser) {
+    this.assertDeveloperActor(actor);
+    return this.store.exportDatabaseState();
+  }
+
+  restoreDatabaseSnapshot(
+    actor: TenantUser,
+    rawSnapshot: unknown
+  ): {
+    restoredTenants: number;
+    restoredUsers: number;
+    restoredStudents: number;
+    auditEntry: AdminAuditEntry;
+  } {
+    const verified = this.assertDeveloperActor(actor);
+    const summary = this.store.restoreDatabaseState(rawSnapshot);
+    const auditEntry = this.recordAudit(
+      verified,
+      'RESTORE_DATABASE',
+      'platform',
+      'Platform Database Snapshot',
+      `Developer restored full database snapshot (${summary.restoredTenants} tenants, ${summary.restoredUsers} accounts, ${summary.restoredStudents} learners).`
+    );
+    return { ...summary, auditEntry };
+  }
 }

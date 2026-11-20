@@ -1,8 +1,12 @@
 import { useMemo, useState } from 'react';
+import * as XLSX from 'xlsx';
 import {
+  AlertTriangle,
   Award,
+  BarChart3,
   CheckCircle2,
   Copy,
+  Download,
   FileSpreadsheet,
   FileText,
   MessageCircle,
@@ -14,6 +18,14 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
+import {
+  buildBroadsheetRows,
+  buildGradeAnalyticsReport,
+  resolveSubjectTeacher,
+  shortenCycleTitle,
+  sortExamCyclesChronologically,
+} from '../lib/examAnalytics';
 import { computeClientGrade, formatDateShort } from '../lib/format';
 import {
   buildReportCardWhatsAppMessage,
@@ -23,137 +35,29 @@ import {
 import {
   ALL_REGISTERED_SUBJECTS_OPTION,
   CBE_GRADING_SCALE,
-  CLASS_TEACHER_SUBJECT_TOKEN,
   getAssessmentGradingSystem,
   getClusterForGrade,
+  getStreamsForGrade,
   getSubjectsForGrade,
   is844FormFourGrade,
   KCSE_844_GRADING_SCALE,
   KENYAN_CBC_CLUSTERS,
   STANDARD_ASSESSMENT_TYPES,
-  type Student,
-  type TeacherProfile,
-  type Tenant,
   type TenantWorkspaceData,
-  type TimetableSlot,
   type UserRole,
 } from '../shared/types';
-import { ExamResultsEntryPanel } from './ExamResultsEntryPanel';
+import {
+  ExamResultsEntryPanel,
+  type ExamEntryPrefillTarget,
+} from './ExamResultsEntryPanel';
 import { TenantDocumentHeader } from './TenantDocumentHeader';
+import { ZerakiExamAnalyticsPanel } from './ZerakiExamAnalyticsPanel';
 
 interface ExamsModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
-}
-
-function getCycleOrderRank(title: string): number {
-  const lower = title.toLowerCase();
-  if (/opening/.test(lower)) return 0;
-  if (/mid[- ]?term/.test(lower)) return 1;
-  if (/end\s*of\s*term|final/.test(lower)) return 2;
-  return 3;
-}
-
-function shortenCycleTitle(title: string): string {
-  return title
-    .replace(/\bTerm\s+(\d+)\b/i, 'T$1')
-    .replace(/\bExamination\b|\bExam\b/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function deriveTeacherInitials(fullName?: string): string {
-  if (!fullName) return '—';
-  const cleaned = fullName
-    .trim()
-    .replace(/\b(dr|prof|mr|mrs|ms|miss|rev|eng|tr|sir|madam)\.?\s+/gi, ' ')
-    .replace(/[^a-zA-Z\s-]/g, ' ')
-    .trim();
-  if (!cleaned) return '—';
-  const parts = cleaned.split(/[\s-]+/).filter(Boolean);
-  if (parts.length === 0) return '—';
-  return `${parts
-    .slice(0, 3)
-    .map((part) => part[0].toUpperCase())
-    .join('.')}.`;
-}
-
-function resolveSubjectTeacher(
-  tenant: Pick<Tenant, 'teachers'>,
-  timetable: TimetableSlot[],
-  student: Pick<Student, 'grade' | 'section'>,
-  subject: string
-): { name: string; initials: string } {
-  const gNorm = student.grade.trim().toLowerCase();
-  const sNorm = student.section.trim().toLowerCase();
-  const subNorm = subject.trim().toLowerCase();
-
-  // 1. Direct timetable slot match for this student's grade, stream & subject
-  const slotMatch = timetable.find(
-    (slot) =>
-      slot.grade.trim().toLowerCase() === gNorm &&
-      slot.section.trim().toLowerCase() === sNorm &&
-      slot.subject.trim().toLowerCase() === subNorm &&
-      slot.teacherName
-  );
-  if (slotMatch) {
-    return {
-      name: slotMatch.teacherName,
-      initials: deriveTeacherInitials(slotMatch.teacherName),
-    };
-  }
-
-  const teachers: TeacherProfile[] = tenant.teachers || [];
-
-  // 2. Teacher explicitly assigned to this grade + stream + subject
-  const explicitCohortMatch = teachers.find((t) =>
-    (t.assignedClasses || []).some(
-      (c) =>
-        c.grade.trim().toLowerCase() === gNorm &&
-        (c.section.trim().toLowerCase() === sNorm ||
-          c.section.trim().toLowerCase() === 'all streams') &&
-        ((c.subject && c.subject.trim().toLowerCase() === subNorm) ||
-          c.subject === CLASS_TEACHER_SUBJECT_TOKEN ||
-          (!c.subject &&
-            (t.subjects.some((s) => s.trim().toLowerCase() === subNorm) ||
-              t.subjects.includes(CLASS_TEACHER_SUBJECT_TOKEN))))
-    )
-  );
-  if (explicitCohortMatch) {
-    return {
-      name: explicitCohortMatch.name,
-      initials: deriveTeacherInitials(explicitCohortMatch.name),
-    };
-  }
-
-  // 3. Teacher open to all classes (assignedClasses empty) teaching this subject
-  const openSubjectTeacher = teachers.find(
-    (t) =>
-      (!t.assignedClasses || t.assignedClasses.length === 0) &&
-      (t.subjects.some((s) => s.trim().toLowerCase() === subNorm) ||
-        t.subjects.includes(CLASS_TEACHER_SUBJECT_TOKEN))
-  );
-  if (openSubjectTeacher) {
-    return {
-      name: openSubjectTeacher.name,
-      initials: deriveTeacherInitials(openSubjectTeacher.name),
-    };
-  }
-
-  // 4. Any teacher configured with this subject
-  const anySubjectTeacher = teachers.find((t) =>
-    t.subjects.some((s) => s.trim().toLowerCase() === subNorm)
-  );
-  if (anySubjectTeacher) {
-    return {
-      name: anySubjectTeacher.name,
-      initials: deriveTeacherInitials(anySubjectTeacher.name),
-    };
-  }
-
-  return { name: 'Unassigned', initials: '—' };
 }
 
 function getGradeBadgeColor(letterGrade: string, is844: boolean): string {
@@ -194,22 +98,22 @@ export function ExamsModule({
   const whatsappDispatches = workspace.whatsappDispatches || [];
   const defaultGrade = tenant.grades.includes('Grade 9') ? 'Grade 9' : tenant.grades[0] || 'Grade 9';
 
-  const orderedCycles = useMemo(() => {
-    return [...examCycles].sort((a, b) => {
-      const termCmp = a.term.localeCompare(b.term);
-      if (termCmp !== 0) return termCmp;
-      const rankDiff = getCycleOrderRank(a.title) - getCycleOrderRank(b.title);
-      if (rankDiff !== 0) return rankDiff;
-      return a.startDate.localeCompare(b.startDate);
-    });
-  }, [examCycles]);
+  const orderedCycles = useMemo(
+    () => sortExamCyclesChronologically(examCycles),
+    [examCycles]
+  );
 
-  const [activeTab, setActiveTab] = useState<'results' | 'entry'>('results');
+  const [activeTab, setActiveTab] = useState<'results' | 'analytics' | 'entry'>('results');
   const [selectedCycleId, setSelectedCycleId] = useState<string>(
     orderedCycles.find((c) => /mid[- ]?term/i.test(c.title))?.id || orderedCycles[0]?.id || ''
   );
   const [selectedGrade, setSelectedGrade] = useState<string>(defaultGrade);
+  const [selectedStream, setSelectedStream] = useState<string>('All');
   const [selectedSubject, setSelectedSubject] = useState<string>(ALL_REGISTERED_SUBJECTS_OPTION);
+  const [kcseBest7Mode, setKcseBest7Mode] = useState<boolean>(true);
+  const [entryPrefillTarget, setEntryPrefillTarget] = useState<ExamEntryPrefillTarget | null>(
+    null
+  );
   const [draftScores, setDraftScores] = useState<Record<string, string>>({});
   const [savingStudentId, setSavingStudentId] = useState<string | null>(null);
   const [reportCardStudentId, setReportCardStudentId] = useState<string | null>(null);
@@ -218,8 +122,18 @@ export function ExamsModule({
   const [whatsAppCustomNote, setWhatsAppCustomNote] = useState('');
   const [showWhatsAppQueueModal, setShowWhatsAppQueueModal] = useState(false);
   const [queueSearch, setQueueSearch] = useState('');
+  const [queueStreamFilter, setQueueStreamFilter] = useState<string>('All');
   const [queueSelectedStudentId, setQueueSelectedStudentId] = useState<string | null>(null);
   const [showCycleModal, setShowCycleModal] = useState(false);
+
+  const availableStreams = useMemo(
+    () => getStreamsForGrade(tenant, selectedGrade),
+    [tenant, selectedGrade]
+  );
+  const effectiveStreamFilter =
+    selectedStream === 'All' || availableStreams.includes(selectedStream)
+      ? selectedStream
+      : 'All';
 
   const levelSubjects = useMemo(
     () => getSubjectsForGrade(tenant, selectedGrade),
@@ -260,9 +174,21 @@ export function ExamsModule({
     [orderedCycles, selectedCycleId]
   );
 
+  const previousCycle = useMemo(() => {
+    if (!activeCycle) return null;
+    const idx = orderedCycles.findIndex((c) => c.id === activeCycle.id);
+    return idx > 0 ? orderedCycles[idx - 1] : null;
+  }, [orderedCycles, activeCycle]);
+
   const gradeStudents = useMemo(
-    () => students.filter((s) => s.grade === selectedGrade && s.status === 'Active'),
-    [students, selectedGrade]
+    () =>
+      students.filter(
+        (s) =>
+          s.grade === selectedGrade &&
+          s.status === 'Active' &&
+          (effectiveStreamFilter === 'All' || s.section === effectiveStreamFilter)
+      ),
+    [students, selectedGrade, effectiveStreamFilter]
   );
 
   // Build single-subject gradebook rows with CBE / 8-4-4 grades & ranking
@@ -305,64 +231,68 @@ export function ExamsModule({
     }));
   }, [isAllSubjectsMode, gradeStudents, examResults, activeCycle, effectiveSubject, draftScores]);
 
-  // Build All Registered Subjects mark-summation rows (sum marks across subjects, grade & rank)
+  // Build All Registered Subjects mark-summation rows (with deviation, KCSE Best-7 & stream ranking)
   const allSubjectsRankedRows = useMemo(() => {
     const cycleId = activeCycle?.id || '';
-    const base = gradeStudents.map((stu) => {
-      const stuResults = examResults.filter(
-        (r) => r.examCycleId === cycleId && r.studentId === stu.id
-      );
-      const registeredSubjects = Array.from(
-        new Set([...levelSubjects, ...stuResults.map((r) => r.subject)])
-      );
-
-      const subjectsSat = stuResults.length;
-      const totalScore = stuResults.reduce((sum, item) => sum + item.score, 0);
-      const maxPossible = stuResults.reduce((sum, item) => sum + (item.maxScore || 100), 0);
-      const meanScore =
-        maxPossible > 0 ? Math.round((totalScore / maxPossible) * 1000) / 10 : null;
-      const overallGradeInfo =
-        meanScore !== null ? computeClientGrade(meanScore, stu.grade) : null;
-
-      return {
-        student: stu,
-        subjectsSat,
-        registeredCount: registeredSubjects.length,
-        totalScore,
-        maxPossible,
-        meanScore,
-        overallGrade: overallGradeInfo?.letterGrade || '—',
-        overallPoints: overallGradeInfo?.gpaPoints ?? null,
-      };
+    const fullGradeStudents = students.filter(
+      (s) => s.grade === selectedGrade && s.status === 'Active'
+    );
+    const broadsheet = buildBroadsheetRows({
+      students: fullGradeStudents,
+      examResults,
+      levelSubjects,
+      activeCycleId: cycleId,
+      baselineCycleId: previousCycle?.id || null,
+      grade: selectedGrade,
     });
 
-    // Sort by summed marks descending, then grade points & mean percentage descending
-    const sorted = [...base].sort((a, b) => {
-      if ((a.subjectsSat > 0) !== (b.subjectsSat > 0)) {
-        return a.subjectsSat > 0 ? -1 : 1;
-      }
-      const totalDiff = b.totalScore - a.totalScore;
-      if (totalDiff !== 0) return totalDiff;
-      const ptsDiff = (b.overallPoints ?? -1) - (a.overallPoints ?? -1);
-      if (ptsDiff !== 0) return ptsDiff;
-      const meanDiff = (b.meanScore ?? -1) - (a.meanScore ?? -1);
-      if (meanDiff !== 0) return meanDiff;
-      return a.student.fullName.localeCompare(b.student.fullName);
-    });
+    const filtered =
+      effectiveStreamFilter === 'All'
+        ? broadsheet
+        : broadsheet.filter((r) => r.student.section === effectiveStreamFilter);
 
-    let lastKey = '';
-    let lastRank = 0;
-    return sorted.map((row, idx) => {
-      if (row.subjectsSat === 0) {
-        return { ...row, rank: null as number | null };
-      }
-      const rankKey = `${row.totalScore}::${row.overallPoints ?? 0}`;
-      const rank = rankKey === lastKey ? lastRank : idx + 1;
-      lastKey = rankKey;
-      lastRank = rank;
-      return { ...row, rank };
-    });
-  }, [gradeStudents, examResults, activeCycle, levelSubjects]);
+    const useBest7Ranking = is844 && kcseBest7Mode;
+    const ordered = useBest7Ranking
+      ? [...filtered].sort((a, b) => {
+          if ((a.subjectsSat > 0) !== (b.subjectsSat > 0)) return a.subjectsSat > 0 ? -1 : 1;
+          const ptsDiff = (b.kcseBest7?.totalPoints ?? -1) - (a.kcseBest7?.totalPoints ?? -1);
+          if (ptsDiff !== 0) return ptsDiff;
+          return (b.totalScore ?? 0) - (a.totalScore ?? 0);
+        })
+      : filtered;
+
+    return ordered.map((row) => ({
+      ...row,
+      displayRank:
+        effectiveStreamFilter !== 'All'
+          ? row.streamRank
+          : useBest7Ranking
+          ? row.best7Rank ?? row.rank
+          : row.rank,
+    }));
+  }, [
+    students,
+    selectedGrade,
+    examResults,
+    activeCycle,
+    previousCycle,
+    levelSubjects,
+    effectiveStreamFilter,
+    is844,
+    kcseBest7Mode,
+  ]);
+
+  const gradeAnalyticsSummary = useMemo(
+    () =>
+      buildGradeAnalyticsReport({
+        workspace,
+        cycleId: activeCycle?.id || '',
+        baselineCycleId: previousCycle?.id || null,
+        grade: selectedGrade,
+        streamFilter: effectiveStreamFilter,
+      }),
+    [workspace, activeCycle?.id, previousCycle?.id, selectedGrade, effectiveStreamFilter]
+  );
 
   const classStats = useMemo(() => {
     const passCutoff = is844 ? 40 : 41; // 8-4-4 D+ (40%) or CBE ME2 (41%)
@@ -381,7 +311,10 @@ export function ExamsModule({
       return {
         mean,
         highest: topStudent.totalScore,
-        highestLabel: `${topStudent.totalScore} / ${topStudent.maxPossible} (${topStudent.overallGrade})`,
+        highestLabel:
+          is844 && kcseBest7Mode && topStudent.kcseBest7
+            ? `${topStudent.kcseBest7.totalPoints}/${topStudent.kcseBest7.maxPoints} pts (${topStudent.kcseBest7.meanGrade})`
+            : `${topStudent.totalScore} / ${topStudent.maxPossible} (${topStudent.overallGrade})`,
         passRate,
         count: ranked.length,
       };
@@ -404,7 +337,54 @@ export function ExamsModule({
       passRate,
       count: scored.length,
     };
-  }, [isAllSubjectsMode, allSubjectsRankedRows, singleSubjectRows, is844]);
+  }, [isAllSubjectsMode, allSubjectsRankedRows, singleSubjectRows, is844, kcseBest7Mode]);
+
+  function handleExportMeritListExcel() {
+    if (!activeCycle) return;
+    const scopeLabel =
+      effectiveStreamFilter === 'All' ? 'All Streams' : `Stream ${effectiveStreamFilter}`;
+
+    const rows = allSubjectsRankedRows.map((row) => {
+      const rec: Record<string, string | number> = {
+        Rank: row.displayRank ? `#${row.displayRank}` : '—',
+        'Adm No': row.student.studentCode,
+        'Student Name': row.student.fullName,
+        Stream: `Stream ${row.student.section}`,
+        'Subjects Sat': `${row.subjectsSat}/${row.registeredCount}`,
+        'Total Marks': row.subjectsSat > 0 ? `${row.totalScore}/${row.maxPossible}` : '—',
+        'Mean (%)': row.meanScore !== null ? row.meanScore : '—',
+        'Mean Grade': row.overallGrade,
+        [`Points (/${maxPoints})`]: row.meanPoints !== null ? row.meanPoints : '—',
+      };
+      if (is844) {
+        rec['KCSE Best-7 (/84)'] = row.kcseBest7 ? row.kcseBest7.totalPoints : '—';
+        rec['Best-7 Grade'] = row.kcseBest7 ? row.kcseBest7.meanGrade : '—';
+      }
+      rec['Dev vs Prior (%)'] =
+        row.meanDeviation !== null
+          ? row.meanDeviation > 0
+            ? `+${row.meanDeviation}%`
+            : `${row.meanDeviation}%`
+          : '—';
+      return rec;
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      wb,
+      createBrandedWorksheetFromObjects(
+        tenant,
+        `${activeCycle.title} — Merit List (${selectedGrade} · ${scopeLabel})`,
+        rows
+      ),
+      'Merit List'
+    );
+    const safeName = `${tenant.slug}-${activeCycle.title}-${selectedGrade}-${scopeLabel}-merit`
+      .replace(/[^a-zA-Z0-9_-]+/g, '_')
+      .toLowerCase();
+    XLSX.writeFile(wb, `${safeName}.xlsx`);
+    onNotify(`Downloaded branded Merit List for ${selectedGrade} (${scopeLabel}).`);
+  }
 
   async function saveScore(studentId: string, rawVal: string) {
     if (!activeCycle || rawVal === '' || isAllSubjectsMode) return;
@@ -536,6 +516,9 @@ export function ExamsModule({
     if (!activeCycle) return [];
     const q = queueSearch.trim().toLowerCase();
     return allSubjectsRankedRows
+      .filter(
+        (row) => queueStreamFilter === 'All' || row.student.section === queueStreamFilter
+      )
       .map((row) => {
         const stu = row.student;
         const contact = resolveStudentGuardianContact(stu, admissions);
@@ -553,7 +536,7 @@ export function ExamsModule({
           });
         const stuIs844 = is844FormFourGrade(stu.grade);
         const stuMaxPts = stuIs844 ? 12 : 8;
-        const totalRanked = allSubjectsRankedRows.filter((r) => r.rank !== null).length;
+        const totalRanked = allSubjectsRankedRows.filter((r) => r.displayRank !== null).length;
         const message = buildReportCardWhatsAppMessage({
           tenant,
           cycle: activeCycle,
@@ -566,9 +549,10 @@ export function ExamsModule({
           meanGrade: row.overallGrade,
           meanPoints: row.overallPoints !== null ? String(row.overallPoints) : '0',
           maxPoints: stuMaxPts,
-          overallRank: row.rank,
+          overallRank: row.displayRank,
           totalRanked,
         });
+        const smsDigest = `${tenant.name}: ${stu.fullName} (${stu.studentCode}, ${stu.grade} ${stu.section}) ${activeCycle.title} - Total ${row.totalScore}/${row.maxPossible} (${row.meanScore ?? 0}%), Grade ${row.overallGrade}, Pos ${row.displayRank ? `#${row.displayRank}/${totalRanked}` : 'Pending'}.`;
         const waUrl = buildWhatsAppUrl(contact.guardianPhone, message);
         const dispatch = reportCardDispatchesByStudent.get(stu.id) || null;
         return {
@@ -576,6 +560,7 @@ export function ExamsModule({
           contact,
           resultsCount: results.length,
           message,
+          smsDigest,
           waUrl,
           dispatch,
         };
@@ -592,6 +577,7 @@ export function ExamsModule({
   }, [
     activeCycle,
     allSubjectsRankedRows,
+    queueStreamFilter,
     admissions,
     examResults,
     tenant,
@@ -770,30 +756,42 @@ export function ExamsModule({
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-            Exams & Assessment
+            Exams &amp; Assessment
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Term Opening, Mid-Term, and End of Term exams with Kenyan CBE (EE1–BE2) grading for all CBE levels, 8-4-4 KCSE (A–E) for Form 4 (Grade 12), and full-subject mark summation ranking.
+            Kenyan CBE (EE1–BE2) &amp; Form 4 8-4-4 KCSE (A–E) grading, stream comparison, grade distribution matrix, value-added deviation tracking, and merit broadsheets.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex rounded-lg border border-slate-200 bg-white p-0.5 dark:border-slate-700 dark:bg-slate-900">
+          <div className="flex flex-wrap rounded-lg border border-slate-200 bg-white p-0.5 dark:border-slate-700 dark:bg-slate-900">
             <button
               type="button"
               onClick={() => setActiveTab('results')}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                 activeTab === 'results'
                   ? 'bg-slate-900 text-white dark:bg-blue-600'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
               }`}
             >
-              Results & Merit List
+              Results &amp; Merit List
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('analytics')}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'analytics'
+                  ? 'bg-slate-900 text-white dark:bg-blue-600'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              <BarChart3 className="h-3.5 w-3.5" />
+              Class Analytics
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('entry')}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                 activeTab === 'entry'
                   ? 'bg-slate-900 text-white dark:bg-blue-600'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
@@ -805,6 +803,7 @@ export function ExamsModule({
           </div>
           <button
             onClick={() => {
+              setQueueStreamFilter(effectiveStreamFilter);
               setQueueSelectedStudentId(gradeStudents[0]?.id || null);
               setShowWhatsAppQueueModal(true);
             }}
@@ -812,7 +811,7 @@ export function ExamsModule({
             className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
           >
             <MessageCircle className="h-3.5 w-3.5" />
-            WhatsApp Report Cards
+            WhatsApp &amp; SMS Dispatch
           </button>
           <button
             onClick={() => setShowCycleModal(true)}
@@ -821,7 +820,7 @@ export function ExamsModule({
             <Plus className="h-3.5 w-3.5" />
             New Exam Cycle
           </button>
-          {activeTab === 'results' && activeCycle && activeCycle.status !== 'Published' && (
+          {activeTab !== 'entry' && activeCycle && activeCycle.status !== 'Published' && (
             <button
               onClick={handlePublishCycle}
               className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
@@ -837,92 +836,208 @@ export function ExamsModule({
         <ExamResultsEntryPanel
           workspace={workspace}
           currentRole={currentRole}
+          prefillTarget={entryPrefillTarget}
           onRefresh={onRefresh}
           onNotify={onNotify}
           onViewResults={(cycleId, grade) => {
             setSelectedCycleId(cycleId);
             setSelectedGrade(grade);
+            setSelectedStream('All');
             setSelectedSubject(ALL_REGISTERED_SUBJECTS_OPTION);
             setActiveTab('results');
           }}
         />
+      ) : activeTab === 'analytics' ? (
+        <ZerakiExamAnalyticsPanel
+          workspace={workspace}
+          selectedCycleId={activeCycle?.id || ''}
+          selectedGrade={selectedGrade}
+          onChangeCycle={(cid) => setSelectedCycleId(cid)}
+          onChangeGrade={(g) => {
+            setSelectedGrade(g);
+            setSelectedStream('All');
+          }}
+          onJumpToMarkEntry={(target) => {
+            setEntryPrefillTarget({
+              ...target,
+              requestKey: Date.now(),
+            });
+            setActiveTab('entry');
+          }}
+          onOpenReportCard={(studentId) => openReportCardModal(studentId, false)}
+          onNotify={onNotify}
+        />
       ) : (
         <>
       {/* Filters & Cycle Summary */}
-      <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-4 lg:flex-row lg:items-center lg:justify-between dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex flex-wrap items-center gap-3">
-          <select
-            aria-label="Select exam cycle"
-            value={activeCycle?.id || ''}
-            onChange={(e) => setSelectedCycleId(e.target.value)}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-          >
-            {orderedCycles.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.title} ({c.status})
-              </option>
-            ))}
-          </select>
+      <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <select
+              aria-label="Select exam cycle"
+              value={activeCycle?.id || ''}
+              onChange={(e) => setSelectedCycleId(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              {orderedCycles.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title} ({c.status})
+                </option>
+              ))}
+            </select>
 
-          <select
-            aria-label="Select grade level"
-            value={selectedGrade}
-            onChange={(e) => {
-              const nextGrade = e.target.value;
-              const nextSubs = getSubjectsForGrade(tenant, nextGrade);
-              setSelectedGrade(nextGrade);
-              if (
-                selectedSubject !== ALL_REGISTERED_SUBJECTS_OPTION &&
-                !nextSubs.includes(selectedSubject) &&
-                nextSubs[0]
-              ) {
-                setSelectedSubject(nextSubs[0]);
-              }
-            }}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-          >
-            {tenant.grades.map((g) => (
-              <option key={g} value={g}>
-                {is844FormFourGrade(g) ? `${g} (Form 4 · 8-4-4)` : g}
-              </option>
-            ))}
-          </select>
+            <select
+              aria-label="Select grade level"
+              value={selectedGrade}
+              onChange={(e) => {
+                const nextGrade = e.target.value;
+                const nextSubs = getSubjectsForGrade(tenant, nextGrade);
+                setSelectedGrade(nextGrade);
+                setSelectedStream('All');
+                if (
+                  selectedSubject !== ALL_REGISTERED_SUBJECTS_OPTION &&
+                  !nextSubs.includes(selectedSubject) &&
+                  nextSubs[0]
+                ) {
+                  setSelectedSubject(nextSubs[0]);
+                }
+              }}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              {tenant.grades.map((g) => (
+                <option key={g} value={g}>
+                  {is844FormFourGrade(g) ? `${g} (Form 4 · 8-4-4)` : g}
+                </option>
+              ))}
+            </select>
 
-          <select
-            aria-label="Select subject or all registered subjects"
-            value={effectiveSubject}
-            onChange={(e) => setSelectedSubject(e.target.value)}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-          >
-            <option value={ALL_REGISTERED_SUBJECTS_OPTION}>
-              All Registered Subjects (Mark Summation & Ranking)
-            </option>
-            {levelSubjects.map((sub) => (
-              <option key={sub} value={sub}>
-                {sub}
+            <select
+              aria-label="Select stream filter"
+              value={effectiveStreamFilter}
+              onChange={(e) => setSelectedStream(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              <option value="All">All Streams ({availableStreams.join(', ')})</option>
+              {availableStreams.map((st) => (
+                <option key={st} value={st}>
+                  Stream {st}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="Select subject or all registered subjects"
+              value={effectiveSubject}
+              onChange={(e) => setSelectedSubject(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              <option value={ALL_REGISTERED_SUBJECTS_OPTION}>
+                All Registered Subjects (Mark Summation &amp; Ranking)
               </option>
-            ))}
-          </select>
+              {levelSubjects.map((sub) => (
+                <option key={sub} value={sub}>
+                  {sub}
+                </option>
+              ))}
+            </select>
+
+            {is844 && isAllSubjectsMode && (
+              <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setKcseBest7Mode(true)}
+                  className={`whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    kcseBest7Mode
+                      ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
+                  }`}
+                >
+                  KCSE Best-7 (/84)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setKcseBest7Mode(false)}
+                  className={`whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                    !kcseBest7Mode
+                      ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
+                  }`}
+                >
+                  Full Summation
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {isAllSubjectsMode && (
+              <button
+                type="button"
+                onClick={handleExportMeritListExcel}
+                disabled={!activeCycle || allSubjectsRankedRows.length === 0}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Export Merit (.xlsx)
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setActiveTab('analytics')}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-blue-200 bg-blue-50/70 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300"
+            >
+              <BarChart3 className="h-3.5 w-3.5" />
+              Grade Matrix &amp; Streams
+            </button>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600 tabular-nums dark:text-slate-400">
-          <span>
-            Class Mean: <strong className="font-mono text-slate-900 dark:text-slate-100">{classStats.mean}%</strong>
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>
-            {isAllSubjectsMode ? 'Top Summation:' : 'High Score:'}{' '}
-            <strong className="font-mono text-slate-900 dark:text-slate-100">
-              {classStats.highestLabel}
-            </strong>
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>
-            {is844 ? 'Pass Rate (D+ & above):' : 'Meeting+ (ME2 & above):'}{' '}
-            <strong className="font-mono text-emerald-700 dark:text-emerald-400">
-              {classStats.passRate}%
-            </strong>
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs text-slate-600 tabular-nums dark:border-slate-800 dark:text-slate-400">
+          <div className="flex flex-wrap items-center gap-4">
+            <span>
+              Class Mean:{' '}
+              <strong className="font-mono text-slate-900 dark:text-slate-100">
+                {classStats.mean}%
+              </strong>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {isAllSubjectsMode ? 'Top Performance:' : 'High Score:'}{' '}
+              <strong className="font-mono text-slate-900 dark:text-slate-100">
+                {classStats.highestLabel}
+              </strong>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              {is844 ? 'Pass Rate (D+ & above):' : 'Meeting+ (ME2 & above):'}{' '}
+              <strong className="font-mono text-emerald-700 dark:text-emerald-400">
+                {classStats.passRate}%
+              </strong>
+            </span>
+            {previousCycle && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>
+                  Deviation Δ vs{' '}
+                  <strong className="text-slate-800 dark:text-slate-200">
+                    {shortenCycleTitle(previousCycle.title)}
+                  </strong>
+                </span>
+              </>
+            )}
+          </div>
+
+          {gradeAnalyticsSummary.totalMissingCells > 0 && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('analytics')}
+              className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-amber-700 hover:underline dark:text-amber-400"
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              {gradeAnalyticsSummary.totalMissingCells} missing score(s) across{' '}
+              {gradeAnalyticsSummary.missingMarksByStudent.length} learner(s)
+            </button>
+          )}
         </div>
       </div>
 
@@ -939,7 +1054,7 @@ export function ExamsModule({
           </div>
           <span className="text-[11px] text-slate-500 dark:text-slate-400">
             {gradingSystem === '8-4-4'
-              ? 'Only Grade 12 (Form 4) uses 8-4-4 KCSE grades'
+              ? 'Only Grade 12 (Form 4) uses 8-4-4 KCSE grades & Best-7 points (/84)'
               : 'All Playgroup – Grade 11 classes use KNEC CBE performance levels'}
           </span>
         </div>
@@ -963,28 +1078,37 @@ export function ExamsModule({
                   <th className="px-4 py-3">Rank</th>
                   <th className="px-4 py-3">Student ID</th>
                   <th className="px-4 py-3">Student Name</th>
-                  <th className="px-4 py-3 text-right">Subjects Sat</th>
+                  <th className="px-4 py-3 text-right">Sat</th>
                   <th className="px-4 py-3 text-right">Total Marks</th>
                   <th className="px-4 py-3 text-right">Mean (%)</th>
+                  {is844 && <th className="px-4 py-3 text-right">Best-7</th>}
                   <th className="px-4 py-3 text-right">
-                    {is844 ? '8-4-4 Grade' : 'CBE Level'}
+                    {is844 ? 'Grade' : 'CBE Level'}
                   </th>
-                  <th className="px-4 py-3 text-right">Points (/{maxPoints})</th>
+                  <th className="px-4 py-3 text-right">Pts (/{maxPoints})</th>
+                  <th className="px-4 py-3 text-right">Dev Δ</th>
                   <th className="px-4 py-3 text-right">Transcript</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {allSubjectsRankedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
-                      No active students enrolled in {selectedGrade}.
+                    <td
+                      colSpan={is844 ? 11 : 10}
+                      className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400"
+                    >
+                      No active students enrolled in {selectedGrade}
+                      {effectiveStreamFilter !== 'All'
+                        ? ` Stream ${effectiveStreamFilter}`
+                        : ''}
+                      .
                     </td>
                   </tr>
                 ) : (
                   allSubjectsRankedRows.map((row) => (
                     <tr key={row.student.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
                       <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 tabular-nums dark:text-slate-100">
-                        {row.rank ? `#${row.rank}` : '—'}
+                        {row.displayRank ? `#${row.displayRank}` : '—'}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
                         {row.student.studentCode}
@@ -995,8 +1119,21 @@ export function ExamsModule({
                           Stream {row.student.section}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-right font-mono text-xs text-slate-600 tabular-nums dark:text-slate-400">
-                        {row.subjectsSat} / {row.registeredCount}
+                      <td className="px-4 py-3 text-right font-mono text-xs tabular-nums">
+                        <span
+                          className={
+                            row.missingSubjects.length > 0
+                              ? 'font-semibold text-amber-700 dark:text-amber-400'
+                              : 'text-slate-600 dark:text-slate-400'
+                          }
+                          title={
+                            row.missingSubjects.length > 0
+                              ? `Missing: ${row.missingSubjects.join(', ')}`
+                              : 'Complete'
+                          }
+                        >
+                          {row.subjectsSat} / {row.registeredCount}
+                        </span>
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-sm font-bold text-slate-900 tabular-nums dark:text-slate-100">
                         {row.subjectsSat > 0 ? `${row.totalScore} / ${row.maxPossible}` : '—'}
@@ -1004,13 +1141,35 @@ export function ExamsModule({
                       <td className="px-4 py-3 text-right font-mono text-xs font-medium text-slate-700 tabular-nums dark:text-slate-300">
                         {row.meanScore !== null ? `${row.meanScore}%` : '—'}
                       </td>
+                      {is844 && (
+                        <td className="px-4 py-3 text-right font-mono text-xs font-semibold text-blue-700 tabular-nums dark:text-blue-400">
+                          {row.kcseBest7
+                            ? `${row.kcseBest7.totalPoints}/${row.kcseBest7.maxPoints}`
+                            : '—'}
+                        </td>
+                      )}
                       <td className="px-4 py-3 text-right font-mono text-xs font-bold tabular-nums">
                         <span className={getGradeBadgeColor(row.overallGrade, is844)}>
                           {row.overallGrade}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-xs text-slate-600 tabular-nums dark:text-slate-400">
-                        {row.overallPoints !== null ? `${row.overallPoints} / ${maxPoints}` : '—'}
+                        {row.meanPoints !== null ? `${row.meanPoints.toFixed(1)} / ${maxPoints}` : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-xs font-semibold tabular-nums">
+                        {row.meanDeviation === null ? (
+                          <span className="text-slate-400">—</span>
+                        ) : row.meanDeviation > 0 ? (
+                          <span className="text-emerald-700 dark:text-emerald-400">
+                            +{row.meanDeviation}%
+                          </span>
+                        ) : row.meanDeviation < 0 ? (
+                          <span className="text-rose-600 dark:text-rose-400">
+                            {row.meanDeviation}%
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">0.0%</span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center justify-end gap-3">
@@ -1684,34 +1843,89 @@ export function ExamsModule({
         </div>
       )}
 
-      {/* Class WhatsApp Report Card Dispatch Queue Modal */}
+      {/* Class WhatsApp & Bulk SMS Report Card Dispatch Queue Modal */}
       {showWhatsAppQueueModal && activeCycle && (
         <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4">
           <div className="my-6 w-full max-w-5xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+            <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-6 py-4 dark:border-slate-800">
               <div>
                 <h2 className="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-slate-100">
                   <MessageCircle className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
-                  Send Class Report Cards via WhatsApp
+                  Send Class Report Cards via WhatsApp &amp; SMS
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                   {selectedGrade} · {activeCycle.title} · Guardian phone numbers pulled directly from Admissions records
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowWhatsAppQueueModal(false)}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-              >
-                <X className="h-4 w-4" />
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={classWhatsAppQueue.length === 0}
+                  onClick={() => {
+                    const text = classWhatsAppQueue
+                      .map(
+                        (item) =>
+                          `${item.contact.guardianPhone || 'NO_PHONE'} | ${item.smsDigest}`
+                      )
+                      .join('\n');
+                    void handleCopyText(text, 'Bulk SMS digest');
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy Bulk SMS List
+                </button>
+                <button
+                  type="button"
+                  disabled={classWhatsAppQueue.length === 0}
+                  onClick={() => {
+                    const rows = classWhatsAppQueue.map((item) => ({
+                      'Adm No': item.row.student.studentCode,
+                      'Student Name': item.row.student.fullName,
+                      Stream: `Stream ${item.row.student.section}`,
+                      Guardian: item.contact.guardianName,
+                      Phone: item.contact.guardianPhone || 'Missing',
+                      Mean: item.row.meanScore !== null ? `${item.row.meanScore}%` : '—',
+                      Grade: item.row.overallGrade,
+                      Rank: item.row.displayRank ? `#${item.row.displayRank}` : '—',
+                      'SMS Digest': item.smsDigest,
+                    }));
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(
+                      wb,
+                      createBrandedWorksheetFromObjects(
+                        tenant,
+                        `${activeCycle.title} — Guardian SMS/WhatsApp Dispatch (${selectedGrade})`,
+                        rows
+                      ),
+                      'Dispatch List'
+                    );
+                    XLSX.writeFile(
+                      wb,
+                      `${tenant.slug}-${selectedGrade.replace(/\s+/g, '_').toLowerCase()}-sms-dispatch.xlsx`
+                    );
+                    onNotify(`Downloaded SMS/WhatsApp dispatch sheet for ${selectedGrade}.`);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Export Dispatch (.xlsx)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowWhatsAppQueueModal(false)}
+                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 divide-y divide-slate-200 lg:grid-cols-12 lg:divide-x lg:divide-y-0 dark:divide-slate-800">
               {/* Left: Class Roster & Admissions Phone Numbers */}
               <div className="flex max-h-[540px] flex-col lg:col-span-7">
-                <div className="border-b border-slate-200 p-3.5 dark:border-slate-800">
-                  <div className="relative">
+                <div className="flex items-center gap-2 border-b border-slate-200 p-3.5 dark:border-slate-800">
+                  <div className="relative flex-1">
                     <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
                     <input
                       type="text"
@@ -1721,6 +1935,19 @@ export function ExamsModule({
                       className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pr-3 pl-8 text-xs text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                     />
                   </div>
+                  <select
+                    aria-label="Filter dispatch queue by stream"
+                    value={queueStreamFilter}
+                    onChange={(e) => setQueueStreamFilter(e.target.value)}
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    <option value="All">All Streams</option>
+                    {availableStreams.map((st) => (
+                      <option key={st} value={st}>
+                        Stream {st}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 <div className="flex-1 divide-y divide-slate-100 overflow-y-auto dark:divide-slate-800">

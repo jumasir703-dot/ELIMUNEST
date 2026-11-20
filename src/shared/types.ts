@@ -727,7 +727,8 @@ export type AdminAuditAction =
   | 'KILL_SWITCH_SUSPEND'
   | 'KILL_SWITCH_RESTORE'
   | 'IMPERSONATE_START'
-  | 'IMPERSONATE_END';
+  | 'IMPERSONATE_END'
+  | 'RESTORE_DATABASE';
 
 export interface AdminAuditEntry {
   id: string;
@@ -797,6 +798,10 @@ export interface DevPlatformTelemetry {
     diskBytes: number;
     serializedBytes: number;
     totalRecords: number;
+    storageMode?: 'Persistent Disk' | 'KV Durable Sync' | 'Ephemeral (/tmp)' | 'Local JSON Store';
+    persistentStorage?: boolean;
+    kvConfigured?: boolean;
+    sessionSecretConfigured?: boolean;
     collections: DevCollectionStorageStat[];
   };
   runtime: {

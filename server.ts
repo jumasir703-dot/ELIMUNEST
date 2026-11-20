@@ -3,7 +3,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { ConflictError, TenantStore } from './server/store.ts';
+import {
+  ConflictError,
+  getStoragePersistenceMeta,
+  TenantStore,
+} from './server/store.ts';
 import {
   createUserAuthMiddleware,
   createUserSessionToken,
@@ -150,14 +154,27 @@ const requireAuth = createUserAuthMiddleware(
   (tenantId) => store.getTenantStatus(tenantId)
 );
 
+// Ensure remote KV store (when configured) is hydrated before serving API requests
+app.use('/api', async (_req, _res, next) => {
+  try {
+    await store.ensureHydrated();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Public Health & Auth Directory / Onboarding Routes
 app.get('/api/health', (_req, res) => {
+  const persistenceMeta = getStoragePersistenceMeta();
   res.json({
     status: 'ok',
     tenants: store.listTenants().length,
     sessionSecretConfigured: isSessionSecretConfigured(),
-    // On Vercel the JSON database lives in per-instance /tmp, so writes are not shared or durable.
-    persistentStorage: !IS_VERCEL || Boolean(process.env.DATA_DIR),
+    // On Vercel the JSON database lives in per-instance /tmp unless DATA_DIR or KV REST is configured.
+    persistentStorage: persistenceMeta.persistentStorage,
+    kvConfigured: persistenceMeta.kvConfigured,
+    storageMode: persistenceMeta.storageMode,
   });
 });
 
@@ -178,9 +195,10 @@ app.post('/api/auth/login', (req, res, next) => {
   }
 });
 
-app.post('/api/auth/register', (req, res, next) => {
+app.post('/api/auth/register', async (req, res, next) => {
   try {
     const { user, tenant } = store.registerUserAccount(req.body || {});
+    await store.flushRemotePersist();
     const session = createUserSessionToken(user, {
       tenantName: tenant.name,
       emailDomain: tenant.emailDomain,
@@ -191,9 +209,10 @@ app.post('/api/auth/register', (req, res, next) => {
   }
 });
 
-app.post('/api/auth/register-tenant', (req, res, next) => {
+app.post('/api/auth/register-tenant', async (req, res, next) => {
   try {
     const { user, tenant } = store.registerTenantWithAdmin(req.body || {});
+    await store.flushRemotePersist();
     const session = createUserSessionToken(user, {
       tenantName: tenant.name,
       emailDomain: tenant.emailDomain,
@@ -213,9 +232,10 @@ app.post('/api/auth/forgot-password/request', (req, res, next) => {
   }
 });
 
-app.post('/api/auth/forgot-password/verify', (req, res, next) => {
+app.post('/api/auth/forgot-password/verify', async (req, res, next) => {
   try {
     const result = store.verifyPasswordResetByPhone(req.body || {});
+    await store.flushRemotePersist();
     res.json(result);
   } catch (err) {
     next(err);
@@ -291,7 +311,7 @@ app.get('/api/auth/session', (req: AuthenticatedRequest, res) => {
   });
 });
 
-app.post('/api/auth/change-password', (req: AuthenticatedRequest, res, next) => {
+app.post('/api/auth/change-password', async (req: AuthenticatedRequest, res, next) => {
   try {
     if (req.impersonation) {
       throw new ConflictError(
@@ -308,6 +328,7 @@ app.post('/api/auth/change-password', (req: AuthenticatedRequest, res, next) => 
       currentPassword || '',
       newPassword || ''
     );
+    await store.flushRemotePersist();
     const session = createUserSessionToken(user, {
       tenantName: tenant ? tenant.name : 'elimuNest Platform Control',
       emailDomain,
@@ -336,7 +357,7 @@ app.get('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
   }
 });
 
-app.post('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
+app.post('/api/auth/users', async (req: AuthenticatedRequest, res, next) => {
   try {
     const authUser = req.authUser!;
     if (
@@ -348,13 +369,14 @@ app.post('/api/auth/users', (req: AuthenticatedRequest, res, next) => {
     }
     const targetTenantId = getTenantId(req);
     const result = store.createTenantStaffUser(authUser, targetTenantId, req.body || {});
+    await store.flushRemotePersist();
     res.status(201).json(result);
   } catch (err) {
     next(err);
   }
 });
 
-app.patch('/api/auth/users/:userId/access', (req: AuthenticatedRequest, res, next) => {
+app.patch('/api/auth/users/:userId/access', async (req: AuthenticatedRequest, res, next) => {
   try {
     const authUser = req.authUser!;
     if (
@@ -371,6 +393,7 @@ app.patch('/api/auth/users/:userId/access', (req: AuthenticatedRequest, res, nex
       String(req.params.userId),
       req.body || {}
     );
+    await store.flushRemotePersist();
     res.json(result);
   } catch (err) {
     next(err);
@@ -407,9 +430,10 @@ app.get(
 app.post(
   '/api/dev/tenants',
   requireDeveloperAuth('dev:tenants'),
-  (req: AuthenticatedRequest, res, next) => {
+  async (req: AuthenticatedRequest, res, next) => {
     try {
       const result = developerService.onboardTenant(req.authUser!, req.body || {});
+      await store.flushRemotePersist();
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -501,6 +525,33 @@ app.get(
         Number.isFinite(limit) ? limit : 80
       );
       res.json({ logs });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/dev/database/export',
+  requireDeveloperAuth('dev:telemetry'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const snapshot = developerService.exportDatabaseSnapshot(req.authUser!);
+      res.json(snapshot);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/database/restore',
+  requireDeveloperAuth('dev:telemetry'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.restoreDatabaseSnapshot(req.authUser!, req.body);
+      await store.flushRemotePersist();
+      res.json(result);
     } catch (err) {
       next(err);
     }
