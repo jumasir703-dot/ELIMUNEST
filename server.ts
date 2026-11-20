@@ -1071,6 +1071,89 @@ app.post('/api/timetable/generate', ...timetableGuard, (req: AuthenticatedReques
   }
 });
 
+// aSc-style timetabling: lesson cards, teacher availability, locking and the solver.
+// Mutations are limited to admins; teachers may only read lesson cards.
+const timetableAdminGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin'),
+  requireModule('timetable'),
+];
+
+app.get('/api/timetable/lessons', ...timetableGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json({ lessons: store.getTimetableLessons(tenantId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/timetable/lessons/build', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json(store.buildTimetableLessonsFromCurriculum(tenantId, req.body || {}));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/timetable/lessons', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const lesson = store.upsertTimetableLesson(tenantId, req.body);
+    res.status(201).json({ lesson });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/timetable/lessons/:id', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const lesson = store.upsertTimetableLesson(tenantId, { ...req.body, id: String(req.params.id) });
+    res.json({ lesson });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/timetable/lessons/:id', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    store.deleteTimetableLesson(tenantId, String(req.params.id));
+    res.json({ deleted: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/timetable/availability/:teacherId', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const teacher = store.setTeacherAvailability(tenantId, String(req.params.teacherId), req.body || {});
+    res.json({ teacher });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/timetable/lock', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json(store.setTimetableSlotsLocked(tenantId, req.body || {}));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/timetable/solve', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json(store.solveTimetableFromLessons(tenantId, req.body || {}));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Attendance & Leave Out Chits
 const attendanceGuard = [
   requireRole('Developer', 'Super Admin', 'Admin', 'Registrar', 'Teacher'),
