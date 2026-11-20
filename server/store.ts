@@ -115,8 +115,10 @@ import {
   type StoredTenantUser,
 } from './seed.ts';
 import {
+  DEVELOPER_EMAIL,
   generateOneTimePassword,
   hashPassword,
+  resolveDeveloperBootstrapPassword,
   isSessionSecretConfigured,
   verifyPassword,
 } from './middleware/adminAuth.ts';
@@ -285,7 +287,45 @@ export class TenantStore {
     this.onBroadcast = fn;
   }
 
+  private developerEnsured = false;
+
   async ensureHydrated(): Promise<void> {
+    await this.hydrateFromKvIfConfigured();
+    await this.ensureDeveloperAccount();
+  }
+
+  /** Creates developer@elimunest.platform if missing. Never overwrites an existing account/password. */
+  private async ensureDeveloperAccount(): Promise<void> {
+    if (this.developerEnsured) return;
+    this.developerEnsured = true;
+    const exists = (this.state.users || []).some(
+      (u) => u.email.toLowerCase() === DEVELOPER_EMAIL
+    );
+    if (exists) return;
+    const { password, fromEnv } = resolveDeveloperBootstrapPassword();
+    this.state.users.push({
+      id: 'usr-platform-dev',
+      tenantId: 'platform',
+      fullName: 'Lead Platform Engineer',
+      email: DEVELOPER_EMAIL,
+      phone: '',
+      role: 'Developer',
+      passwordHash: await hashPassword(password),
+      status: 'Active',
+      mustChangePassword: true,
+      tokenVersion: 0,
+      allowedModules: [...DEFAULT_ROLE_MODULES.Developer],
+      createdAt: new Date().toISOString(),
+    });
+    this.persist();
+    console.log(
+      fromEnv
+        ? `[elimuNest] Created ${DEVELOPER_EMAIL} with the password from DEVELOPER_BOOTSTRAP_PASSWORD (change required on first login).`
+        : `[elimuNest] Created ${DEVELOPER_EMAIL} with one-time password: ${password} (change required on first login). Set DEVELOPER_BOOTSTRAP_PASSWORD to choose your own.`
+    );
+  }
+
+  private async hydrateFromKvIfConfigured(): Promise<void> {
     await this.ensureInitialized();
     const kv = resolveKvConfig();
     if (!kv) return;
@@ -299,7 +339,11 @@ export class TenantStore {
           const body = (await resp.json()) as { result?: string | null };
           if (typeof body?.result === 'string' && body.result.trim()) {
             const parsed = JSON.parse(body.result) as DatabaseState;
-            if (parsed && Array.isArray(parsed.tenants) && parsed.tenants.length > 0) {
+            if (
+              parsed &&
+              Array.isArray(parsed.tenants) &&
+              (parsed.tenants.length > 0 || (Array.isArray(parsed.users) && parsed.users.length > 0))
+            ) {
               const { state: migrated } = this.migrateAndNormalizeState(parsed, false);
               this.state = migrated;
               this.writeDiskOnly(migrated);

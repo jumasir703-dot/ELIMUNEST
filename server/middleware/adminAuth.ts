@@ -9,6 +9,7 @@ import {
   type TenantStatus,
   type TenantUser,
   type UserRole,
+  validatePasswordStrength,
 } from '../../src/shared/types.ts';
 
 const scryptAsync = promisify(scrypt);
@@ -77,6 +78,27 @@ export async function verifyPassword(password: string, storedHash: string): Prom
 export function generateOneTimePassword(): string {
   // Always >= 13 chars and guaranteed to contain letters + digits (satisfies 10-char password policy)
   return `Otp1-${randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
+export const DEVELOPER_EMAIL = 'developer@elimunest.platform';
+
+/**
+ * Initial password for the platform Developer account.
+ * Read from DEVELOPER_BOOTSTRAP_PASSWORD (set it in .env / the hosting dashboard, never in code).
+ * If unset or too weak, a random one-time password is generated instead.
+ * The account is always created with mustChangePassword = true.
+ */
+export function resolveDeveloperBootstrapPassword(): { password: string; fromEnv: boolean } {
+  const fromEnv = (process.env.DEVELOPER_BOOTSTRAP_PASSWORD || '').trim();
+  if (fromEnv) {
+    const err = validatePasswordStrength(fromEnv);
+    if (err) {
+      console.warn(`[elimuNest] DEVELOPER_BOOTSTRAP_PASSWORD ignored: ${err}`);
+    } else {
+      return { password: fromEnv, fromEnv: true };
+    }
+  }
+  return { password: generateOneTimePassword(), fromEnv: false };
 }
 
 export type DeveloperPermission =

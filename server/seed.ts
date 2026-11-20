@@ -37,7 +37,11 @@ import {
   type TimetableSlot,
   type WhatsAppDispatchRecord,
 } from '../src/shared/types.ts';
-import { generateOneTimePassword, hashPassword } from './middleware/adminAuth.ts';
+import {
+  generateOneTimePassword,
+  hashPassword,
+  resolveDeveloperBootstrapPassword,
+} from './middleware/adminAuth.ts';
 
 export function buildDefaultNonTeachingStaff(
   slug: string,
@@ -197,7 +201,10 @@ export async function buildSeedUsers(): Promise<{
   const devCredentials: DevSeedCredential[] = [];
   const users: StoredTenantUser[] = [];
   for (const spec of specs) {
-    const pw = generateOneTimePassword();
+    const pw =
+      spec.role === 'Developer'
+        ? resolveDeveloperBootstrapPassword().password
+        : generateOneTimePassword();
     const passwordHash = await hashPassword(pw);
     devCredentials.push({ email: spec.email, role: spec.role, password: pw });
     users.push({

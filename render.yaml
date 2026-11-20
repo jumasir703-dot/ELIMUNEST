@@ -19,6 +19,8 @@ services:
         sync: false # set to your Render URL after first deploy
       - key: AUTH_SESSION_SECRET
         sync: false # required in production (min 32 random chars)
+      - key: DEVELOPER_BOOTSTRAP_PASSWORD
+        sync: false # initial password for developer@elimunest.platform; remove after first login
     disk:
       name: elimunest-data
       mountPath: /var/data
