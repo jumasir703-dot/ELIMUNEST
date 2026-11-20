@@ -7,6 +7,7 @@ import {
   buildDefaultLevelSubjectsMap,
   buildDefaultLevelWeeklyLessonsMap,
   CLASS_TEACHER_SUBJECT_TOKEN,
+  KENYAN_BELL_SCHEDULE,
   computeAssessmentGrade,
   DEFAULT_ROLE_MODULES,
   DEFAULT_SUBJECT_WEEKLY_LESSONS,
@@ -103,7 +104,9 @@ import {
   type TenantStatus,
   type TenantUser,
   type TenantWorkspaceData,
+  type TimetableLesson,
   type TimetableSlot,
+  type TimetableSolveResult,
   type UserRole,
   type WhatsAppDispatchCategory,
   type WhatsAppDispatchRecord,
@@ -135,6 +138,7 @@ import {
   verifyPassword,
 } from './middleware/adminAuth.ts';
 import { isSmsProviderConfigured, sendSms, SmsNotConfiguredError } from './lib/sms.ts';
+import { solveTimetable, type SolverDay, type SolverPlacement } from './lib/timetableSolver.ts';
 
 // Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
 // On Vercel the filesystem is read-only except /tmp, which is per-instance and
@@ -3348,6 +3352,9 @@ export class TenantStore {
       throw new ConflictError('Teacher not found.', 404);
     }
     tenant.teachers = tenant.teachers.filter((t) => t.id !== teacherId);
+    if (tenant.timetableLessons) {
+      tenant.timetableLessons = tenant.timetableLessons.filter((l) => l.teacherId !== teacherId);
+    }
     const beforeSlots = this.state.timetable.length;
     this.state.timetable = this.state.timetable.filter(
       (s) => !(s.tenantId === tenantId && s.teacherId === teacherId)
@@ -4368,6 +4375,26 @@ export class TenantStore {
     }
 
     const times = PERIOD_TIMES[input.period] || { startTime: '08:00', endTime: '08:40' };
+
+    // Teacher constraints set on the Constraints tab apply to manual edits too.
+    if ((teacher.unavailable || []).some((u) => u.day === input.day && u.period === input.period)) {
+      throw new ConflictError(
+        `Availability Conflict: ${teacher.name} is marked unavailable on ${input.day} Lesson ${input.period}.`,
+        409
+      );
+    }
+    if (teacher.maxLessonsPerDay) {
+      const dayLoad = this.state.timetable.filter(
+        (s) => s.tenantId === tenantId && s.teacherId === teacher.id && s.day === input.day && s.id !== input.id
+      ).length;
+      if (dayLoad >= teacher.maxLessonsPerDay) {
+        throw new ConflictError(
+          `Workload Conflict: ${teacher.name} already has ${dayLoad} lesson(s) on ${input.day} (limit ${teacher.maxLessonsPerDay}).`,
+          409
+        );
+      }
+    }
+
     const others = this.state.timetable.filter(
       (s) => s.tenantId === tenantId && s.day === input.day && s.period === input.period && s.id !== input.id
     );
@@ -4450,6 +4477,381 @@ export class TenantStore {
     }
     this.persist();
     this.syncTenant(tenantId, 'timetable:deleted');
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // aSc-style timetabling: lesson cards, teacher availability, locking and solver
+  // ---------------------------------------------------------------------------
+
+  private teachingPeriods(): number[] {
+    return KENYAN_BELL_SCHEDULE.filter((r) => r.kind === 'lesson').map((r) => r.period as number);
+  }
+
+  /** A double lesson may start on a period only when the next row of the bell schedule is another lesson. */
+  private doubleStartPeriods(): number[] {
+    const out: number[] = [];
+    KENYAN_BELL_SCHEDULE.forEach((row, i) => {
+      if (row.kind === 'lesson' && KENYAN_BELL_SCHEDULE[i + 1]?.kind === 'lesson') {
+        out.push(row.period as number);
+      }
+    });
+    return out;
+  }
+
+  getTimetableLessons(tenantId: string): TimetableLesson[] {
+    return [...(this.requireTenant(tenantId).timetableLessons || [])];
+  }
+
+  upsertTimetableLesson(
+    tenantId: string,
+    input: {
+      id?: string;
+      grade: string;
+      section: string;
+      subject: string;
+      teacherId: string;
+      periodsPerWeek: number;
+      doubleLessons?: number;
+      room?: string;
+      maxPerDay?: number;
+    }
+  ): TimetableLesson {
+    const tenant = this.requireTenant(tenantId);
+    if (!tenant.grades.includes(input.grade)) {
+      throw new ConflictError('Select a valid grade for this lesson.', 400);
+    }
+    if (!getStreamsForGrade(tenant, input.grade).includes(input.section)) {
+      throw new ConflictError('Select a valid stream for this grade.', 400);
+    }
+    if (!tenant.teachers.some((t) => t.id === input.teacherId)) {
+      throw new ConflictError('Selected teacher does not belong to this school.', 400);
+    }
+    const subject = (input.subject || '').trim();
+    if (!subject) throw new ConflictError('Subject is required.', 400);
+    const periodsPerWeek = Math.round(Number(input.periodsPerWeek));
+    if (!Number.isFinite(periodsPerWeek) || periodsPerWeek < 1 || periodsPerWeek > 40) {
+      throw new ConflictError('Periods per week must be between 1 and 40.', 400);
+    }
+    const doubleLessons = Math.max(
+      0,
+      Math.min(Math.floor(periodsPerWeek / 2), Math.round(Number(input.doubleLessons || 0)))
+    );
+    const room = (input.room || '').trim();
+    if (room && !tenant.rooms.includes(room)) {
+      throw new ConflictError('Selected room is not configured for this school.', 400);
+    }
+    const maxPerDayRaw = Math.round(Number(input.maxPerDay || 0));
+    const maxPerDay = maxPerDayRaw >= 1 && maxPerDayRaw <= 8 ? maxPerDayRaw : undefined;
+
+    const lessons = (tenant.timetableLessons = tenant.timetableLessons || []);
+    const next: TimetableLesson = {
+      id: input.id || `les-${randomUUID().slice(0, 8)}`,
+      grade: input.grade,
+      section: input.section,
+      subject,
+      teacherId: input.teacherId,
+      periodsPerWeek,
+      ...(doubleLessons > 0 ? { doubleLessons } : {}),
+      ...(room ? { room } : {}),
+      ...(maxPerDay ? { maxPerDay } : {}),
+    };
+    if (input.id) {
+      const idx = lessons.findIndex((l) => l.id === input.id);
+      if (idx < 0) throw new ConflictError('Lesson not found.', 404);
+      lessons[idx] = next;
+    } else {
+      lessons.push(next);
+    }
+    this.persist();
+    this.syncTenant(tenantId, 'timetable:lessons-updated');
+    return next;
+  }
+
+  deleteTimetableLesson(tenantId: string, lessonId: string) {
+    const tenant = this.requireTenant(tenantId);
+    const before = (tenant.timetableLessons || []).length;
+    tenant.timetableLessons = (tenant.timetableLessons || []).filter((l) => l.id !== lessonId);
+    if (tenant.timetableLessons.length === before) {
+      throw new ConflictError('Lesson not found.', 404);
+    }
+    this.persist();
+    this.syncTenant(tenantId, 'timetable:lessons-updated');
+  }
+
+  /** Builds lesson cards from the school's curriculum: every class x subject with a qualified teacher. */
+  buildTimetableLessonsFromCurriculum(
+    tenantId: string,
+    input: { grades?: string[]; replace?: boolean }
+  ): { created: number; total: number; skipped: string[] } {
+    const tenant = this.requireTenant(tenantId);
+    if (tenant.teachers.length === 0) {
+      throw new ConflictError('Add at least one teacher before building lessons.', 400);
+    }
+    const grades =
+      input.grades && input.grades.length > 0
+        ? tenant.grades.filter((g) => input.grades!.includes(g))
+        : [...tenant.grades];
+    if (grades.length === 0) throw new ConflictError('Select at least one grade.', 400);
+
+    const cohortKeys = new Set<string>();
+    grades.forEach((g) => getStreamsForGrade(tenant, g).forEach((s) => cohortKeys.add(`${g}::${s}`)));
+
+    let lessons = tenant.timetableLessons || [];
+    if (input.replace !== false) {
+      lessons = lessons.filter((l) => !cohortKeys.has(`${l.grade}::${l.section}`));
+    }
+    const load = new Map<string, number>();
+    tenant.teachers.forEach((t) => load.set(t.id, 0));
+    lessons.forEach((l) => load.set(l.teacherId, (load.get(l.teacherId) || 0) + l.periodsPerWeek));
+    const homeroom = new Set<string>();
+    const skipped = new Set<string>();
+    const created: TimetableLesson[] = [];
+
+    for (const grade of grades) {
+      for (const section of getStreamsForGrade(tenant, grade)) {
+        const clusterId = getClusterForGrade(grade);
+        const subjects = getSubjectsForLevel(tenant, clusterId).filter(Boolean);
+        const single = isSingleTeacherGrade(grade);
+        let classTeacher: TeacherProfile | null = null;
+
+        if (single) {
+          const ranked = [...tenant.teachers].sort((a, b) => {
+            const sc = (t: TeacherProfile) => {
+              if (isTeacherAssignedToCohort(t, grade, section)) return 0;
+              const open = (t.assignedClasses || []).length === 0;
+              if (open && !homeroom.has(t.id)) return 1;
+              if (!homeroom.has(t.id)) return 2;
+              return 3;
+            };
+            return sc(a) - sc(b) || (load.get(a.id) || 0) - (load.get(b.id) || 0);
+          });
+          classTeacher = ranked[0] || null;
+          if (classTeacher) homeroom.add(classTeacher.id);
+        }
+
+        for (const subject of subjects) {
+          const periods = getLessonsPerWeekForSubject(tenant, subject, clusterId);
+          if (periods <= 0) continue;
+          let teacher: TeacherProfile | undefined | null = classTeacher;
+          if (!single) {
+            const qualified = tenant.teachers.filter((t) =>
+              getTeacherAssignedSubjectsForCohort(tenant, t, grade, section).some(
+                (s) => s.toLowerCase() === subject.toLowerCase()
+              )
+            );
+            teacher = [...qualified].sort((a, b) => {
+              const ea = isTeacherAssignedToCohort(a, grade, section) ? 0 : 1;
+              const eb = isTeacherAssignedToCohort(b, grade, section) ? 0 : 1;
+              return ea - eb || (load.get(a.id) || 0) - (load.get(b.id) || 0);
+            })[0];
+          }
+          if (!teacher) {
+            skipped.add(subject);
+            continue;
+          }
+          load.set(teacher.id, (load.get(teacher.id) || 0) + periods);
+          created.push({
+            id: `les-${randomUUID().slice(0, 8)}`,
+            grade,
+            section,
+            subject,
+            teacherId: teacher.id,
+            periodsPerWeek: periods,
+          });
+        }
+      }
+    }
+
+    tenant.timetableLessons = [...lessons, ...created];
+    this.persist();
+    this.syncTenant(tenantId, 'timetable:lessons-updated');
+    return { created: created.length, total: tenant.timetableLessons.length, skipped: [...skipped] };
+  }
+
+  setTeacherAvailability(
+    tenantId: string,
+    teacherId: string,
+    input: { unavailable?: Array<{ day: DayOfWeek; period: number }>; maxLessonsPerDay?: number | null }
+  ): TeacherProfile {
+    const tenant = this.requireTenant(tenantId);
+    const teacher = tenant.teachers.find((t) => t.id === teacherId);
+    if (!teacher) throw new ConflictError('Teacher not found in this school.', 404);
+    const days: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    const periods = this.teachingPeriods();
+    const seen = new Set<string>();
+    const unavailable: Array<{ day: DayOfWeek; period: number }> = [];
+    for (const u of input.unavailable || []) {
+      if (!days.includes(u.day) || !periods.includes(Number(u.period))) continue;
+      const k = `${u.day}|${u.period}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      unavailable.push({ day: u.day, period: Number(u.period) });
+    }
+    teacher.unavailable = unavailable;
+    const max = Math.round(Number(input.maxLessonsPerDay || 0));
+    if (max >= 1 && max <= periods.length) teacher.maxLessonsPerDay = max;
+    else delete teacher.maxLessonsPerDay;
+    this.persist();
+    this.syncTenant(tenantId, 'timetable:availability-updated');
+    return teacher;
+  }
+
+  setTimetableSlotsLocked(
+    tenantId: string,
+    input: { slotIds?: string[]; grade?: string; section?: string; all?: boolean; locked: boolean }
+  ): { updated: number } {
+    this.requireTenant(tenantId);
+    const ids = new Set(input.slotIds || []);
+    let updated = 0;
+    for (const s of this.state.timetable) {
+      if (s.tenantId !== tenantId) continue;
+      const match =
+        input.all === true ||
+        ids.has(s.id) ||
+        (!!input.grade && s.grade === input.grade && (!input.section || s.section === input.section));
+      if (!match) continue;
+      if (Boolean(s.locked) !== input.locked) {
+        s.locked = input.locked;
+        updated += 1;
+      }
+    }
+    if (updated > 0) {
+      this.persist();
+      this.syncTenant(tenantId, 'timetable:locked');
+    }
+    return { updated };
+  }
+
+  /** aSc-style generation: solve all lesson cards (optionally only some grades), keeping locked lessons. */
+  solveTimetableFromLessons(
+    tenantId: string,
+    input: { grades?: string[]; assignRooms?: boolean; seed?: number }
+  ): TimetableSolveResult {
+    const tenant = this.requireTenant(tenantId);
+    const allLessons = tenant.timetableLessons || [];
+    if (allLessons.length === 0) {
+      throw new ConflictError('Create lesson cards first (Lessons tab → Build from curriculum).', 400);
+    }
+    const teacherIds = new Set(tenant.teachers.map((t) => t.id));
+    const gradeFilter = input.grades && input.grades.length > 0 ? new Set(input.grades) : null;
+    const target = allLessons.filter((l) => teacherIds.has(l.teacherId) && (!gradeFilter || gradeFilter.has(l.grade)));
+    if (target.length === 0) {
+      throw new ConflictError('No lesson cards match the selected grades.', 400);
+    }
+    const cohortKeys = new Set(target.map((l) => `${l.grade}::${l.section}`));
+    const inCohort = (s: TimetableSlot) => cohortKeys.has(`${s.grade}::${s.section}`);
+
+    const assignRooms = input.assignRooms ?? tenant.rooms.length > 0;
+    const toPlacement = (s: TimetableSlot): SolverPlacement => ({
+      lessonId: s.lessonId || '',
+      grade: s.grade,
+      section: s.section,
+      subject: s.subject,
+      teacherId: s.teacherId,
+      room: assignRooms ? s.room : '',
+      day: s.day as SolverDay,
+      period: s.period,
+    });
+
+    const tenantSlots = this.state.timetable.filter((s) => s.tenantId === tenantId);
+    const lockedPlacements: SolverPlacement[] = [];
+    const fixed: SolverPlacement[] = [];
+    for (const s of tenantSlots) {
+      if (!inCohort(s)) {
+        fixed.push(toPlacement(s));
+      } else if (s.locked) {
+        const lesson =
+          target.find((l) => l.id === s.lessonId) ||
+          target.find(
+            (l) => l.grade === s.grade && l.section === s.section && l.subject === s.subject && l.teacherId === s.teacherId
+          );
+        if (lesson) lockedPlacements.push({ ...toPlacement(s), lessonId: lesson.id });
+        else fixed.push(toPlacement(s));
+      }
+    }
+
+    const teacherName = new Map(tenant.teachers.map((t) => [t.id, t.name]));
+    const result = solveTimetable({
+      lessons: target.map((l) => ({
+        id: l.id,
+        grade: l.grade,
+        section: l.section,
+        subject: l.subject,
+        teacherId: l.teacherId,
+        periodsPerWeek: l.periodsPerWeek,
+        doubleLessons: l.doubleLessons,
+        room: assignRooms ? l.room : undefined,
+        maxPerDay: l.maxPerDay,
+      })),
+      days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+      periods: this.teachingPeriods(),
+      doubleStarts: this.doubleStartPeriods(),
+      rooms: assignRooms ? tenant.rooms : [],
+      teachers: Object.fromEntries(
+        tenant.teachers.map((t) => [
+          t.id,
+          { unavailable: (t.unavailable || []) as Array<{ day: SolverDay; period: number }>, maxPerDay: t.maxLessonsPerDay },
+        ])
+      ),
+      locked: lockedPlacements,
+      fixed,
+      seed: input.seed,
+    });
+
+    // replace every unlocked slot of the solved classes with the new placements
+    this.state.timetable = this.state.timetable.filter(
+      (s) => !(s.tenantId === tenantId && inCohort(s) && !s.locked)
+    );
+    for (const p of result.placements) {
+      const times = PERIOD_TIMES[p.period] || { startTime: '08:00', endTime: '08:40' };
+      this.state.timetable.push({
+        id: `tt-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        day: p.day,
+        period: p.period,
+        startTime: times.startTime,
+        endTime: times.endTime,
+        grade: p.grade,
+        section: p.section,
+        subject: p.subject,
+        teacherId: p.teacherId,
+        teacherName: teacherName.get(p.teacherId) || '',
+        room: p.room || 'Home classroom',
+        lessonId: p.lessonId,
+      });
+    }
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'timetable',
+      'Timetable generated',
+      `${result.placedPeriods} of ${result.totalPeriods} lesson periods placed${
+        result.unplaced.length ? `; ${result.unplaced.length} lesson(s) need attention` : ''
+      }.`,
+      'timetable'
+    );
+    this.syncTenant(tenantId, 'timetable:generated');
+
+    const nameOf = (id: string) => teacherName.get(id) || id;
+    return {
+      placedPeriods: result.placedPeriods,
+      totalPeriods: result.totalPeriods,
+      createdSlots: result.placements.length,
+      attemptsRun: result.attemptsRun,
+      warnings: result.warnings.map((w) =>
+        w.replace(/^Teacher (\S+) /, (_m, id: string) => `Teacher ${nameOf(id)} `)
+      ),
+      unplaced: result.unplaced.map((u) => ({
+        lessonId: u.lessonId,
+        grade: u.grade,
+        section: u.section,
+        subject: u.subject,
+        teacherName: nameOf(u.teacherId),
+        missingPeriods: u.missingPeriods,
+        reason: u.reason,
+      })),
+    };
   }
 
   generateTimetable(
@@ -4581,7 +4983,8 @@ export class TenantStore {
     const cohortKeySet = new Set(targetCohorts.map((c) => `${c.grade}::${c.section}`));
     if (replaceExisting) {
       this.state.timetable = this.state.timetable.filter(
-        (s) => !(s.tenantId === tenantId && cohortKeySet.has(`${s.grade}::${s.section}`))
+        // locked lessons survive a regenerate (they are treated as occupied slots below)
+        (s) => !(s.tenantId === tenantId && !s.locked && cohortKeySet.has(`${s.grade}::${s.section}`))
       );
     }
 

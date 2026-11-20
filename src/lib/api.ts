@@ -63,7 +63,9 @@ import type {
   TenantStatus,
   TenantUser,
   TenantWorkspaceData,
+  TimetableLesson,
   TimetableSlot,
+  TimetableSolveResult,
   UserRole,
   WhatsAppDispatchCategory,
   WhatsAppDispatchRecord,
@@ -778,6 +780,65 @@ export const saasApi = {
       cohortsScheduled: number;
       singleTeacherCohorts: string[];
     }>('/api/timetable/generate', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getTimetableLessons(tenantId: string) {
+    return apiRequest<{ lessons: TimetableLesson[] }>('/api/timetable/lessons', { tenantId });
+  },
+
+  saveTimetableLesson(
+    tenantId: string,
+    payload: Omit<TimetableLesson, 'id'> & { id?: string }
+  ) {
+    return apiRequest<{ lesson: TimetableLesson }>(
+      payload.id ? `/api/timetable/lessons/${payload.id}` : '/api/timetable/lessons',
+      { method: payload.id ? 'PUT' : 'POST', tenantId, body: JSON.stringify(payload) }
+    );
+  },
+
+  deleteTimetableLesson(tenantId: string, lessonId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/timetable/lessons/${lessonId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  buildTimetableLessons(tenantId: string, payload: { grades?: string[]; replace?: boolean }) {
+    return apiRequest<{ created: number; total: number; skipped: string[] }>(
+      '/api/timetable/lessons/build',
+      { method: 'POST', tenantId, body: JSON.stringify(payload) }
+    );
+  },
+
+  setTeacherAvailability(
+    tenantId: string,
+    teacherId: string,
+    payload: { unavailable: Array<{ day: DayOfWeek; period: number }>; maxLessonsPerDay?: number | null }
+  ) {
+    return apiRequest<{ teacher: TeacherProfile }>(`/api/timetable/availability/${teacherId}`, {
+      method: 'PUT',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  setTimetableLocked(
+    tenantId: string,
+    payload: { slotIds?: string[]; grade?: string; section?: string; all?: boolean; locked: boolean }
+  ) {
+    return apiRequest<{ updated: number }>('/api/timetable/lock', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  solveTimetable(tenantId: string, payload: { grades?: string[]; assignRooms?: boolean; seed?: number }) {
+    return apiRequest<TimetableSolveResult>('/api/timetable/solve', {
       method: 'POST',
       tenantId,
       body: JSON.stringify(payload),

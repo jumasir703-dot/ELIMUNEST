@@ -666,6 +666,8 @@ export interface Tenant {
   subjectWeeklyLessons?: Record<string, number>;
   levelSubjects?: Partial<Record<CbcClusterId, string[]>>;
   levelSubjectWeeklyLessons?: Partial<Record<CbcClusterId, Record<string, number>>>;
+  /** aSc-style lesson cards: who teaches what to which class, how many periods a week. */
+  timetableLessons?: TimetableLesson[];
   rooms: string[];
   teachers: TeacherProfile[];
   nonTeachingStaff?: NonTeachingStaffProfile[];
@@ -1035,6 +1037,10 @@ export interface TeacherProfile {
   department: string;
   subjects: string[];
   assignedClasses?: TeacherClassAssignment[];
+  /** Slots this teacher cannot be scheduled in (timetable constraint). */
+  unavailable?: Array<{ day: DayOfWeek; period: number }>;
+  /** Maximum lessons this teacher may be scheduled per day (timetable constraint). */
+  maxLessonsPerDay?: number;
 }
 
 export interface Student {
@@ -1097,6 +1103,43 @@ export interface TimetableSlot {
   teacherId: string;
   teacherName: string;
   room: string;
+  /** Lesson card this slot was generated from (if any). */
+  lessonId?: string;
+  /** Locked slots are never moved or removed by the solver. */
+  locked?: boolean;
+}
+
+/** A lesson card (aSc term): one subject taught to one class by one teacher, N periods a week. */
+export interface TimetableLesson {
+  id: string;
+  grade: string;
+  section: string;
+  subject: string;
+  teacherId: string;
+  periodsPerWeek: number;
+  /** How many of the weekly periods are taught as 2-period blocks. */
+  doubleLessons?: number;
+  /** Fixed room (optional). */
+  room?: string;
+  /** Max periods of this subject per day for this class (optional). */
+  maxPerDay?: number;
+}
+
+export interface TimetableSolveResult {
+  placedPeriods: number;
+  totalPeriods: number;
+  createdSlots: number;
+  attemptsRun: number;
+  warnings: string[];
+  unplaced: Array<{
+    lessonId: string;
+    grade: string;
+    section: string;
+    subject: string;
+    teacherName: string;
+    missingPeriods: number;
+    reason: string;
+  }>;
 }
 
 export interface AttendanceRecord {

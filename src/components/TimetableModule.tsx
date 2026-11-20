@@ -4,14 +4,20 @@ import {
   BookOpen,
   CalendarCog,
   Check,
+  Lock,
+  LockOpen,
   Pencil,
   Plus,
   RotateCcw,
   Trash2,
   Users,
+  Wand2,
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import { LessonCardsPanel } from './timetable/LessonCardsPanel';
+import { SolveDialog } from './timetable/SolveDialog';
+import { TeacherAvailabilityPanel } from './timetable/TeacherAvailabilityPanel';
 import { PERIOD_LABELS } from '../lib/format';
 import {
   CLASS_TEACHER_SUBJECT_TOKEN,
@@ -55,7 +61,8 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
     : tenant.grades[0] || 'Grade 9';
   const defaultStreams = getStreamsForGrade(tenant, defaultGrade);
 
-  const [activeTab, setActiveTab] = useState<'grid' | 'teachers'>('grid');
+  const [activeTab, setActiveTab] = useState<'grid' | 'lessons' | 'constraints' | 'teachers'>('grid');
+  const [solveOpen, setSolveOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'grade' | 'teacher' | 'room'>('grade');
   const [selectedGrade, setSelectedGrade] = useState<string>(defaultGrade);
   const [selectedSection, setSelectedSection] = useState<string>(defaultStreams[0] || 'A');
@@ -440,6 +447,16 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
     setGenSelectedGrades((prev) =>
       prev.includes(grade) ? prev.filter((g) => g !== grade) : [...prev, grade]
     );
+  }
+
+  async function setLocked(slotIds: string[], locked: boolean) {
+    if (slotIds.length === 0) return;
+    try {
+      await saasApi.setTimetableLocked(tenant.id, { slotIds, locked });
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Could not update lock.', 'error');
+    }
   }
 
   async function handleGenerateTimetable(e: React.FormEvent) {
@@ -860,6 +877,26 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
               Weekly Timetable
             </button>
             <button
+              onClick={() => setActiveTab('lessons')}
+              className={`whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'lessons'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              Lessons ({(tenant.timetableLessons ?? []).length})
+            </button>
+            <button
+              onClick={() => setActiveTab('constraints')}
+              className={`whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'constraints'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              Constraints
+            </button>
+            <button
               onClick={() => setActiveTab('teachers')}
               className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                 activeTab === 'teachers'
@@ -881,11 +918,19 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
           </button>
 
           <button
+            onClick={() => setSolveOpen(true)}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+          >
+            <Wand2 className="h-4 w-4" />
+            Solve Timetable
+          </button>
+
+          <button
             onClick={() => setGenerateModalOpen(true)}
             className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-blue-200 bg-blue-50/80 px-3.5 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-800/70 dark:bg-blue-950/50 dark:text-blue-300 dark:hover:bg-blue-900/60"
           >
             <CalendarCog className="h-4 w-4" />
-            Generate Timetable
+            Quick Generate
           </button>
 
           <button
@@ -995,8 +1040,20 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
               <span className="font-medium text-slate-700 dark:text-slate-300">
                 07:30 – 08:00 Morning Assembly / Pre-Lesson Prep
               </span>
-              <span className="font-mono tabular-nums">
-                {filteredSlots.length} lessons scheduled
+              <span className="flex items-center gap-3">
+                <button
+                  onClick={() => setLocked(filteredSlots.map((x) => x.id), true)}
+                  className="inline-flex items-center gap-1 font-medium text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                >
+                  <Lock className="h-3 w-3" /> Lock all
+                </button>
+                <button
+                  onClick={() => setLocked(filteredSlots.map((x) => x.id), false)}
+                  className="inline-flex items-center gap-1 font-medium text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                >
+                  <LockOpen className="h-3 w-3" /> Unlock all
+                </button>
+                <span className="font-mono tabular-nums">{filteredSlots.length} lessons scheduled</span>
               </span>
             </div>
             <div className="overflow-x-auto">
@@ -1063,6 +1120,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                               className="border-r border-slate-200 p-2 align-top last:border-r-0 dark:border-slate-800"
                             >
                               {slot ? (
+                                <div className="relative">
                                 <button
                                   onClick={() => openEdit(slot)}
                                   className="w-full rounded-lg border border-slate-200 bg-slate-50/80 p-2.5 text-left transition-colors hover:border-blue-400 hover:bg-blue-50/50 dark:border-slate-700/80 dark:bg-slate-800/70 dark:hover:border-blue-500 dark:hover:bg-slate-800"
@@ -1079,6 +1137,19 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                                     {slot.room}
                                   </p>
                                 </button>
+                                <button
+                                  onClick={() => setLocked([slot.id], !slot.locked)}
+                                  aria-label={slot.locked ? 'Unlock lesson' : 'Lock lesson in place'}
+                                  title={slot.locked ? 'Locked: the solver will not move this lesson' : 'Lock this lesson in place'}
+                                  className={`absolute top-1.5 right-1.5 rounded p-1 ${
+                                    slot.locked
+                                      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300'
+                                      : 'text-slate-300 hover:bg-slate-200 hover:text-slate-600 dark:text-slate-600 dark:hover:bg-slate-700'
+                                  }`}
+                                >
+                                  {slot.locked ? <Lock className="h-3 w-3" /> : <LockOpen className="h-3 w-3" />}
+                                </button>
+                                </div>
                               ) : (
                                 <button
                                   onClick={() => openCreateAt(day, period)}
@@ -1101,6 +1172,10 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
             </div>
           </div>
         </>
+      ) : activeTab === 'lessons' ? (
+        <LessonCardsPanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
+      ) : activeTab === 'constraints' ? (
+        <TeacherAvailabilityPanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
       ) : (
         /* Teachers, Contacts, Class & Subject Allocation Section */
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -1796,6 +1871,15 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
       )}
 
       {/* Generate Kenyan Timetable Modal */}
+      {solveOpen && (
+        <SolveDialog
+          workspace={workspace}
+          onClose={() => setSolveOpen(false)}
+          onRefresh={onRefresh}
+          onNotify={onNotify}
+        />
+      )}
+
       {generateModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="flex max-h-[90vh] w-full max-w-xl flex-col rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
