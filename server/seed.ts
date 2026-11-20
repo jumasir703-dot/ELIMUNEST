@@ -14,6 +14,7 @@ import {
   type ApprovalSignOffRecord,
   type AttendanceRecord,
   type BudgetAllocation,
+  type CreditNoteRecord,
   type DayOfWeek,
   type DirectMessage,
   type EtimsVerificationRecord,
@@ -22,12 +23,15 @@ import {
   type FeeInvoice,
   type FeeStructure,
   type FeeVoteline,
+  type FeeWaiverRecord,
+  type FinanceAuditEntry,
   type IndependentVotelineItem,
   type LeaveOutChit,
   type MpesaTransactionLog,
   type NonTeachingStaffProfile,
   type NotificationItem,
   type PayrollEntry,
+  type PayrollStatutoryRateSchedule,
   type ReconciliationLine,
   type SchoolExpense,
   type StaffAttendanceRecord,
@@ -234,6 +238,8 @@ export interface DatabaseState {
   examResults: ExamResult[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
+  creditNotes?: CreditNoteRecord[];
+  feeWaivers?: FeeWaiverRecord[];
   independentVotelines?: IndependentVotelineItem[];
   expenses: SchoolExpense[];
   etimsChecks: EtimsVerificationRecord[];
@@ -241,12 +247,47 @@ export interface DatabaseState {
   payrollEntries: PayrollEntry[];
   budgets: BudgetAllocation[];
   approvalRecords: ApprovalSignOffRecord[];
+  financeAuditLogs?: FinanceAuditEntry[];
+  statutoryRateSchedules?: PayrollStatutoryRateSchedule[];
+  receiptCounters?: Record<string, number>;
+  studentCounters?: Record<string, number>;
+  invoiceCounters?: Record<string, number>;
+  admissionCounters?: Record<string, number>;
+  voucherCounters?: Record<string, number>;
+  creditNoteCounters?: Record<string, number>;
   announcements: Announcement[];
   messages: DirectMessage[];
   whatsappDispatches: WhatsAppDispatchRecord[];
   notifications: NotificationItem[];
   adminAuditLogs: AdminAuditEntry[];
 }
+
+export const DEFAULT_STATUTORY_RATE_SCHEDULES: PayrollStatutoryRateSchedule[] = [
+  {
+    id: 'stat-ke-2026-02',
+    effectiveFrom: '2026-02-01',
+    label: 'Kenya Statutory Schedule (Feb 2026 NSSF/SHIF/PAYE)',
+    currency: 'KES',
+    nssfLowerLimit: 9000,
+    nssfUpperLimit: 108000,
+    nssfRate: 0.06,
+    nssfMaxEmployee: 6480,
+    shifRate: 0.0275,
+    shifMin: 300,
+    housingLevyRate: 0.015,
+    nitaLevy: 50,
+    personalRelief: 2400,
+    payeBands: [
+      { limit: 24000, rate: 0.1 },
+      { limit: 8333, rate: 0.25 },
+      { limit: 467667, rate: 0.3 },
+      { limit: 300000, rate: 0.325 },
+      { limit: null, rate: 0.35 },
+    ],
+    updatedBy: 'System Default (Kenya Feb 2026)',
+    updatedAt: '2026-02-01T00:00:00Z',
+  },
+];
 
 export function buildDefaultExpensesForTenant(
   tenantId: string,
@@ -269,6 +310,9 @@ export function buildDefaultExpensesForTenant(
       expenseDate: '2026-11-04',
       status: 'Paid',
       recordedBy: 'Bursar Office',
+      createdByUserId: `usr-${tenantId}-bursar`,
+      approvedBy: 'School Admin',
+      approvedAt: '2026-11-04T09:15:00Z',
       notes: 'Chemistry & Biology Grade 9-12 practical consumables.',
       createdAt: '2026-11-04T09:15:00Z',
     },
@@ -285,6 +329,9 @@ export function buildDefaultExpensesForTenant(
       expenseDate: '2026-11-08',
       status: 'Paid',
       recordedBy: 'Bursar Office',
+      createdByUserId: `usr-${tenantId}-bursar`,
+      approvedBy: 'School Admin',
+      approvedAt: '2026-11-08T11:30:00Z',
       notes: 'Dry grains, dairy, and produce batch delivery.',
       createdAt: '2026-11-08T11:30:00Z',
     },
@@ -301,6 +348,9 @@ export function buildDefaultExpensesForTenant(
       expenseDate: '2026-11-11',
       status: 'Approved',
       recordedBy: 'Accounts Office',
+      createdByUserId: `usr-${tenantId}-bursar`,
+      approvedBy: 'School Admin',
+      approvedAt: '2026-11-11T14:20:00Z',
       notes: 'Monthly campus electricity and borehole pump billing.',
       createdAt: '2026-11-11T14:20:00Z',
     },
@@ -317,6 +367,7 @@ export function buildDefaultExpensesForTenant(
       expenseDate: '2026-11-14',
       status: 'Pending Approval',
       recordedBy: 'Transport Coordinator',
+      createdByUserId: `usr-${tenantId}-bursar`,
       notes: 'Scheduled 15,000 km brake & oil service plus diesel refill.',
       etimsStatus: 'Unverified',
       createdAt: '2026-11-14T08:45:00Z',
@@ -324,48 +375,90 @@ export function buildDefaultExpensesForTenant(
   ];
 }
 
-export function computeStatutoryDeductions(grossPay: number, currency: 'KES' | 'USD') {
+export function selectActiveStatutorySchedule(
+  currency: 'KES' | 'USD',
+  schedules: PayrollStatutoryRateSchedule[] = DEFAULT_STATUTORY_RATE_SCHEDULES,
+  payPeriod?: string
+): PayrollStatutoryRateSchedule | null {
+  const effectiveDate = payPeriod && /^\d{4}-\d{2}/.test(payPeriod)
+    ? `${payPeriod.slice(0, 7)}-01`
+    : new Date().toISOString().slice(0, 10);
+  const matching = schedules
+    .filter((s) => s.currency === currency && s.effectiveFrom <= effectiveDate)
+    .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+  if (matching.length > 0) return matching[0];
+  const fallback = schedules
+    .filter((s) => s.currency === currency)
+    .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+  return fallback[0] || (currency === 'KES' ? DEFAULT_STATUTORY_RATE_SCHEDULES[0] : null);
+}
+
+export function computeStatutoryDeductions(
+  grossPay: number,
+  currency: 'KES' | 'USD',
+  schedules: PayrollStatutoryRateSchedule[] = DEFAULT_STATUTORY_RATE_SCHEDULES,
+  payPeriod?: string
+) {
   const gross = Math.max(0, Math.round(grossPay));
-  if (currency === 'USD') {
-    // Scaled international tax/social withholding approximation for USD campuses
+  const schedule = selectActiveStatutorySchedule(currency, schedules, payPeriod);
+
+  if (!schedule && currency === 'USD') {
     const paye = Math.round(gross * 0.14);
     const nssf = Math.round(gross * 0.04);
     const shif = Math.round(gross * 0.025);
     const housingLevy = Math.round(gross * 0.015);
-    return { paye, nssf, shif, housingLevy };
+    return {
+      paye,
+      nssf,
+      shif,
+      housingLevy,
+      employerNssf: nssf,
+      employerHousingLevy: housingLevy,
+      employerNita: 0,
+      scheduleId: 'usd-default',
+    };
   }
 
-  // Kenya KRA PAYE progressive monthly bands + Personal Relief (KES 2,400)
-  const nssf = Math.min(4320, Math.round(gross * 0.06));
-  const shif = Math.max(300, Math.round(gross * 0.0275));
-  const housingLevy = Math.round(gross * 0.015);
-  const taxable = Math.max(0, gross - nssf);
+  const active = schedule || DEFAULT_STATUTORY_RATE_SCHEDULES[0];
+  // Feb 2026 NSSF: 6% of pensionable pay capped at UEL (108,000 -> max 6,480), equal employer share
+  const pensionablePay = Math.min(gross, active.nssfUpperLimit);
+  const nssf = gross > 0
+    ? Math.min(active.nssfMaxEmployee, Math.round(pensionablePay * active.nssfRate))
+    : 0;
+  const employerNssf = nssf;
+
+  // SHIF (2.75%, minimum 300) and Housing Levy (1.5%) are deductible before PAYE
+  const shif = gross > 0 ? Math.max(active.shifMin, Math.round(gross * active.shifRate)) : 0;
+  const housingLevy = Math.round(gross * active.housingLevyRate);
+  const employerHousingLevy = housingLevy;
+  const employerNita = gross > 0 ? active.nitaLevy : 0;
+
+  const taxable = Math.max(0, gross - nssf - shif - housingLevy);
 
   let tax = 0;
   let rem = taxable;
-  const band1 = Math.min(rem, 24000);
-  tax += band1 * 0.1;
-  rem -= band1;
-  if (rem > 0) {
-    const band2 = Math.min(rem, 8333);
-    tax += band2 * 0.25;
-    rem -= band2;
+  for (const band of active.payeBands) {
+    if (rem <= 0) break;
+    if (band.limit === null || !Number.isFinite(band.limit)) {
+      tax += rem * band.rate;
+      rem = 0;
+    } else {
+      const slice = Math.min(rem, band.limit);
+      tax += slice * band.rate;
+      rem -= slice;
+    }
   }
-  if (rem > 0) {
-    const band3 = Math.min(rem, 467667);
-    tax += band3 * 0.3;
-    rem -= band3;
-  }
-  if (rem > 0) {
-    const band4 = Math.min(rem, 300000);
-    tax += band4 * 0.325;
-    rem -= band4;
-  }
-  if (rem > 0) {
-    tax += rem * 0.35;
-  }
-  const paye = Math.max(0, Math.round(tax - 2400));
-  return { paye, nssf, shif, housingLevy };
+  const paye = gross > 0 ? Math.max(0, Math.round(tax - active.personalRelief)) : 0;
+  return {
+    paye,
+    nssf,
+    shif,
+    housingLevy,
+    employerNssf,
+    employerHousingLevy,
+    employerNita,
+    scheduleId: active.id,
+  };
 }
 
 export function buildDefaultEtimsChecksForTenant(
@@ -396,8 +489,8 @@ export function buildDefaultEtimsChecksForTenant(
       taxableAmount: taxable1,
       vatAmount: vat1,
       totalAmount: total1,
-      status: 'Verified',
-      verificationNotes: 'CU serial & supplier KRA PIN verified against KRA eTIMS format.',
+      status: 'Checked manually',
+      verificationNotes: 'CU serial & supplier KRA PIN format checked manually against KRA eTIMS rules.',
       checkedBy: 'Bursar Office',
       checkedAt: '2026-11-04T10:10:00Z',
     },
@@ -413,8 +506,8 @@ export function buildDefaultEtimsChecksForTenant(
       taxableAmount: taxable2,
       vatAmount: vat2,
       totalAmount: total2,
-      status: 'Verified',
-      verificationNotes: 'Zero-rated & standard rated farm produce tax invoice validated.',
+      status: 'Checked manually',
+      verificationNotes: 'Farm produce tax invoice format & totals checked manually.',
       checkedBy: 'Accounts Office',
       checkedAt: '2026-11-08T13:05:00Z',
     },
@@ -479,7 +572,8 @@ export function buildDefaultReconciliationForTenant(
 
 export function buildDefaultPayrollForTenant(
   tenant: Tenant,
-  payPeriod = '2026-11'
+  payPeriod = '2026-11',
+  schedules: PayrollStatutoryRateSchedule[] = DEFAULT_STATUTORY_RATE_SCHEDULES
 ): PayrollEntry[] {
   const isKes = tenant.currency === 'KES';
   const entries: PayrollEntry[] = [];
@@ -488,7 +582,16 @@ export function buildDefaultPayrollForTenant(
     const basicSalary = isKes ? 58000 + idx * 4500 : 1800 + idx * 140;
     const allowances = isKes ? 9500 : 280;
     const grossPay = basicSalary + allowances;
-    const { paye, nssf, shif, housingLevy } = computeStatutoryDeductions(grossPay, tenant.currency);
+    const {
+      paye,
+      nssf,
+      shif,
+      housingLevy,
+      employerNssf,
+      employerHousingLevy,
+      employerNita,
+      scheduleId,
+    } = computeStatutoryDeductions(grossPay, tenant.currency, schedules, payPeriod);
     const saccoOrLoan = isKes ? (idx % 2 === 0 ? 3500 : 0) : idx % 2 === 0 ? 80 : 0;
     const totalDeductions = paye + nssf + shif + housingLevy + saccoOrLoan;
     entries.push({
@@ -509,7 +612,15 @@ export function buildDefaultPayrollForTenant(
       saccoOrLoan,
       totalDeductions,
       netPay: Math.max(0, grossPay - totalDeductions),
+      employerNssf,
+      employerHousingLevy,
+      employerNita,
+      totalEmployerCost: grossPay + employerNssf + employerHousingLevy + employerNita,
+      statutoryScheduleId: scheduleId,
       status: 'Approved',
+      createdByUserId: `usr-${tenant.id}-bursar`,
+      approvedBy: 'School Admin',
+      approvedAt: '2026-11-14T10:00:00Z',
       updatedAt: '2026-11-14T10:00:00Z',
     });
   });
@@ -518,7 +629,16 @@ export function buildDefaultPayrollForTenant(
     const basicSalary = isKes ? 34000 + idx * 3500 : 1050 + idx * 90;
     const allowances = isKes ? 5000 : 150;
     const grossPay = basicSalary + allowances;
-    const { paye, nssf, shif, housingLevy } = computeStatutoryDeductions(grossPay, tenant.currency);
+    const {
+      paye,
+      nssf,
+      shif,
+      housingLevy,
+      employerNssf,
+      employerHousingLevy,
+      employerNita,
+      scheduleId,
+    } = computeStatutoryDeductions(grossPay, tenant.currency, schedules, payPeriod);
     const saccoOrLoan = isKes && idx === 0 ? 2500 : 0;
     const totalDeductions = paye + nssf + shif + housingLevy + saccoOrLoan;
     entries.push({
@@ -539,7 +659,13 @@ export function buildDefaultPayrollForTenant(
       saccoOrLoan,
       totalDeductions,
       netPay: Math.max(0, grossPay - totalDeductions),
+      employerNssf,
+      employerHousingLevy,
+      employerNita,
+      totalEmployerCost: grossPay + employerNssf + employerHousingLevy + employerNita,
+      statutoryScheduleId: scheduleId,
       status: 'Draft',
+      createdByUserId: `usr-${tenant.id}-bursar`,
       updatedAt: '2026-11-14T10:00:00Z',
     });
   });
@@ -574,6 +700,7 @@ export function buildDefaultBudgetsForTenant(tenant: Tenant): BudgetAllocation[]
       category,
       allocatedAmount: Math.max(100, baseAmounts[category]),
       status: isPending ? 'Pending Approval' : 'Approved',
+      createdByUserId: `usr-${tenant.id}-bursar`,
       approvedBy: isPending ? undefined : approverName,
       approvedAt: isPending ? undefined : '2026-11-01T08:00:00Z',
       approvalNotes: isPending
@@ -608,6 +735,7 @@ export function buildDefaultApprovalsForTenant(
       bursarName: 'Mary Wanjiru (School Bursar)',
       decision: 'Approved',
       remarks: 'Awarded to lowest evaluated compliant bidder AfriLab Scientific.',
+      createdByUserId: `usr-${tenantId}-bursar`,
       createdAt: '2026-11-02T14:00:00Z',
       signedAt: '2026-11-02T16:15:00Z',
     },
@@ -627,6 +755,7 @@ export function buildDefaultApprovalsForTenant(
       bursarName: 'Mary Wanjiru (School Bursar)',
       decision: 'Pending Sign-Off',
       remarks: 'Awaiting Finance Sub-Committee counter-signature before disbursement.',
+      createdByUserId: `usr-${tenantId}-bursar`,
       createdAt: '2026-11-15T09:00:00Z',
     },
   ];
@@ -672,6 +801,8 @@ export function createEmptyDatabase(): DatabaseState {
     examResults: [],
     feeStructures: [],
     invoices: [],
+    creditNotes: [],
+    feeWaivers: [],
     independentVotelines: [],
     expenses: [],
     etimsChecks: [],
@@ -679,6 +810,17 @@ export function createEmptyDatabase(): DatabaseState {
     payrollEntries: [],
     budgets: [],
     approvalRecords: [],
+    financeAuditLogs: [],
+    statutoryRateSchedules: DEFAULT_STATUTORY_RATE_SCHEDULES.map((s) => ({
+      ...s,
+      payeBands: s.payeBands.map((b) => ({ ...b })),
+    })),
+    receiptCounters: {},
+    studentCounters: {},
+    invoiceCounters: {},
+    admissionCounters: {},
+    voucherCounters: {},
+    creditNoteCounters: {},
     announcements: [],
     messages: [],
     whatsappDispatches: [],
@@ -2295,6 +2437,8 @@ export async function createSeedDatabase(options?: {
       examResults,
       feeStructures,
       invoices,
+      creditNotes: [],
+      feeWaivers: [],
       independentVotelines: [
         {
           id: 'ivl-oak-1',
@@ -2343,6 +2487,37 @@ export async function createSeedDatabase(options?: {
       payrollEntries,
       budgets,
       approvalRecords,
+      financeAuditLogs: [],
+      statutoryRateSchedules: DEFAULT_STATUTORY_RATE_SCHEDULES.map((s) => ({
+        ...s,
+        payeBands: s.payeBands.map((b) => ({ ...b })),
+      })),
+      receiptCounters: {
+        'tenant-oakridge': 10,
+        'tenant-westfield': 10,
+        'tenant-stjude': 10,
+      },
+      studentCounters: {
+        'tenant-oakridge': 2605,
+        'tenant-westfield': 2605,
+        'tenant-stjude': 2605,
+      },
+      invoiceCounters: {
+        'tenant-oakridge': 8810,
+        'tenant-westfield': 8810,
+        'tenant-stjude': 8810,
+      },
+      admissionCounters: {
+        'tenant-oakridge': 110,
+        'tenant-westfield': 110,
+        'tenant-stjude': 110,
+      },
+      voucherCounters: {
+        'tenant-oakridge': 202610,
+        'tenant-westfield': 202610,
+        'tenant-stjude': 202610,
+      },
+      creditNoteCounters: {},
       announcements,
       messages,
       whatsappDispatches: [],

@@ -22,6 +22,7 @@ import {
   getTeacherAssignedSubjectsForCohort,
   is844FormFourGrade,
   STANDARD_ASSESSMENT_TYPES,
+  type ExamResultStatus,
   type TenantWorkspaceData,
   type UserRole,
 } from '../shared/types';
@@ -48,6 +49,7 @@ interface StagedScoreEntry {
   studentId: string;
   subject: string;
   score: string;
+  resultStatus: ExamResultStatus;
   remarks: string;
   source: 'manual' | 'excel';
 }
@@ -191,6 +193,8 @@ export function ExamResultsEntryPanel({
     );
   }, [examCycles, selectedExamType]);
 
+  const isCycleLocked = matchedCycle?.status === 'Published';
+
   const effectiveTeacherId = useMemo(() => {
     if (selectedTeacherId === '__ADMIN__' && isAdminRole) {
       return '__ADMIN__';
@@ -249,28 +253,57 @@ export function ExamResultsEntryPanel({
   const is844 = is844FormFourGrade(selectedGrade);
   const maxPoints = is844 ? 12 : 8;
 
-  // Compute pending valid staged entries scoped to current allowed subjects & cohort students
-  const pendingValidEntries = useMemo(() => {
+  // Compute pending valid staged entries & explicit validation errors (never silently drop/clamp invalid scores)
+  const { pendingValidEntries, pendingValidationErrors } = useMemo(() => {
     const allowedSet = new Set(allowedSubjects.map((s) => s.toLowerCase()));
-    const studentIdSet = new Set(cohortStudents.map((s) => s.id));
-    const list: Array<{ studentId: string; subject: string; score: number; remarks: string; source: 'manual' | 'excel' }> = [];
+    const studentMap = new Map(cohortStudents.map((s) => [s.id, s]));
+    const list: Array<{
+      studentId: string;
+      subject: string;
+      score: number | null;
+      resultStatus: ExamResultStatus;
+      remarks: string;
+      source: 'manual' | 'excel';
+    }> = [];
+    const errors: Array<{ key: string; message: string }> = [];
 
-    for (const item of Object.values(stagedEntries)) {
-      if (!studentIdSet.has(item.studentId)) continue;
+    for (const [key, item] of Object.entries(stagedEntries)) {
+      const stu = studentMap.get(item.studentId);
+      if (!stu) continue;
       if (!allowedSet.has(item.subject.toLowerCase())) continue;
+
+      if (item.resultStatus === 'Absent' || item.resultStatus === 'Exempt') {
+        list.push({
+          studentId: item.studentId,
+          subject: item.subject,
+          score: null,
+          resultStatus: item.resultStatus,
+          remarks: item.remarks.trim() || item.resultStatus,
+          source: item.source,
+        });
+        continue;
+      }
+
       const trimmed = item.score.trim();
       if (trimmed === '') continue;
       const num = Number(trimmed);
-      if (!Number.isFinite(num) || num < 0 || num > 100) continue;
+      if (!Number.isFinite(num) || num < 0 || num > 100) {
+        errors.push({
+          key,
+          message: `${stu.fullName} (${item.subject}): "${trimmed}" must be between 0 and 100.`,
+        });
+        continue;
+      }
       list.push({
         studentId: item.studentId,
         subject: item.subject,
         score: Math.round(num),
+        resultStatus: 'Scored',
         remarks: item.remarks.trim(),
         source: item.source,
       });
     }
-    return list;
+    return { pendingValidEntries: list, pendingValidationErrors: errors };
   }, [stagedEntries, allowedSubjects, cohortStudents]);
 
   const stagedCountBySubject = useMemo(() => {
@@ -286,8 +319,13 @@ export function ExamResultsEntryPanel({
     setExcelSummary(null);
   }
 
-  function handleScoreChange(studentId: string, value: string, existingRemarks: string) {
-    if (!effectiveSubject) return;
+  function handleScoreChange(
+    studentId: string,
+    value: string,
+    existingRemarks: string,
+    existingStatus: ExamResultStatus = 'Scored'
+  ) {
+    if (!effectiveSubject || isCycleLocked) return;
     const key = `${studentId}::${effectiveSubject}`;
     setStagedEntries((prev) => {
       const existingDraft = prev[key];
@@ -297,6 +335,7 @@ export function ExamResultsEntryPanel({
           studentId,
           subject: effectiveSubject,
           score: value,
+          resultStatus: existingDraft?.resultStatus ?? (existingStatus === 'Scored' ? 'Scored' : 'Scored'),
           remarks: existingDraft?.remarks ?? existingRemarks,
           source: 'manual',
         },
@@ -304,8 +343,41 @@ export function ExamResultsEntryPanel({
     });
   }
 
-  function handleRemarksChange(studentId: string, remarksVal: string, existingScore: number | undefined) {
-    if (!effectiveSubject) return;
+  function handleResultStatusChange(
+    studentId: string,
+    nextStatus: ExamResultStatus,
+    existingScore: number | undefined,
+    existingRemarks: string
+  ) {
+    if (!effectiveSubject || isCycleLocked) return;
+    const key = `${studentId}::${effectiveSubject}`;
+    setStagedEntries((prev) => {
+      const existingDraft = prev[key];
+      const nextScore =
+        nextStatus === 'Absent' || nextStatus === 'Exempt'
+          ? ''
+          : existingDraft?.score ?? (existingScore !== undefined ? String(existingScore) : '');
+      return {
+        ...prev,
+        [key]: {
+          studentId,
+          subject: effectiveSubject,
+          score: nextScore,
+          resultStatus: nextStatus,
+          remarks: existingDraft?.remarks ?? existingRemarks,
+          source: 'manual',
+        },
+      };
+    });
+  }
+
+  function handleRemarksChange(
+    studentId: string,
+    remarksVal: string,
+    existingScore: number | undefined,
+    existingStatus: ExamResultStatus = 'Scored'
+  ) {
+    if (!effectiveSubject || isCycleLocked) return;
     const key = `${studentId}::${effectiveSubject}`;
     setStagedEntries((prev) => {
       const existingDraft = prev[key];
@@ -317,6 +389,7 @@ export function ExamResultsEntryPanel({
           studentId,
           subject: effectiveSubject,
           score: fallbackScore,
+          resultStatus: existingDraft?.resultStatus ?? existingStatus,
           remarks: remarksVal,
           source: existingDraft?.source ?? 'manual',
         },
@@ -353,7 +426,14 @@ export function ExamResultsEntryPanel({
             r.studentId === stu.id &&
             r.subject.toLowerCase() === sub.toLowerCase()
         );
-        row[sub] = existing ? existing.score : '';
+        row[sub] =
+          existing?.resultStatus === 'Absent'
+            ? 'ABS'
+            : existing?.resultStatus === 'Exempt'
+            ? 'EXM'
+            : existing
+            ? existing.score
+            : '';
       }
       row['Remarks'] = '';
       return row;
@@ -542,6 +622,33 @@ export function ExamResultsEntryPanel({
           for (const col of allowedScoreCols) {
             const rawCell = String(rawRow[col.header] ?? '').trim();
             if (rawCell === '') continue;
+            const upperCell = rawCell.toUpperCase();
+            if (upperCell === 'ABS' || upperCell === 'ABSENT') {
+              nextStaged[`${student.id}::${col.subject}`] = {
+                studentId: student.id,
+                subject: col.subject,
+                score: '',
+                resultStatus: 'Absent',
+                remarks: rowRemarks || 'Absent',
+                source: 'excel',
+              };
+              pulledCount += 1;
+              pulledSubjectsSet.add(col.subject);
+              continue;
+            }
+            if (upperCell === 'EXM' || upperCell === 'EXEMPT') {
+              nextStaged[`${student.id}::${col.subject}`] = {
+                studentId: student.id,
+                subject: col.subject,
+                score: '',
+                resultStatus: 'Exempt',
+                remarks: rowRemarks || 'Exempt',
+                source: 'excel',
+              };
+              pulledCount += 1;
+              pulledSubjectsSet.add(col.subject);
+              continue;
+            }
             const parsed = Number(rawCell);
             if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
               invalidScores.push(`Row ${rowNum} (${student.fullName} · ${col.subject}): "${rawCell}"`);
@@ -552,6 +659,7 @@ export function ExamResultsEntryPanel({
               studentId: student.id,
               subject: col.subject,
               score: String(rounded),
+              resultStatus: 'Scored',
               remarks: rowRemarks,
               source: 'excel',
             };
@@ -578,6 +686,34 @@ export function ExamResultsEntryPanel({
 
           if (!targetSub) return;
 
+          const upperCell = rawCell.toUpperCase();
+          if (upperCell === 'ABS' || upperCell === 'ABSENT') {
+            nextStaged[`${student.id}::${targetSub}`] = {
+              studentId: student.id,
+              subject: targetSub,
+              score: '',
+              resultStatus: 'Absent',
+              remarks: rowRemarks || 'Absent',
+              source: 'excel',
+            };
+            pulledCount += 1;
+            pulledSubjectsSet.add(targetSub);
+            return;
+          }
+          if (upperCell === 'EXM' || upperCell === 'EXEMPT') {
+            nextStaged[`${student.id}::${targetSub}`] = {
+              studentId: student.id,
+              subject: targetSub,
+              score: '',
+              resultStatus: 'Exempt',
+              remarks: rowRemarks || 'Exempt',
+              source: 'excel',
+            };
+            pulledCount += 1;
+            pulledSubjectsSet.add(targetSub);
+            return;
+          }
+
           const parsed = Number(rawCell);
           if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
             invalidScores.push(`Row ${rowNum} (${student.fullName} · ${targetSub}): "${rawCell}"`);
@@ -588,6 +724,7 @@ export function ExamResultsEntryPanel({
             studentId: student.id,
             subject: targetSub,
             score: String(rounded),
+            resultStatus: 'Scored',
             remarks: rowRemarks,
             source: 'excel',
           };
@@ -633,8 +770,22 @@ export function ExamResultsEntryPanel({
   }
 
   async function handleSaveAllResults() {
+    if (isCycleLocked) {
+      onNotify(
+        `Exam cycle "${matchedCycle?.title}" is Published and locked. An Admin must unlock it first.`,
+        'error'
+      );
+      return;
+    }
+    if (pendingValidationErrors.length > 0) {
+      onNotify(
+        `Fix ${pendingValidationErrors.length} invalid score(s) (must be 0–100) before saving.`,
+        'error'
+      );
+      return;
+    }
     if (pendingValidEntries.length === 0) {
-      onNotify('Enter marks manually or upload an Excel file first.', 'error');
+      onNotify('Enter marks manually, mark Absent/Exempt, or upload an Excel file first.', 'error');
       return;
     }
     if (!effectiveTeacherId) {
@@ -654,6 +805,7 @@ export function ExamResultsEntryPanel({
           studentId: item.studentId,
           subject: item.subject,
           score: item.score,
+          resultStatus: item.resultStatus,
           remarks: item.remarks || undefined,
         })),
       });
@@ -863,7 +1015,7 @@ export function ExamResultsEntryPanel({
             />
             <button
               type="button"
-              disabled={allowedSubjects.length === 0 || cohortStudents.length === 0}
+              disabled={isCycleLocked || allowedSubjects.length === 0 || cohortStudents.length === 0}
               onClick={() => fileInputRef.current?.click()}
               className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
             >
@@ -872,6 +1024,15 @@ export function ExamResultsEntryPanel({
             </button>
           </div>
         </div>
+
+        {isCycleLocked && (
+          <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
+            <div>
+              <strong>{matchedCycle?.title} is Published and locked.</strong> Mark editing and Excel imports are disabled. An Admin must unlock this exam cycle with an audit reason on the <em>Results &amp; Merit List</em> tab before marks can be changed.
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Excel Pull Feedback Banner */}
@@ -964,6 +1125,7 @@ export function ExamResultsEntryPanel({
                 <th className="px-4 py-3">Adm No</th>
                 <th className="px-4 py-3">Student Name</th>
                 <th className="px-4 py-3 text-right">Saved Mark</th>
+                <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Enter Mark (0–100)</th>
                 <th className="px-4 py-3">Remarks</th>
                 <th className="px-4 py-3 text-right">{is844 ? '8-4-4 Grade' : 'CBE Level'}</th>
@@ -973,13 +1135,13 @@ export function ExamResultsEntryPanel({
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {allowedSubjects.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                     No assigned subjects available for {selectedTeacher?.name || 'this teacher'} in {selectedGrade} Stream {effectiveStream}.
                   </td>
                 </tr>
               ) : cohortStudents.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                     No active students enrolled in {selectedGrade} Stream {effectiveStream}.
                   </td>
                 </tr>
@@ -993,19 +1155,35 @@ export function ExamResultsEntryPanel({
                           r.subject.toLowerCase() === effectiveSubject.toLowerCase()
                       )
                     : undefined;
+                  const existingStatus: ExamResultStatus =
+                    existing?.resultStatus ||
+                    (existing?.letterGrade === 'ABS'
+                      ? 'Absent'
+                      : existing?.letterGrade === 'EXM'
+                      ? 'Exempt'
+                      : 'Scored');
                   const draft = stagedEntries[`${stu.id}::${effectiveSubject}`];
+                  const rowStatus: ExamResultStatus = draft ? draft.resultStatus : existingStatus;
+                  const isNonSat = rowStatus === 'Absent' || rowStatus === 'Exempt';
+
                   const inputScore =
                     draft !== undefined
                       ? draft.score
-                      : existing
+                      : existing && existingStatus === 'Scored'
                       ? String(existing.score)
                       : '';
                   const inputRemarks =
                     draft !== undefined ? draft.remarks : existing?.remarks || '';
 
+                  const trimmedScore = inputScore.trim();
+                  const parsedNum = trimmedScore !== '' ? Number(trimmedScore) : null;
+                  const isInvalidScore =
+                    !isNonSat &&
+                    trimmedScore !== '' &&
+                    (!Number.isFinite(parsedNum) || (parsedNum as number) < 0 || (parsedNum as number) > 100);
                   const numericVal =
-                    inputScore.trim() !== '' && !Number.isNaN(Number(inputScore))
-                      ? Math.max(0, Math.min(100, Math.round(Number(inputScore))))
+                    !isNonSat && !isInvalidScore && parsedNum !== null
+                      ? Math.round(parsedNum)
                       : null;
                   const graded =
                     numericVal !== null ? computeClientGrade(numericVal, stu.grade) : null;
@@ -1014,7 +1192,9 @@ export function ExamResultsEntryPanel({
                     <tr
                       key={stu.id}
                       className={
-                        draft
+                        isInvalidScore
+                          ? 'bg-red-50/60 dark:bg-red-950/20'
+                          : draft
                           ? 'bg-blue-50/40 dark:bg-blue-950/20'
                           : 'hover:bg-slate-50/60 dark:hover:bg-slate-800/30'
                       }
@@ -1031,36 +1211,84 @@ export function ExamResultsEntryPanel({
                         )}
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                        {existing ? `${existing.score}%` : '—'}
+                        {existing
+                          ? existingStatus === 'Absent'
+                            ? 'ABS'
+                            : existingStatus === 'Exempt'
+                            ? 'EXM'
+                            : `${existing.score}%`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <select
+                          aria-label={`Result status for ${stu.fullName}`}
+                          disabled={isCycleLocked}
+                          value={rowStatus}
+                          onChange={(e) =>
+                            handleResultStatusChange(
+                              stu.id,
+                              e.target.value as ExamResultStatus,
+                              existing?.score,
+                              existing?.remarks || ''
+                            )
+                          }
+                          className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                        >
+                          <option value="Scored">Scored</option>
+                          <option value="Absent">Absent (ABS)</option>
+                          <option value="Exempt">Exempt (EXM)</option>
+                        </select>
                       </td>
                       <td className="px-4 py-2.5">
                         <input
                           type="number"
                           min={0}
                           max={100}
-                          value={inputScore}
+                          disabled={isCycleLocked || isNonSat}
+                          value={isNonSat ? '' : inputScore}
                           onChange={(e) =>
-                            handleScoreChange(stu.id, e.target.value, existing?.remarks || '')
+                            handleScoreChange(stu.id, e.target.value, existing?.remarks || '', rowStatus)
                           }
-                          placeholder="—"
+                          placeholder={isNonSat ? (rowStatus === 'Absent' ? 'ABS' : 'EXM') : '—'}
                           aria-label={`Mark for ${stu.fullName}`}
-                          className="w-24 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-sm text-slate-900 tabular-nums focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                          className={`w-24 rounded-md border bg-white px-2.5 py-1.5 font-mono text-sm text-slate-900 tabular-nums focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100 disabled:opacity-60 dark:bg-slate-800 dark:text-slate-100 dark:disabled:bg-slate-900 ${
+                            isInvalidScore
+                              ? 'border-red-500 ring-1 ring-red-500 focus:border-red-600'
+                              : 'border-slate-200 focus:border-blue-600 dark:border-slate-700'
+                          }`}
                         />
+                        {isInvalidScore && (
+                          <p className="mt-1 text-[10px] font-semibold text-red-600 dark:text-red-400">
+                            Must be 0–100
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-2.5">
                         <input
                           type="text"
+                          disabled={isCycleLocked}
                           value={inputRemarks}
                           onChange={(e) =>
-                            handleRemarksChange(stu.id, e.target.value, existing?.score)
+                            handleRemarksChange(
+                              stu.id,
+                              e.target.value,
+                              existing?.score,
+                              rowStatus
+                            )
                           }
                           placeholder="Optional remark"
                           aria-label={`Remarks for ${stu.fullName}`}
-                          className="w-full min-w-[160px] rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                          className="w-full min-w-[160px] rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-blue-600 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                         />
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono text-xs font-bold tabular-nums">
-                        {graded ? (
+                        {isNonSat ? (
+                          <span className="text-amber-700 dark:text-amber-400">
+                            {rowStatus === 'Absent' ? 'ABS' : 'EXM'}
+                          </span>
+                        ) : isInvalidScore ? (
+                          <span className="text-red-600 dark:text-red-400">Invalid</span>
+                        ) : graded ? (
                           <span className={getGradeBadgeColor(graded.letterGrade, is844)}>
                             {graded.letterGrade}
                           </span>
@@ -1069,7 +1297,11 @@ export function ExamResultsEntryPanel({
                         )}
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-600 tabular-nums dark:text-slate-400">
-                        {graded ? `${graded.gpaPoints} / ${maxPoints}` : '—'}
+                        {isNonSat
+                          ? 'Excluded'
+                          : graded
+                          ? `${graded.gpaPoints} / ${maxPoints}`
+                          : '—'}
                       </td>
                     </tr>
                   );
@@ -1082,7 +1314,11 @@ export function ExamResultsEntryPanel({
         {/* Save Action Bar */}
         <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50/70 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:bg-slate-900/50">
           <div className="text-xs text-slate-600 dark:text-slate-400">
-            {pendingValidEntries.length > 0 ? (
+            {pendingValidationErrors.length > 0 ? (
+              <span className="font-semibold text-red-600 dark:text-red-400">
+                {pendingValidationErrors.length} invalid mark(s): {pendingValidationErrors[0].message}
+              </span>
+            ) : pendingValidEntries.length > 0 ? (
               <span>
                 <strong className="font-mono text-slate-900 dark:text-slate-100">
                   {pendingValidEntries.length}
@@ -1095,7 +1331,7 @@ export function ExamResultsEntryPanel({
               </span>
             ) : (
               <span>
-                Enter marks above or upload an Excel spreadsheet, then click <strong>Save Results</strong>.
+                Enter marks above, mark Absent/Exempt, or upload an Excel spreadsheet, then click <strong>Save Results</strong>.
               </span>
             )}
           </div>
@@ -1110,7 +1346,7 @@ export function ExamResultsEntryPanel({
                 View Ranked Summary
               </button>
             )}
-            {pendingValidEntries.length > 0 && (
+            {(pendingValidEntries.length > 0 || pendingValidationErrors.length > 0) && (
               <button
                 type="button"
                 disabled={saving}
@@ -1126,7 +1362,13 @@ export function ExamResultsEntryPanel({
             )}
             <button
               type="button"
-              disabled={saving || pendingValidEntries.length === 0 || allowedSubjects.length === 0}
+              disabled={
+                saving ||
+                isCycleLocked ||
+                pendingValidationErrors.length > 0 ||
+                pendingValidEntries.length === 0 ||
+                allowedSubjects.length === 0
+              }
               onClick={handleSaveAllResults}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >

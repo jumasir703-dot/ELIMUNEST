@@ -212,8 +212,15 @@ export function buildFinancialBooksReport(params: {
       const payments = (inv.payments || []).filter(
         (p) => !filterByAsOf || p.paidAt.slice(0, 10) <= effectiveAsOfDate
       );
-      const paidAmount = payments.reduce((sum, p) => sum + p.amount, 0);
-      const balance = Math.max(0, inv.totalAmount - paidAmount);
+      const paidAmount = Math.max(
+        0,
+        payments.reduce(
+          (sum, p) => sum + (typeof p.appliedAmount === 'number' ? p.appliedAmount : p.amount),
+          0
+        )
+      );
+      const adjustments = (inv.creditNotesTotal || 0) + (inv.waiverTotal || 0);
+      const balance = Math.max(0, inv.totalAmount - paidAmount - adjustments);
       return {
         ...inv,
         payments,
@@ -224,7 +231,10 @@ export function buildFinancialBooksReport(params: {
     });
 
   const scopedExpenses = expenses.filter(
-    (exp) => !filterByAsOf || exp.expenseDate <= effectiveAsOfDate
+    (exp) =>
+      !exp.voided &&
+      !exp.reversed &&
+      (!filterByAsOf || exp.expenseDate <= effectiveAsOfDate)
   );
 
   // 1. Apportion Fee Revenue across Fee Structure Votelines

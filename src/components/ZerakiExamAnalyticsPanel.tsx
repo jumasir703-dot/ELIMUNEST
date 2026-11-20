@@ -242,7 +242,11 @@ export function ZerakiExamAnalyticsPanel({
       };
       for (const sub of report.registeredSubjects) {
         const hit = row.subjectMap[sub];
-        base[sub] = hit ? `${hit.score} (${hit.letterGrade})` : '—';
+        base[sub] = hit
+          ? hit.resultStatus !== 'Scored'
+            ? hit.letterGrade
+            : `${hit.score} (${hit.letterGrade})`
+          : '—';
       }
       base['Sat'] = `${row.subjectsSat}/${row.registeredCount}`;
       base['Total Marks'] = row.subjectsSat > 0 ? `${row.totalScore}/${row.maxPossible}` : '—';
@@ -1671,7 +1675,7 @@ export function ZerakiExamAnalyticsPanel({
                           const hit = row.subjectMap[sub];
                           return (
                             <td key={sub} className="px-1.5 py-1 text-right font-mono tabular-nums">
-                              {hit ? hit.score : '—'}
+                              {hit ? (hit.resultStatus !== 'Scored' ? hit.letterGrade : hit.score) : '—'}
                             </td>
                           );
                         })}

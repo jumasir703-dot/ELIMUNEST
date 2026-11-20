@@ -734,6 +734,33 @@ app.post(
   }
 );
 
+app.get(
+  '/api/dev/statutory-rates',
+  requireDeveloperAuth('dev:telemetry'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const schedules = developerService.listStatutoryRateSchedules(req.authUser!);
+      res.json({ schedules });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/statutory-rates',
+  requireDeveloperAuth('dev:telemetry'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.upsertStatutoryRateSchedule(req.authUser!, req.body || {});
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Admin Auth & Service Layer Endpoints (live-user checked via unified session token)
 const adminGuard = requireAdminAuth(
   ['Developer', 'Super Admin', 'Admin'],
@@ -1125,7 +1152,7 @@ app.post('/api/exams/cycles', ...examsWriteGuard, (req: AuthenticatedRequest, re
 app.post('/api/exams/scores', ...examsWriteGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.upsertExamScore(tenantId, req.body);
+    const result = store.upsertExamScore(tenantId, req.body, req.authUser!);
     res.json({ result });
   } catch (err) {
     next(err);
@@ -1135,7 +1162,7 @@ app.post('/api/exams/scores', ...examsWriteGuard, (req: AuthenticatedRequest, re
 app.post('/api/exams/scores/batch', ...examsWriteGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.saveExamScoresBatch(tenantId, req.body);
+    const result = store.saveExamScoresBatch(tenantId, req.body, req.authUser!);
     res.json(result);
   } catch (err) {
     next(err);
@@ -1149,6 +1176,25 @@ app.post(
     try {
       const tenantId = getTenantId(req);
       const cycle = store.publishExamCycle(tenantId, String(req.params.id));
+      res.json({ cycle });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/exams/cycles/:id/unlock',
+  ...examsPublishGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const cycle = store.unlockExamCycle(
+        tenantId,
+        String(req.params.id),
+        req.body?.reason,
+        req.authUser!
+      );
       res.json({ cycle });
     } catch (err) {
       next(err);
@@ -1177,7 +1223,7 @@ app.post('/api/fees/structures', (req: AuthenticatedRequest, res, next) => {
 app.post('/api/fees/invoices', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const invoice = store.createInvoice(tenantId, req.body);
+    const invoice = store.createInvoice(tenantId, req.body, req.authUser!, req.ip);
     res.status(201).json({ invoice });
   } catch (err) {
     next(err);
@@ -1187,17 +1233,93 @@ app.post('/api/fees/invoices', (req: AuthenticatedRequest, res, next) => {
 app.post('/api/fees/invoices/:id/payments', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const invoice = store.recordPayment(tenantId, String(req.params.id), req.body);
+    const invoice = store.recordPayment(
+      tenantId,
+      String(req.params.id),
+      req.body,
+      req.authUser!,
+      req.ip
+    );
     res.json({ invoice });
   } catch (err) {
     next(err);
   }
 });
 
+app.post(
+  '/api/fees/invoices/:id/payments/:paymentId/void',
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const invoice = store.voidPayment(
+        tenantId,
+        String(req.params.id),
+        String(req.params.paymentId),
+        req.body?.reason,
+        req.authUser!,
+        req.ip
+      );
+      res.json({ invoice });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 app.post('/api/fees/payments/batch', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.recordPaymentsBatch(tenantId, req.body);
+    const result = store.recordPaymentsBatch(tenantId, req.body, req.authUser!, req.ip);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/fees/credit-notes', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.createCreditNote(tenantId, req.body || {}, req.authUser!, req.ip);
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/fees/waivers', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.createFeeWaiver(tenantId, req.body || {}, req.authUser!, req.ip);
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/fees/sibling-discount', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const tenant = store.updateSiblingDiscountConfig(
+      tenantId,
+      req.body || {},
+      req.authUser!,
+      req.ip
+    );
+    res.json({ tenant });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/fees/carry-forward', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.carryForwardTermBalances(
+      tenantId,
+      req.body || {},
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -1208,10 +1330,15 @@ app.post('/api/fees/payments/batch', (req: AuthenticatedRequest, res, next) => {
 app.post('/api/fees/independent-votelines', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const items = store.createIndependentVotelines(tenantId, {
-      ...(req.body || {}),
-      recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
-    });
+    const items = store.createIndependentVotelines(
+      tenantId,
+      {
+        ...(req.body || {}),
+        recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
+      },
+      req.authUser!,
+      req.ip
+    );
     res.status(201).json({ items });
   } catch (err) {
     next(err);
@@ -1221,10 +1348,16 @@ app.post('/api/fees/independent-votelines', (req: AuthenticatedRequest, res, nex
 app.post('/api/fees/independent-votelines/:id/payments', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const item = store.recordIndependentVotelinePayment(tenantId, String(req.params.id), {
-      ...(req.body || {}),
-      recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
-    });
+    const item = store.recordIndependentVotelinePayment(
+      tenantId,
+      String(req.params.id),
+      {
+        ...(req.body || {}),
+        recordedBy: req.body?.recordedBy || `${req.authUser!.fullName} (${req.authUser!.role})`,
+      },
+      req.authUser!,
+      req.ip
+    );
     res.json({ item });
   } catch (err) {
     next(err);
@@ -1234,7 +1367,13 @@ app.post('/api/fees/independent-votelines/:id/payments', (req: AuthenticatedRequ
 app.delete('/api/fees/independent-votelines/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteIndependentVoteline(tenantId, String(req.params.id));
+    const result = store.deleteIndependentVoteline(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -1245,7 +1384,7 @@ app.delete('/api/fees/independent-votelines/:id', (req: AuthenticatedRequest, re
 app.put('/api/finance/mpesa/config', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.configureTenantMpesa(req.authUser!, tenantId, req.body || {});
+    const result = store.configureTenantMpesa(req.authUser!, tenantId, req.body || {}, req.ip);
     res.json(result);
   } catch (err) {
     next(err);
@@ -1262,18 +1401,37 @@ app.post('/api/finance/mpesa/receive', (req: AuthenticatedRequest, res, next) =>
       msisdn?: string;
       mpesaReceipt?: string;
     };
-    const result = store.recordManualMpesaEntry(tenantId, req.authUser!, body);
+    const result = store.recordManualMpesaEntry(tenantId, req.authUser!, body, req.ip);
     res.status(201).json(result);
   } catch (err) {
     next(err);
   }
 });
 
+// Finance Audit Log (Read-Only for Admin / Super Admin / Developer)
+app.get(
+  '/api/finance/audit-logs',
+  requireRole('Developer', 'Super Admin', 'Admin'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 150;
+      const logs = store.getFinanceAuditLogs(
+        tenantId,
+        Number.isFinite(limit) ? limit : 150
+      );
+      res.json({ logs });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Finance & Accounting: Expensing
 app.post('/api/finance/expenses', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const expense = store.createExpense(tenantId, req.body);
+    const expense = store.createExpense(tenantId, req.body, req.authUser!, req.ip);
     res.status(201).json({ expense });
   } catch (err) {
     next(err);
@@ -1283,7 +1441,13 @@ app.post('/api/finance/expenses', (req: AuthenticatedRequest, res, next) => {
 app.patch('/api/finance/expenses/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const expense = store.updateExpenseStatus(tenantId, String(req.params.id), req.body?.status);
+    const expense = store.updateExpenseStatus(
+      tenantId,
+      String(req.params.id),
+      req.body?.status,
+      req.authUser!,
+      req.ip
+    );
     res.json({ expense });
   } catch (err) {
     next(err);
@@ -1293,8 +1457,30 @@ app.patch('/api/finance/expenses/:id', (req: AuthenticatedRequest, res, next) =>
 app.delete('/api/finance/expenses/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteExpense(tenantId, String(req.params.id));
+    const result = store.deleteExpense(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/finance/expenses/:id/reverse', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const expense = store.reverseExpense(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
+    res.json({ expense });
   } catch (err) {
     next(err);
   }
@@ -1331,7 +1517,7 @@ app.delete(
 app.post('/api/finance/etims/verify', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const record = store.verifyEtimsReceipt(tenantId, req.body);
+    const record = store.verifyEtimsReceipt(tenantId, req.body, req.authUser!, req.ip);
     res.status(201).json({ record });
   } catch (err) {
     next(err);
@@ -1341,7 +1527,13 @@ app.post('/api/finance/etims/verify', (req: AuthenticatedRequest, res, next) => 
 app.delete('/api/finance/etims/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteEtimsCheck(tenantId, String(req.params.id));
+    const result = store.deleteEtimsCheck(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -1353,7 +1545,7 @@ app.post('/api/finance/reconciliation/import', (req: AuthenticatedRequest, res, 
   try {
     const tenantId = getTenantId(req);
     const lines = Array.isArray(req.body?.lines) ? req.body.lines : req.body;
-    const result = store.importReconciliationLines(tenantId, lines);
+    const result = store.importReconciliationLines(tenantId, lines, req.authUser!, req.ip);
     res.status(201).json(result);
   } catch (err) {
     next(err);
@@ -1373,7 +1565,13 @@ app.post('/api/finance/reconciliation/auto-match', (req: AuthenticatedRequest, r
 app.patch('/api/finance/reconciliation/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const line = store.updateReconciliationLine(tenantId, String(req.params.id), req.body);
+    const line = store.updateReconciliationLine(
+      tenantId,
+      String(req.params.id),
+      req.body,
+      req.authUser!,
+      req.ip
+    );
     res.json({ line });
   } catch (err) {
     next(err);
@@ -1383,7 +1581,13 @@ app.patch('/api/finance/reconciliation/:id', (req: AuthenticatedRequest, res, ne
 app.delete('/api/finance/reconciliation/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteReconciliationLine(tenantId, String(req.params.id));
+    const result = store.deleteReconciliationLine(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -1394,7 +1598,7 @@ app.delete('/api/finance/reconciliation/:id', (req: AuthenticatedRequest, res, n
 app.post('/api/finance/payroll/generate', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const entries = store.generatePayrollRun(tenantId, req.body?.payPeriod);
+    const entries = store.generatePayrollRun(tenantId, req.body?.payPeriod, req.authUser!, req.ip);
     res.status(201).json({ entries });
   } catch (err) {
     next(err);
@@ -1404,7 +1608,7 @@ app.post('/api/finance/payroll/generate', (req: AuthenticatedRequest, res, next)
 app.post('/api/finance/payroll', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const entry = store.upsertPayrollEntry(tenantId, req.body);
+    const entry = store.upsertPayrollEntry(tenantId, req.body, req.authUser!, req.ip);
     res.status(201).json({ entry });
   } catch (err) {
     next(err);
@@ -1414,7 +1618,13 @@ app.post('/api/finance/payroll', (req: AuthenticatedRequest, res, next) => {
 app.patch('/api/finance/payroll/:id/status', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const entry = store.updatePayrollStatus(tenantId, String(req.params.id), req.body?.status);
+    const entry = store.updatePayrollStatus(
+      tenantId,
+      String(req.params.id),
+      req.body?.status,
+      req.authUser!,
+      req.ip
+    );
     res.json({ entry });
   } catch (err) {
     next(err);
@@ -1424,8 +1634,30 @@ app.patch('/api/finance/payroll/:id/status', (req: AuthenticatedRequest, res, ne
 app.delete('/api/finance/payroll/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deletePayrollEntry(tenantId, String(req.params.id));
+    const result = store.deletePayrollEntry(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/finance/payroll/:id/reverse', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const entry = store.reversePayrollEntry(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
+    res.json({ entry });
   } catch (err) {
     next(err);
   }
@@ -1435,7 +1667,7 @@ app.delete('/api/finance/payroll/:id', (req: AuthenticatedRequest, res, next) =>
 app.post('/api/finance/budgets', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const budget = store.upsertBudgetAllocation(tenantId, req.body);
+    const budget = store.upsertBudgetAllocation(tenantId, req.body, req.authUser!, req.ip);
     res.json({ budget });
   } catch (err) {
     next(err);
@@ -1445,10 +1677,15 @@ app.post('/api/finance/budgets', (req: AuthenticatedRequest, res, next) => {
 app.patch('/api/finance/budgets/approval', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const budget = store.approveBudgetAllocation(tenantId, {
-      ...(req.body || {}),
-      approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
-    });
+    const budget = store.approveBudgetAllocation(
+      tenantId,
+      {
+        ...(req.body || {}),
+        approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
+      },
+      req.authUser!,
+      req.ip
+    );
     res.json({ budget });
   } catch (err) {
     next(err);
@@ -1459,7 +1696,7 @@ app.patch('/api/finance/budgets/approval', (req: AuthenticatedRequest, res, next
 app.post('/api/finance/approvals', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const record = store.createApprovalRecord(tenantId, req.body);
+    const record = store.createApprovalRecord(tenantId, req.body, req.authUser!, req.ip);
     res.status(201).json({ record });
   } catch (err) {
     next(err);
@@ -1469,7 +1706,13 @@ app.post('/api/finance/approvals', (req: AuthenticatedRequest, res, next) => {
 app.patch('/api/finance/approvals/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const record = store.updateApprovalDecision(tenantId, String(req.params.id), req.body);
+    const record = store.updateApprovalDecision(
+      tenantId,
+      String(req.params.id),
+      req.body,
+      req.authUser!,
+      req.ip
+    );
     res.json({ record });
   } catch (err) {
     next(err);
@@ -1479,7 +1722,13 @@ app.patch('/api/finance/approvals/:id', (req: AuthenticatedRequest, res, next) =
 app.delete('/api/finance/approvals/:id', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.deleteApprovalRecord(tenantId, String(req.params.id));
+    const result = store.deleteApprovalRecord(
+      tenantId,
+      String(req.params.id),
+      req.body?.reason,
+      req.authUser!,
+      req.ip
+    );
     res.json(result);
   } catch (err) {
     next(err);

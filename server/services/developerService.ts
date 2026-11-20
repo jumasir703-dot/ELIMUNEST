@@ -11,6 +11,8 @@ import {
   type CurrencyCode,
   type DevImpersonationTarget,
   type DevPlatformTelemetry,
+  type PayeBand,
+  type PayrollStatutoryRateSchedule,
   type SubscriptionCycle,
   type Tenant,
   type TenantBranding,
@@ -470,5 +472,41 @@ export class PlatformDeveloperService {
       `Developer restored full database snapshot (${summary.restoredTenants} tenants, ${summary.restoredUsers} accounts, ${summary.restoredStudents} learners).`
     );
     return { ...summary, auditEntry };
+  }
+
+  listStatutoryRateSchedules(actor: TenantUser): PayrollStatutoryRateSchedule[] {
+    this.assertDeveloperActor(actor);
+    return this.store.listStatutoryRateSchedules();
+  }
+
+  upsertStatutoryRateSchedule(
+    actor: TenantUser,
+    input: {
+      id?: string;
+      effectiveFrom: string;
+      label: string;
+      currency?: CurrencyCode;
+      nssfLowerLimit: number;
+      nssfUpperLimit: number;
+      nssfRate: number;
+      nssfMaxEmployee: number;
+      shifRate: number;
+      shifMin: number;
+      housingLevyRate: number;
+      nitaLevy: number;
+      personalRelief: number;
+      payeBands: PayeBand[];
+    }
+  ): { schedule: PayrollStatutoryRateSchedule; auditEntry: AdminAuditEntry } {
+    const verified = this.assertDeveloperActor(actor);
+    const schedule = this.store.upsertStatutoryRateSchedule(input, verified.email);
+    const auditEntry = this.recordAudit(
+      verified,
+      'UPDATE_STATUTORY_RATES',
+      'platform',
+      'Payroll Statutory Schedule',
+      `Developer updated statutory payroll schedule "${schedule.label}" (effective ${schedule.effectiveFrom}, currency ${schedule.currency}).`
+    );
+    return { schedule, auditEntry };
   }
 }

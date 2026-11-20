@@ -669,6 +669,11 @@ export interface Tenant {
   rooms: string[];
   teachers: TeacherProfile[];
   nonTeachingStaff?: NonTeachingStaffProfile[];
+  siblingDiscountConfig?: {
+    enabled: boolean;
+    percentage: number;
+    minSiblings?: number;
+  };
   createdAt: string;
 }
 
@@ -739,7 +744,8 @@ export type AdminAuditAction =
   | 'KILL_SWITCH_RESTORE'
   | 'IMPERSONATE_START'
   | 'IMPERSONATE_END'
-  | 'RESTORE_DATABASE';
+  | 'RESTORE_DATABASE'
+  | 'UPDATE_STATUTORY_RATES';
 
 export interface AdminAuditEntry {
   id: string;
@@ -1047,6 +1053,7 @@ export interface Student {
   dateOfBirth: string;
   enrolledAt: string;
   status: 'Active' | 'On Leave' | 'Graduated';
+  creditBalance?: number;
 }
 
 export interface OnboardingChecklist {
@@ -1163,8 +1170,15 @@ export interface ExamCycle {
   startDate: string;
   endDate: string;
   status: 'Draft' | 'Grading' | 'Published';
+  unlockHistory?: Array<{
+    unlockedAt: string;
+    unlockedBy: string;
+    reason: string;
+  }>;
   createdAt: string;
 }
+
+export type ExamResultStatus = 'Scored' | 'Absent' | 'Exempt';
 
 export interface ExamResult {
   id: string;
@@ -1180,6 +1194,7 @@ export interface ExamResult {
   maxScore: number;
   letterGrade: string;
   gpaPoints: number;
+  resultStatus?: ExamResultStatus;
   remarks: string;
   updatedAt: string;
 }
@@ -1209,10 +1224,18 @@ export interface PaymentRecord {
   id: string;
   receiptNumber: string;
   amount: number;
+  appliedAmount?: number;
+  creditedExcess?: number;
   method: PaymentMethod;
   reference: string;
   paidAt: string;
   recordedBy: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
+  isReversalEntry?: boolean;
+  reversedPaymentId?: string;
 }
 
 export interface FeeInvoice {
@@ -1226,10 +1249,52 @@ export interface FeeInvoice {
   term: string;
   dueDate: string;
   totalAmount: number;
+  creditNotesTotal?: number;
+  waiverTotal?: number;
+  siblingDiscountApplied?: number;
+  carriedForwardFromAmount?: number;
+  carriedForwardToTerm?: string;
   paidAmount: number;
   balance: number;
   status: InvoiceStatus;
   payments: PaymentRecord[];
+  createdAt: string;
+}
+
+export interface CreditNoteRecord {
+  id: string;
+  tenantId: string;
+  creditNoteNumber: string;
+  invoiceId: string;
+  invoiceNumber: string;
+  studentId: string;
+  studentName: string;
+  studentCode: string;
+  amount: number;
+  reason: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export type FeeWaiverKind = 'Waiver' | 'Bursary' | 'Scholarship' | 'Sibling Discount';
+export type FeeWaiverMode = 'Percentage' | 'Fixed';
+
+export interface FeeWaiverRecord {
+  id: string;
+  tenantId: string;
+  studentId: string;
+  studentName: string;
+  studentCode: string;
+  grade: string;
+  term: string;
+  kind: FeeWaiverKind;
+  mode: FeeWaiverMode;
+  value: number;
+  discountAmount: number;
+  invoiceId?: string;
+  invoiceNumber?: string;
+  reason: string;
+  approvedBy: string;
   createdAt: string;
 }
 
@@ -1271,6 +1336,10 @@ export interface IndependentVotelineItem {
   payments: IndependentVotelinePayment[];
   recordedBy: string;
   createdAt: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
 }
 
 export const EXPENSE_CATEGORIES = [
@@ -1309,7 +1378,7 @@ export interface ExpenseAttachment {
   uploadedBy: string;
 }
 
-export type EtimsVerificationStatus = 'Verified' | 'Mismatch' | 'Exempt' | 'Unverified';
+export type EtimsVerificationStatus = 'Checked manually' | 'Mismatch' | 'Exempt' | 'Unverified';
 
 export interface EtimsVerificationRecord {
   id: string;
@@ -1327,6 +1396,10 @@ export interface EtimsVerificationRecord {
   verificationNotes: string;
   checkedBy: string;
   checkedAt: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
 }
 
 export type ReconciliationChannel = 'M-Pesa' | 'Bank';
@@ -1348,9 +1421,37 @@ export interface ReconciliationLine {
   matchedLabel?: string;
   notes?: string;
   importedAt: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
 }
 
 export type PayrollStatus = 'Draft' | 'Approved' | 'Disbursed';
+
+export interface PayeBand {
+  limit: number | null;
+  rate: number;
+}
+
+export interface PayrollStatutoryRateSchedule {
+  id: string;
+  effectiveFrom: string; // YYYY-MM-DD
+  label: string;
+  currency: CurrencyCode;
+  nssfLowerLimit: number;
+  nssfUpperLimit: number;
+  nssfRate: number;
+  nssfMaxEmployee: number;
+  shifRate: number;
+  shifMin: number;
+  housingLevyRate: number;
+  nitaLevy: number;
+  personalRelief: number;
+  payeBands: PayeBand[];
+  updatedBy?: string;
+  updatedAt: string;
+}
 
 export interface PayrollEntry {
   id: string;
@@ -1370,7 +1471,24 @@ export interface PayrollEntry {
   saccoOrLoan: number;
   totalDeductions: number;
   netPay: number;
+  employerNssf?: number;
+  employerHousingLevy?: number;
+  employerNita?: number;
+  totalEmployerCost?: number;
+  statutoryScheduleId?: string;
   status: PayrollStatus;
+  createdByUserId?: string;
+  approvedByUserId?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
+  reversed?: boolean;
+  reversalReason?: string;
+  reversedBy?: string;
+  reversedAt?: string;
   updatedAt: string;
 }
 
@@ -1384,6 +1502,7 @@ export interface BudgetAllocation {
   category: ExpenseCategory;
   allocatedAmount: number;
   status?: BudgetApprovalStatus;
+  createdByUserId?: string;
   approvedBy?: string;
   approvedAt?: string;
   approvalNotes?: string;
@@ -1417,8 +1536,13 @@ export interface ApprovalSignOffRecord {
   bursarName: string;
   decision: ApprovalDecision;
   remarks?: string;
+  createdByUserId?: string;
   createdAt: string;
   signedAt?: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
 }
 
 export interface SchoolExpense {
@@ -1434,6 +1558,10 @@ export interface SchoolExpense {
   expenseDate: string;
   status: ExpenseStatus;
   recordedBy: string;
+  createdByUserId?: string;
+  approvedByUserId?: string;
+  approvedBy?: string;
+  approvedAt?: string;
   notes?: string;
   attachments?: ExpenseAttachment[];
   etimsCuNumber?: string;
@@ -1441,6 +1569,29 @@ export interface SchoolExpense {
   etimsStatus?: EtimsVerificationStatus;
   boardApprovalRef?: string;
   createdAt: string;
+  voided?: boolean;
+  voidReason?: string;
+  voidedBy?: string;
+  voidedAt?: string;
+  reversed?: boolean;
+  reversalReason?: string;
+  reversedBy?: string;
+  reversedAt?: string;
+}
+
+export interface FinanceAuditEntry {
+  id: string;
+  tenantId: string;
+  timestamp: string;
+  actorUserId: string;
+  who: string;
+  role: UserRole;
+  action: string;
+  entity: string;
+  entityId: string;
+  before?: unknown;
+  after?: unknown;
+  ip?: string;
 }
 
 export interface Announcement {
@@ -1505,6 +1656,8 @@ export interface TenantWorkspaceData {
   examResults: ExamResult[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
+  creditNotes?: CreditNoteRecord[];
+  feeWaivers?: FeeWaiverRecord[];
   independentVotelines?: IndependentVotelineItem[];
   mpesaTransactions?: MpesaTransactionLog[];
   expenses: SchoolExpense[];
@@ -1513,6 +1666,8 @@ export interface TenantWorkspaceData {
   payrollEntries: PayrollEntry[];
   budgets: BudgetAllocation[];
   approvalRecords: ApprovalSignOffRecord[];
+  financeAuditLogs?: FinanceAuditEntry[];
+  statutoryRateSchedules?: PayrollStatutoryRateSchedule[];
   announcements: Announcement[];
   messages: DirectMessage[];
   whatsappDispatches: WhatsAppDispatchRecord[];

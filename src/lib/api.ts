@@ -12,6 +12,7 @@ import type {
   AuthSessionInfo,
   BudgetAllocation,
   CbcClusterId,
+  CreditNoteRecord,
   CurrencyCode,
   DayOfWeek,
   DevImpersonationTarget,
@@ -20,11 +21,16 @@ import type {
   EtimsVerificationRecord,
   ExamCycle,
   ExamResult,
+  ExamResultStatus,
   ExpenseAttachmentType,
   ExpenseCategory,
   ExpenseStatus,
   FeeInvoice,
   FeeStructure,
+  FeeWaiverKind,
+  FeeWaiverMode,
+  FeeWaiverRecord,
+  FinanceAuditEntry,
   ImpersonatorMeta,
   IndependentVotelineItem,
   LeaveOutChit,
@@ -32,9 +38,11 @@ import type {
   MpesaTransactionLog,
   NonTeachingStaffProfile,
   OnboardingChecklist,
+  PayeBand,
   PaymentMethod,
   PayrollEntry,
   PayrollStatus,
+  PayrollStatutoryRateSchedule,
   PublicSchoolDirectoryItem,
   ReconciliationChannel,
   ReconciliationLine,
@@ -853,7 +861,8 @@ export const saasApi = {
       examCycleId: string;
       studentId: string;
       subject: string;
-      score: number;
+      score?: number | null;
+      resultStatus?: ExamResultStatus;
       remarks?: string;
     }
   ) {
@@ -872,7 +881,13 @@ export const saasApi = {
       grade: string;
       section: string;
       teacherId: string;
-      entries: Array<{ studentId: string; subject: string; score: number; remarks?: string }>;
+      entries: Array<{
+        studentId: string;
+        subject: string;
+        score?: number | null;
+        resultStatus?: ExamResultStatus;
+        remarks?: string;
+      }>;
     }
   ) {
     return apiRequest<{ results: ExamResult[]; cycle: ExamCycle; savedCount: number }>(
@@ -889,6 +904,14 @@ export const saasApi = {
     return apiRequest<{ cycle: ExamCycle }>(`/api/exams/cycles/${cycleId}/publish`, {
       method: 'POST',
       tenantId,
+    });
+  },
+
+  unlockExamCycle(tenantId: string, cycleId: string, reason: string) {
+    return apiRequest<{ cycle: ExamCycle }>(`/api/exams/cycles/${cycleId}/unlock`, {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify({ reason }),
     });
   },
 
@@ -964,6 +987,79 @@ export const saasApi = {
     });
   },
 
+  voidPayment(tenantId: string, invoiceId: string, paymentId: string, reason: string) {
+    return apiRequest<{ invoice: FeeInvoice }>(
+      `/api/fees/invoices/${invoiceId}/payments/${paymentId}/void`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify({ reason }),
+      }
+    );
+  },
+
+  createCreditNote(
+    tenantId: string,
+    payload: { invoiceId: string; amount: number; reason: string }
+  ) {
+    return apiRequest<{ creditNote: CreditNoteRecord; invoice: FeeInvoice }>(
+      '/api/fees/credit-notes',
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  createFeeWaiver(
+    tenantId: string,
+    payload: {
+      studentId: string;
+      invoiceId?: string;
+      term?: string;
+      kind: FeeWaiverKind;
+      mode: FeeWaiverMode;
+      value: number;
+      reason: string;
+    }
+  ) {
+    return apiRequest<{ waiver: FeeWaiverRecord; invoice?: FeeInvoice }>(
+      '/api/fees/waivers',
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  updateSiblingDiscountConfig(
+    tenantId: string,
+    payload: { enabled: boolean; percentage: number; minSiblings?: number }
+  ) {
+    return apiRequest<{ tenant: Tenant }>('/api/fees/sibling-discount', {
+      method: 'PUT',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  carryForwardTermBalances(
+    tenantId: string,
+    payload: { fromTerm?: string; toTerm: string; dueDate?: string }
+  ) {
+    return apiRequest<{
+      createdInvoices: FeeInvoice[];
+      carriedStudentsCount: number;
+      updatedTerm: string;
+    }>('/api/fees/carry-forward', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
   createIndependentVoteline(
     tenantId: string,
     payload: {
@@ -1006,10 +1102,11 @@ export const saasApi = {
     );
   },
 
-  deleteIndependentVoteline(tenantId: string, itemId: string) {
+  deleteIndependentVoteline(tenantId: string, itemId: string, reason?: string) {
     return apiRequest<{ deleted: boolean }>(`/api/fees/independent-votelines/${itemId}`, {
       method: 'DELETE',
       tenantId,
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   },
 
@@ -1130,11 +1227,27 @@ export const saasApi = {
     });
   },
 
-  deleteExpense(tenantId: string, expenseId: string) {
+  deleteExpense(tenantId: string, expenseId: string, reason?: string) {
     return apiRequest<{ deleted: boolean }>(`/api/finance/expenses/${expenseId}`, {
       method: 'DELETE',
       tenantId,
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
+  },
+
+  reverseExpense(tenantId: string, expenseId: string, reason: string) {
+    return apiRequest<{ expense: SchoolExpense }>(`/api/finance/expenses/${expenseId}/reverse`, {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  getFinanceAuditLogs(tenantId: string, limit = 150) {
+    return apiRequest<{ logs: FinanceAuditEntry[] }>(
+      `/api/finance/audit-logs?limit=${encodeURIComponent(String(limit))}`,
+      { tenantId }
+    );
   },
 
   verifyEtimsReceipt(
@@ -1159,10 +1272,11 @@ export const saasApi = {
     });
   },
 
-  deleteEtimsCheck(tenantId: string, checkId: string) {
+  deleteEtimsCheck(tenantId: string, checkId: string, reason?: string) {
     return apiRequest<{ deleted: boolean }>(`/api/finance/etims/${checkId}`, {
       method: 'DELETE',
       tenantId,
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   },
 
@@ -1215,10 +1329,11 @@ export const saasApi = {
     });
   },
 
-  deleteReconciliationLine(tenantId: string, lineId: string) {
+  deleteReconciliationLine(tenantId: string, lineId: string, reason?: string) {
     return apiRequest<{ deleted: boolean }>(`/api/finance/reconciliation/${lineId}`, {
       method: 'DELETE',
       tenantId,
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   },
 
@@ -1265,10 +1380,19 @@ export const saasApi = {
     });
   },
 
-  deletePayrollEntry(tenantId: string, entryId: string) {
+  deletePayrollEntry(tenantId: string, entryId: string, reason?: string) {
     return apiRequest<{ deleted: boolean }>(`/api/finance/payroll/${entryId}`, {
       method: 'DELETE',
       tenantId,
+      body: reason ? JSON.stringify({ reason }) : undefined,
+    });
+  },
+
+  reversePayrollEntry(tenantId: string, entryId: string, reason: string) {
+    return apiRequest<{ entry: PayrollEntry }>(`/api/finance/payroll/${entryId}/reverse`, {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify({ reason }),
     });
   },
 
@@ -1341,10 +1465,11 @@ export const saasApi = {
     });
   },
 
-  deleteApprovalRecord(tenantId: string, recordId: string) {
+  deleteApprovalRecord(tenantId: string, recordId: string, reason?: string) {
     return apiRequest<{ deleted: boolean }>(`/api/finance/approvals/${recordId}`, {
       method: 'DELETE',
       tenantId,
+      body: reason ? JSON.stringify({ reason }) : undefined,
     });
   },
 
@@ -1555,6 +1680,35 @@ export const saasApi = {
     }>('/api/dev/database/restore', {
       method: 'POST',
       body: JSON.stringify(snapshot),
+    });
+  },
+
+  getDevStatutoryRates() {
+    return devApiRequest<{ schedules: PayrollStatutoryRateSchedule[] }>('/api/dev/statutory-rates');
+  },
+
+  saveDevStatutoryRate(payload: {
+    id?: string;
+    effectiveFrom: string;
+    label: string;
+    currency?: CurrencyCode;
+    nssfLowerLimit: number;
+    nssfUpperLimit: number;
+    nssfRate: number;
+    nssfMaxEmployee: number;
+    shifRate: number;
+    shifMin: number;
+    housingLevyRate: number;
+    nitaLevy: number;
+    personalRelief: number;
+    payeBands: PayeBand[];
+  }) {
+    return devApiRequest<{
+      schedule: PayrollStatutoryRateSchedule;
+      auditEntry: AdminAuditEntry;
+    }>('/api/dev/statutory-rates', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 };

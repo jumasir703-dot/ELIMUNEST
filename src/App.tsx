@@ -109,6 +109,9 @@ function parseDevRoutePath(pathname: string): {
   if (clean === '/dev/impersonation') {
     return { isDevRoute: true, devSection: 'impersonation' };
   }
+  if (clean === '/dev/statutory-rates') {
+    return { isDevRoute: true, devSection: 'statutory-rates' };
+  }
   if (clean.startsWith('/dev/')) {
     return { isDevRoute: true, devSection: 'telemetry' };
   }

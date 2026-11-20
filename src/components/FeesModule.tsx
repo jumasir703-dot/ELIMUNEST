@@ -7,13 +7,16 @@ import {
   CreditCard,
   Download,
   FileSpreadsheet,
+  Gift,
   MessageCircle,
   Pencil,
   PenLine,
+  Percent,
   Phone,
   Plus,
   Printer,
   Receipt,
+  RotateCcw,
   Search,
   Share2,
   Trash2,
@@ -27,6 +30,20 @@ import {
   parseExcelSheetRowsSmart,
   resolveTenantDocumentMeta,
 } from '../lib/documentBranding';
+import { PrintableFeeStructureModal } from './fees/PrintableFeeStructureModal';
+import { FeeAdjustmentsModals } from './fees/FeeAdjustmentsModals';
+import {
+  COMMON_VOTELINE_NAMES,
+  PAYMENT_METHODS,
+  allocateProportionally,
+  buildDefaultVotelineDrafts,
+  getStructureVotelines,
+  normalizePaymentMethod,
+  readRowCell,
+  summarizeIndependentVotelinesForStructure,
+  todayIsoDate,
+  type ParsedPaymentRow,
+} from '../lib/feesHelpers';
 import { saasApi } from '../lib/api';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import {
@@ -41,9 +58,12 @@ import {
   type FeeInvoice,
   type FeeStructure,
   type FeeVoteline,
+  type FeeWaiverKind,
+  type FeeWaiverMode,
   type IndependentVotelineItem,
   type InvoiceStatus,
   type PaymentMethod,
+  type PaymentRecord,
   type TenantWorkspaceData,
   type UserRole,
 } from '../shared/types';
@@ -56,207 +76,6 @@ interface FeesModuleProps {
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
 
-const PAYMENT_METHODS: PaymentMethod[] = ['Mobile Money', 'Bank Transfer', 'Card', 'Cash'];
-
-const COMMON_VOTELINE_NAMES = [
-  'Tuition Fee',
-  'Boarding & Meals',
-  'Examination & Assessment',
-  'Laboratory & Practicals',
-  'ICT & Technology',
-  'Co-Curricular & Activities',
-  'Transport & Bus Levy',
-  'Development & PTA Levy',
-];
-
-function getStructureVotelines(fs: FeeStructure): FeeVoteline[] {
-  if (Array.isArray(fs.votelines) && fs.votelines.length > 0) {
-    return fs.votelines;
-  }
-  return [
-    { id: 'vl-tuition', name: 'Tuition Fee', amount: fs.tuitionFee || 0 },
-    { id: 'vl-lab', name: 'Laboratory Fee', amount: fs.labFee || 0 },
-    { id: 'vl-tech', name: 'Technology & ICT', amount: fs.technologyFee || 0 },
-    { id: 'vl-act', name: 'Co-Curricular & Activities', amount: fs.activitiesFee || 0 },
-  ];
-}
-
-function termsMatchForFeeStructure(a: string, b: string): boolean {
-  const normA = (a || '').trim().toLowerCase();
-  const normB = (b || '').trim().toLowerCase();
-  if (!normA || !normB) return true;
-  if (normA === normB) return true;
-  const matchA = normA.match(/\bterm\s*(\d+)\b/i);
-  const matchB = normB.match(/\bterm\s*(\d+)\b/i);
-  if (matchA && matchB) {
-    return matchA[1] === matchB[1];
-  }
-  return normA.includes(normB) || normB.includes(normA);
-}
-
-interface StructureIndependentLine {
-  key: string;
-  name: string;
-  unitAmount: number;
-  learnerCount: number;
-  totalBilled: number;
-  note: string;
-}
-
-function summarizeIndependentVotelinesForStructure(
-  fs: FeeStructure,
-  items: IndependentVotelineItem[]
-): {
-  lines: StructureIndependentLine[];
-  separateScheduleTotal: number;
-  separateCohortTotal: number;
-} {
-  const matching = items.filter(
-    (item) =>
-      item.grade.trim().toLowerCase() === fs.grade.trim().toLowerCase() &&
-      termsMatchForFeeStructure(item.term, fs.term)
-  );
-
-  const grouped = new Map<string, StructureIndependentLine>();
-  for (const item of matching) {
-    const cleanName = item.name.trim();
-    const key = `${cleanName.toLowerCase()}::${item.amount}`;
-    const existing = grouped.get(key);
-    if (existing) {
-      existing.learnerCount += 1;
-      existing.totalBilled += item.amount;
-      if (!existing.note && item.note) {
-        existing.note = item.note;
-      }
-    } else {
-      grouped.set(key, {
-        key,
-        name: cleanName,
-        unitAmount: item.amount,
-        learnerCount: 1,
-        totalBilled: item.amount,
-        note: (item.note || '').trim(),
-      });
-    }
-  }
-
-  const lines = Array.from(grouped.values());
-  const separateScheduleTotal = lines.reduce((sum, l) => sum + l.unitAmount, 0);
-  const separateCohortTotal = lines.reduce((sum, l) => sum + l.totalBilled, 0);
-  return { lines, separateScheduleTotal, separateCohortTotal };
-}
-
-/**
- * Largest-remainder proportional apportionment so allocated integer votelines
- * sum exactly to totalAmount with zero rounding drift.
- */
-function allocateProportionally(totalAmount: number, weights: number[]): number[] {
-  const safeTotal = Math.max(0, Math.round(totalAmount));
-  if (weights.length === 0) return [];
-  const cleanWeights = weights.map((w) => (Number.isFinite(w) && w > 0 ? w : 0));
-  const weightSum = cleanWeights.reduce((sum, w) => sum + w, 0);
-
-  if (weightSum <= 0) {
-    const equalBase = Math.floor(safeTotal / cleanWeights.length);
-    const rem = safeTotal - equalBase * cleanWeights.length;
-    return cleanWeights.map((_, idx) => equalBase + (idx < rem ? 1 : 0));
-  }
-
-  const shares = cleanWeights.map((w, idx) => {
-    const exact = (safeTotal * w) / weightSum;
-    const base = Math.floor(exact);
-    return { idx, base, frac: exact - base };
-  });
-
-  const allocatedSum = shares.reduce((sum, item) => sum + item.base, 0);
-  let remainder = safeTotal - allocatedSum;
-
-  const sortedByFrac = [...shares].sort((a, b) => b.frac - a.frac || a.idx - b.idx);
-  const result = shares.map((s) => s.base);
-  for (let i = 0; i < remainder && i < sortedByFrac.length; i += 1) {
-    result[sortedByFrac[i].idx] += 1;
-  }
-  return result;
-}
-
-function buildDefaultVotelineDrafts(currency: CurrencyCode): Array<{ id: string; name: string; amount: string }> {
-  if (currency === 'KES') {
-    return [
-      { id: 'vl-1', name: 'Tuition Fee', amount: '35000' },
-      { id: 'vl-2', name: 'Boarding & Meals', amount: '6500' },
-      { id: 'vl-3', name: 'Examination & Assessment', amount: '2000' },
-      { id: 'vl-4', name: 'Laboratory & Practicals', amount: '2500' },
-    ];
-  }
-  return [
-    { id: 'vl-1', name: 'Tuition Fee', amount: '1100' },
-    { id: 'vl-2', name: 'Laboratory & Practicals', amount: '120' },
-    { id: 'vl-3', name: 'ICT & Technology', amount: '90' },
-    { id: 'vl-4', name: 'Co-Curricular & Activities', amount: '80' },
-  ];
-}
-
-interface ParsedPaymentRow {
-  rowNumber: number;
-  invoiceId?: string;
-  invoiceNumber: string;
-  studentId?: string;
-  studentCode: string;
-  studentName: string;
-  outstandingBalance: number;
-  amount: number;
-  method: PaymentMethod;
-  reference: string;
-  paidAt: string;
-  include: boolean;
-  status: 'valid' | 'skipped' | 'error';
-  note: string;
-}
-
-function normalizePaymentMethod(raw: string): PaymentMethod {
-  const value = raw.trim().toLowerCase();
-  if (!value) return 'Bank Transfer';
-  if (
-    value.includes('mobile') ||
-    value.includes('mpesa') ||
-    value.includes('m-pesa') ||
-    value.includes('airtel') ||
-    value.includes('tkash')
-  ) {
-    return 'Mobile Money';
-  }
-  if (value.includes('card') || value.includes('visa') || value.includes('master')) {
-    return 'Card';
-  }
-  if (value.includes('cash')) {
-    return 'Cash';
-  }
-  return 'Bank Transfer';
-}
-
-function readRowCell(row: Record<string, unknown>, candidates: string[]): string {
-  const keys = Object.keys(row);
-  for (const candidate of candidates) {
-    const target = candidate.toLowerCase();
-    const matchedKey = keys.find((k) => k.trim().toLowerCase() === target);
-    if (matchedKey !== undefined && row[matchedKey] !== undefined && row[matchedKey] !== null) {
-      return String(row[matchedKey]).trim();
-    }
-  }
-  for (const candidate of candidates) {
-    const target = candidate.toLowerCase();
-    const matchedKey = keys.find((k) => k.trim().toLowerCase().includes(target));
-    if (matchedKey !== undefined && row[matchedKey] !== undefined && row[matchedKey] !== null) {
-      return String(row[matchedKey]).trim();
-    }
-  }
-  return '';
-}
-
-function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 export function FeesModule({
   workspace,
   currentRole,
@@ -265,8 +84,16 @@ export function FeesModule({
   onNotify,
 }: FeesModuleProps) {
   const { tenant, students, admissions, invoices, feeStructures } = workspace;
-  const independentVotelines = workspace.independentVotelines || [];
+  const independentVotelines = useMemo(
+    () => (workspace.independentVotelines || []).filter((v) => !v.voided),
+    [workspace.independentVotelines]
+  );
   const whatsappDispatches = workspace.whatsappDispatches || [];
+  const canManageFees =
+    currentRole === 'Admin' ||
+    currentRole === 'Bursar' ||
+    currentRole === 'Super Admin' ||
+    currentRole === 'Developer';
   const canSwitchCurrency = currentRole === 'Admin' || currentRole === 'Super Admin';
 
   const [activeTab, setActiveTab] = useState<'invoices' | 'payments' | 'structures' | 'independent'>(
@@ -285,6 +112,48 @@ export function FeesModule({
   const [lastSavedStructureKey, setLastSavedStructureKey] = useState<string | null>(null);
   const [shareStructureModal, setShareStructureModal] = useState<FeeStructure | null>(null);
   const [copiedStructureId, setCopiedStructureId] = useState<string | null>(null);
+
+  // Phase 2 Fee Adjustments, Voiding, Waivers, Sibling Discount & Carry-Forward
+  const [voidPaymentTarget, setVoidPaymentTarget] = useState<{
+    invoice: FeeInvoice;
+    payment: PaymentRecord;
+  } | null>(null);
+  const [voidPaymentReason, setVoidPaymentReason] = useState('');
+  const [creditNoteModalInvoice, setCreditNoteModalInvoice] = useState<FeeInvoice | null>(null);
+  const [creditNoteAmount, setCreditNoteAmount] = useState('');
+  const [creditNoteReason, setCreditNoteReason] = useState('');
+  const [waiverModalOpen, setWaiverModalOpen] = useState(false);
+  const [waiverForm, setWaiverForm] = useState<{
+    studentId: string;
+    invoiceId: string;
+    term: string;
+    kind: FeeWaiverKind;
+    mode: FeeWaiverMode;
+    value: string;
+    reason: string;
+  }>({
+    studentId: students[0]?.id || '',
+    invoiceId: '',
+    term: tenant.currentTerm,
+    kind: 'Bursary',
+    mode: 'Percentage',
+    value: '25',
+    reason: '',
+  });
+  const [siblingModalOpen, setSiblingModalOpen] = useState(false);
+  const [siblingForm, setSiblingForm] = useState({
+    enabled: Boolean(tenant.siblingDiscountConfig?.enabled),
+    percentage: String(tenant.siblingDiscountConfig?.percentage ?? 10),
+    minSiblings: String(tenant.siblingDiscountConfig?.minSiblings ?? 2),
+  });
+  const [carryForwardModalOpen, setCarryForwardModalOpen] = useState(false);
+  const [carryForwardForm, setCarryForwardForm] = useState({
+    fromTerm: tenant.currentTerm,
+    toTerm: tenant.currentTerm === 'Term 1' ? 'Term 2' : tenant.currentTerm === 'Term 2' ? 'Term 3' : 'Term 1',
+    dueDate: '2027-01-15',
+  });
+  const [ivlVoidTarget, setIvlVoidTarget] = useState<IndependentVotelineItem | null>(null);
+  const [ivlVoidReason, setIvlVoidReason] = useState('');
 
   // Independent Votelines (alongside fee, never alters Fee Structure or Invoice Totals)
   const [ivlName, setIvlName] = useState('Transport Fee');
@@ -595,7 +464,9 @@ export function FeesModule({
         ? latestPayment
         : receiptInvoice.payments.find((p) => p.id === selectedReceiptPaymentId) || latestPayment;
 
-    const receiptTargetAmount = activePayment ? activePayment.amount : receiptInvoice.paidAmount;
+    const receiptTargetAmount = activePayment
+      ? Math.max(0, activePayment.appliedAmount ?? activePayment.amount)
+      : receiptInvoice.paidAmount;
     const billedAlloc = allocateProportionally(receiptInvoice.totalAmount, weights);
     const receiptAlloc = allocateProportionally(receiptTargetAmount, weights);
     const paidAlloc = allocateProportionally(receiptInvoice.paidAmount, weights);
@@ -691,10 +562,7 @@ export function FeesModule({
     const validSelected = parsedExcelRows.filter((r) => r.include && r.status === 'valid');
     const errorCount = parsedExcelRows.filter((r) => r.status === 'error').length;
     const skippedCount = parsedExcelRows.filter((r) => r.status === 'skipped').length;
-    const totalAmount = validSelected.reduce(
-      (sum, r) => sum + Math.min(r.outstandingBalance, r.amount),
-      0
-    );
+    const totalAmount = validSelected.reduce((sum, r) => sum + r.amount, 0);
     return {
       selectedCount: validSelected.length,
       errorCount,
@@ -739,10 +607,11 @@ export function FeesModule({
     e.preventDefault();
     if (!paymentModalInvoice) return;
     const amount = Number(paymentForm.amount);
-    if (!amount || amount <= 0) {
-      onNotify('Enter a valid payment amount.', 'error');
+    if (!Number.isFinite(amount) || amount <= 0) {
+      onNotify('Enter a valid positive payment amount.', 'error');
       return;
     }
+    const prevBal = paymentModalInvoice.balance;
     setSaving(true);
     try {
       const { invoice } = await saasApi.recordPayment(tenant.id, paymentModalInvoice.id, {
@@ -755,7 +624,15 @@ export function FeesModule({
       await onRefresh();
       setPaymentModalInvoice(null);
       setReceiptInvoice(invoice);
-      onNotify(`Payment of ${formatCurrency(amount, tenant.currency)} recorded.`);
+      const excess = Math.max(0, Math.round(amount) - prevBal);
+      onNotify(
+        excess > 0
+          ? `Recorded ${formatCurrency(amount, tenant.currency)} (${formatCurrency(
+              excess,
+              tenant.currency
+            )} stored on student credit balance).`
+          : `Payment of ${formatCurrency(amount, tenant.currency)} recorded.`
+      );
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Payment failed', 'error');
     } finally {
@@ -774,6 +651,7 @@ export function FeesModule({
       onNotify('Enter a positive payment amount.', 'error');
       return;
     }
+    const prevBal = selectedManualInvoice.balance;
     setSaving(true);
     try {
       const { invoice } = await saasApi.recordPayment(tenant.id, selectedManualInvoice.id, {
@@ -786,11 +664,14 @@ export function FeesModule({
       await onRefresh();
       setManualPaymentForm((prev) => ({ ...prev, reference: '' }));
       setReceiptInvoice(invoice);
+      const excess = Math.max(0, Math.round(amount) - prevBal);
       onNotify(
-        `Recorded ${formatCurrency(
-          Math.min(amount, selectedManualInvoice.balance),
-          tenant.currency
-        )} for ${invoice.studentName}.`
+        excess > 0
+          ? `Recorded ${formatCurrency(amount, tenant.currency)} for ${invoice.studentName} (${formatCurrency(
+              excess,
+              tenant.currency
+            )} credited).`
+          : `Recorded ${formatCurrency(amount, tenant.currency)} for ${invoice.studentName}.`
       );
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Manual payment failed', 'error');
@@ -984,29 +865,11 @@ export function FeesModule({
           };
         }
 
-        if (matched.balance <= 0) {
-          return {
-            rowNumber,
-            invoiceId: matched.id,
-            invoiceNumber: matched.invoiceNumber,
-            studentId: matched.studentId,
-            studentCode: matched.studentCode,
-            studentName: matched.studentName,
-            outstandingBalance: 0,
-            amount: Math.round(numericAmount),
-            method,
-            reference,
-            paidAt,
-            include: false,
-            status: 'error',
-            note: 'Invoice is already fully settled',
-          };
-        }
-
         const roundedAmount = Math.round(numericAmount);
-        const cappedNote =
-          roundedAmount > matched.balance
-            ? `Capped to balance (${formatCurrency(matched.balance, tenant.currency)})`
+        const excess = Math.max(0, roundedAmount - matched.balance);
+        const creditNote =
+          excess > 0
+            ? `Excess ${formatCurrency(excess, tenant.currency)} -> Student Credit Balance`
             : 'Ready to post';
 
         return {
@@ -1023,7 +886,7 @@ export function FeesModule({
           paidAt,
           include: true,
           status: 'valid',
-          note: cappedNote,
+          note: creditNote,
         };
       });
 
@@ -1391,14 +1254,168 @@ export function FeesModule({
     }
   }
 
-  async function handleDeleteIndependentVoteline(item: IndependentVotelineItem) {
+  async function handleConfirmDeleteIndependentVoteline(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ivlVoidTarget) return;
+    if (!ivlVoidReason.trim()) {
+      onNotify('Provide a reason for voiding this independent voteline.', 'error');
+      return;
+    }
     setSaving(true);
     try {
-      await saasApi.deleteIndependentVoteline(tenant.id, item.id);
+      await saasApi.deleteIndependentVoteline(tenant.id, ivlVoidTarget.id, ivlVoidReason.trim());
       await onRefresh();
-      onNotify(`Removed ${item.name} (${item.studentName}).`);
+      onNotify(`Voided ${ivlVoidTarget.name} (${ivlVoidTarget.studentName}).`);
+      setIvlVoidTarget(null);
+      setIvlVoidReason('');
     } catch (err) {
-      onNotify(err instanceof Error ? err.message : 'Unable to remove independent voteline', 'error');
+      onNotify(err instanceof Error ? err.message : 'Unable to void independent voteline', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleVoidPaymentSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!voidPaymentTarget) return;
+    if (!voidPaymentReason.trim()) {
+      onNotify('A reason is required to void a payment.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await saasApi.voidPayment(
+        tenant.id,
+        voidPaymentTarget.invoice.id,
+        voidPaymentTarget.payment.id,
+        voidPaymentReason.trim()
+      );
+      await onRefresh();
+      setReceiptInvoice(res.invoice);
+      setVoidPaymentTarget(null);
+      setVoidPaymentReason('');
+      onNotify(`Voided receipt ${voidPaymentTarget.payment.receiptNumber} and created reversing entry.`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to void payment', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCreateCreditNoteSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!creditNoteModalInvoice) return;
+    const amt = Number(creditNoteAmount);
+    if (!Number.isFinite(amt) || amt <= 0 || !creditNoteReason.trim()) {
+      onNotify('Enter a positive credit note amount and reason.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await saasApi.createCreditNote(tenant.id, {
+        invoiceId: creditNoteModalInvoice.id,
+        amount: amt,
+        reason: creditNoteReason.trim(),
+      });
+      await onRefresh();
+      setCreditNoteModalInvoice(null);
+      setCreditNoteAmount('');
+      setCreditNoteReason('');
+      onNotify(
+        `Issued credit note ${res.creditNote.creditNoteNumber} (${formatCurrency(
+          res.creditNote.amount,
+          tenant.currency
+        )}).`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to issue credit note', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCreateWaiverSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const val = Number(waiverForm.value);
+    if (!waiverForm.studentId || !Number.isFinite(val) || val <= 0 || !waiverForm.reason.trim()) {
+      onNotify('Select a student and enter a positive waiver/bursary value and reason.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await saasApi.createFeeWaiver(tenant.id, {
+        studentId: waiverForm.studentId,
+        invoiceId: waiverForm.invoiceId || undefined,
+        term: waiverForm.term || undefined,
+        kind: waiverForm.kind,
+        mode: waiverForm.mode,
+        value: val,
+        reason: waiverForm.reason.trim(),
+      });
+      await onRefresh();
+      setWaiverModalOpen(false);
+      onNotify(
+        `Applied ${res.waiver.kind} (${formatCurrency(
+          res.waiver.discountAmount,
+          tenant.currency
+        )}) for ${res.waiver.studentName}.`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to apply fee waiver', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveSiblingDiscountSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const pct = Number(siblingForm.percentage);
+    const minSibs = Number(siblingForm.minSiblings);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      onNotify('Enter a sibling discount percentage between 0 and 100.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      await saasApi.updateSiblingDiscountConfig(tenant.id, {
+        enabled: siblingForm.enabled,
+        percentage: pct,
+        minSiblings: Number.isFinite(minSibs) && minSibs >= 2 ? minSibs : 2,
+      });
+      await onRefresh();
+      setSiblingModalOpen(false);
+      onNotify(
+        siblingForm.enabled
+          ? `Sibling discount enabled (${pct}% from sibling #${minSibs || 2}).`
+          : 'Sibling discount rule disabled.'
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to update sibling discount', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCarryForwardSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!carryForwardForm.toTerm.trim()) {
+      onNotify('Specify the destination term.', 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await saasApi.carryForwardTermBalances(tenant.id, {
+        fromTerm: carryForwardForm.fromTerm.trim() || undefined,
+        toTerm: carryForwardForm.toTerm.trim(),
+        dueDate: carryForwardForm.dueDate || undefined,
+      });
+      await onRefresh();
+      setCarryForwardModalOpen(false);
+      onNotify(
+        `Carried forward balances for ${res.carriedStudentsCount} student(s) into ${res.updatedTerm} (${res.createdInvoices.length} invoices generated).`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to carry forward balances', 'error');
     } finally {
       setSaving(false);
     }
@@ -1472,18 +1489,20 @@ export function FeesModule({
             >
               Invoices Ledger
             </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('payments')}
-              className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                activeTab === 'payments'
-                  ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
-                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
-              }`}
-            >
-              <CreditCard className="h-3.5 w-3.5" />
-              Record Payments
-            </button>
+            {canManageFees && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('payments')}
+                className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  activeTab === 'payments'
+                    ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                }`}
+              >
+                <CreditCard className="h-3.5 w-3.5" />
+                Record Payments
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setActiveTab('structures')}
@@ -1512,15 +1531,17 @@ export function FeesModule({
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowInvoiceModal(true)}
-            disabled={students.length === 0}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Issue Invoice
-          </button>
+          {canManageFees && (
+            <button
+              type="button"
+              onClick={() => setShowInvoiceModal(true)}
+              disabled={students.length === 0}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Issue Invoice
+            </button>
+          )}
         </div>
       </div>
 
@@ -1584,26 +1605,70 @@ export function FeesModule({
                   className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                 />
               </div>
-              <button
-                type="button"
-                disabled={openInvoices.length === 0}
-                onClick={() => openReminderModalForInvoice()}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
-              >
-                <Bell className="h-3.5 w-3.5" />
-                Send Fee Reminders ({openInvoices.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setEntryMode('excel');
-                  setActiveTab('payments');
-                }}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-              >
-                <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                Import Excel Payments
-              </button>
+              {canManageFees && (
+                <>
+                  <button
+                    type="button"
+                    disabled={openInvoices.length === 0}
+                    onClick={() => openReminderModalForInvoice()}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
+                  >
+                    <Bell className="h-3.5 w-3.5" />
+                    Send Fee Reminders ({openInvoices.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWaiverForm((prev) => ({
+                        ...prev,
+                        studentId: students[0]?.id || '',
+                        term: tenant.currentTerm,
+                        reason: '',
+                      }));
+                      setWaiverModalOpen(true);
+                    }}
+                    disabled={students.length === 0}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  >
+                    <Gift className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                    Waiver / Bursary
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSiblingForm({
+                        enabled: Boolean(tenant.siblingDiscountConfig?.enabled),
+                        percentage: String(tenant.siblingDiscountConfig?.percentage ?? 10),
+                        minSiblings: String(tenant.siblingDiscountConfig?.minSiblings ?? 2),
+                      });
+                      setSiblingModalOpen(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  >
+                    <Percent className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                    Sibling Rule{tenant.siblingDiscountConfig?.enabled ? ` (${tenant.siblingDiscountConfig.percentage}%)` : ''}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCarryForwardModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                    Carry-Forward Term
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEntryMode('excel');
+                      setActiveTab('payments');
+                    }}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                  >
+                    <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                    Import Excel Payments
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -1633,6 +1698,8 @@ export function FeesModule({
                   ) : (
                     filteredInvoices.map((inv) => {
                       const rowIndependent = getInvoiceIndependentVotelines(inv);
+                      const studentRecord = students.find((s) => s.id === inv.studentId);
+                      const creditBal = studentRecord?.creditBalance || 0;
                       return (
                       <tr key={inv.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
                         <td className="px-4 py-3">
@@ -1646,12 +1713,32 @@ export function FeesModule({
                           <p className="font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
                             {inv.studentCode} · {inv.grade}
                           </p>
+                          {creditBal > 0 && (
+                            <p className="mt-0.5 font-mono text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                              Credit Balance: {formatCurrency(creditBal, tenant.currency)}
+                            </p>
+                          )}
                         </td>
                         <td className="px-4 py-3 font-mono text-xs text-slate-600 tabular-nums dark:text-slate-400">
                           {formatDateShort(inv.dueDate)}
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
-                          {formatCurrency(inv.totalAmount, tenant.currency)}
+                          <div>{formatCurrency(inv.totalAmount, tenant.currency)}</div>
+                          {(inv.waiverTotal || 0) > 0 && (
+                            <div className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                              Waiver -{formatCurrency(inv.waiverTotal || 0, tenant.currency)}
+                            </div>
+                          )}
+                          {(inv.creditNotesTotal || 0) > 0 && (
+                            <div className="text-[10px] text-blue-700 dark:text-blue-400">
+                              Cr Note -{formatCurrency(inv.creditNotesTotal || 0, tenant.currency)}
+                            </div>
+                          )}
+                          {(inv.carriedForwardFromAmount || 0) > 0 && (
+                            <div className="text-[10px] text-amber-700 dark:text-amber-400">
+                              Arrears +{formatCurrency(inv.carriedForwardFromAmount || 0, tenant.currency)}
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right font-mono text-xs text-emerald-700 tabular-nums dark:text-emerald-400">
                           {formatCurrency(inv.paidAmount, tenant.currency)}
@@ -1661,14 +1748,18 @@ export function FeesModule({
                         </td>
                         <td className="px-4 py-3 align-top">
                           {rowIndependent.length === 0 ? (
-                            <button
-                              type="button"
-                              onClick={() => jumpToAddIndependentForInvoice(inv)}
-                              className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-500 hover:border-blue-400 hover:text-blue-600 dark:border-slate-700 dark:text-slate-400 dark:hover:text-blue-400"
-                            >
-                              <Plus className="h-3 w-3" />
-                              Add Optional
-                            </button>
+                            canManageFees ? (
+                              <button
+                                type="button"
+                                onClick={() => jumpToAddIndependentForInvoice(inv)}
+                                className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-500 hover:border-blue-400 hover:text-blue-600 dark:border-slate-700 dark:text-slate-400 dark:hover:text-blue-400"
+                              >
+                                <Plus className="h-3 w-3" />
+                                Add Optional
+                              </button>
+                            ) : (
+                              <span className="text-xs text-slate-400">—</span>
+                            )
                           ) : (
                             <div className="space-y-1">
                               {rowIndependent.map((ivl) => (
@@ -1694,7 +1785,7 @@ export function FeesModule({
                                         ? ' · Paid'
                                         : ''}
                                     </span>
-                                    {ivl.balance > 0 && (
+                                    {canManageFees && ivl.balance > 0 && (
                                       <button
                                         type="button"
                                         onClick={() => openIndependentPayModal(ivl)}
@@ -1706,14 +1797,16 @@ export function FeesModule({
                                   </div>
                                 </div>
                               ))}
-                              <button
-                                type="button"
-                                onClick={() => jumpToAddIndependentForInvoice(inv)}
-                                className="inline-flex items-center gap-0.5 text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
-                              >
-                                <Plus className="h-3 w-3" />
-                                Add Another
-                              </button>
+                              {canManageFees && (
+                                <button
+                                  type="button"
+                                  onClick={() => jumpToAddIndependentForInvoice(inv)}
+                                  className="inline-flex items-center gap-0.5 text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                                >
+                                  <Plus className="h-3 w-3" />
+                                  Add Another
+                                </button>
+                              )}
                             </div>
                           )}
                         </td>
@@ -1733,8 +1826,8 @@ export function FeesModule({
                           </span>
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <div className="inline-flex items-center gap-3">
-                            {inv.balance > 0 && (
+                          <div className="inline-flex items-center gap-2.5">
+                            {canManageFees && inv.balance > 0 && (
                               <button
                                 type="button"
                                 onClick={() => openPaymentModal(inv)}
@@ -1744,7 +1837,20 @@ export function FeesModule({
                                 Collect
                               </button>
                             )}
-                            {inv.balance > 0 && (
+                            {canManageFees && inv.balance > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCreditNoteModalInvoice(inv);
+                                  setCreditNoteAmount('');
+                                  setCreditNoteReason('');
+                                }}
+                                className="whitespace-nowrap text-xs font-medium text-slate-600 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400"
+                              >
+                                Cr Note
+                              </button>
+                            )}
+                            {canManageFees && inv.balance > 0 && (
                               <button
                                 type="button"
                                 onClick={() => openReminderModalForInvoice(inv)}
@@ -1908,13 +2014,24 @@ export function FeesModule({
                         required
                         type="number"
                         min={1}
-                        max={selectedManualInvoice?.balance || undefined}
                         value={manualPaymentForm.amount}
                         onChange={(e) =>
                           setManualPaymentForm((prev) => ({ ...prev, amount: e.target.value }))
                         }
                         className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                       />
+                      {selectedManualInvoice &&
+                        Number(manualPaymentForm.amount) > selectedManualInvoice.balance && (
+                          <p className="mt-1 text-[11px] font-medium text-blue-700 dark:text-blue-400">
+                            Excess of{' '}
+                            {formatCurrency(
+                              Math.round(Number(manualPaymentForm.amount)) -
+                                selectedManualInvoice.balance,
+                              tenant.currency
+                            )}{' '}
+                            will be stored on the student&apos;s credit balance.
+                          </p>
+                        )}
                     </div>
 
                     <div>
@@ -2938,15 +3055,20 @@ export function FeesModule({
                                   Collect
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                disabled={saving}
-                                onClick={() => handleDeleteIndependentVoteline(item)}
-                                aria-label={`Delete ${item.name}`}
-                                className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
+                              {canManageFees && (
+                                <button
+                                  type="button"
+                                  disabled={saving}
+                                  onClick={() => {
+                                    setIvlVoidReason('');
+                                    setIvlVoidTarget(item);
+                                  }}
+                                  aria-label={`Void ${item.name}`}
+                                  className="rounded p-1 text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -2990,11 +3112,20 @@ export function FeesModule({
                   required
                   type="number"
                   min={1}
-                  max={paymentModalInvoice.balance}
                   value={paymentForm.amount}
                   onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                 />
+                {Number(paymentForm.amount) > paymentModalInvoice.balance && (
+                  <p className="mt-1 text-[11px] font-medium text-blue-700 dark:text-blue-400">
+                    Excess of{' '}
+                    {formatCurrency(
+                      Math.round(Number(paymentForm.amount)) - paymentModalInvoice.balance,
+                      tenant.currency
+                    )}{' '}
+                    will be saved as credit on {paymentModalInvoice.studentName}&apos;s account.
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -3293,31 +3424,87 @@ export function FeesModule({
               </p>
               <div className="mt-1.5 divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
                 {receiptInvoice.payments.map((p) => (
-                  <div key={p.id} className="flex items-center justify-between px-3 py-2 text-xs">
+                  <div
+                    key={p.id}
+                    className={`flex items-center justify-between gap-2 px-3 py-2 text-xs ${
+                      p.voided || p.isReversalEntry ? 'bg-rose-50/40 dark:bg-rose-950/20' : ''
+                    }`}
+                  >
                     <div>
                       <p className="font-mono font-medium text-slate-900 dark:text-slate-100">
                         {p.receiptNumber} · {p.method}
+                        {p.voided && (
+                          <span className="ml-2 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-900/50 dark:text-rose-300">
+                            VOIDED
+                          </span>
+                        )}
+                        {p.isReversalEntry && (
+                          <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
+                            REVERSAL
+                          </span>
+                        )}
                       </p>
                       <p className="text-slate-500 dark:text-slate-400">
                         Ref: {p.reference} · {formatDateShort(p.paidAt)} · {p.recordedBy}
                       </p>
+                      {p.voidReason && (
+                        <p className="text-[11px] text-rose-600 dark:text-rose-400">
+                          Reason: {p.voidReason}
+                        </p>
+                      )}
+                      {(p.creditedExcess || 0) > 0 && (
+                        <p className="text-[11px] text-blue-600 dark:text-blue-400">
+                          Includes {formatCurrency(p.creditedExcess || 0, tenant.currency)} excess credited to student
+                        </p>
+                      )}
                     </div>
-                    <span className="font-mono font-semibold text-emerald-700 tabular-nums dark:text-emerald-400">
-                      {formatCurrency(p.amount, tenant.currency)}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`font-mono font-semibold tabular-nums ${
+                          p.amount < 0 || p.voided
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-emerald-700 dark:text-emerald-400'
+                        }`}
+                      >
+                        {formatCurrency(p.amount, tenant.currency)}
+                      </span>
+                      {canManageFees && !p.voided && !p.isReversalEntry && p.amount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setVoidPaymentReason('');
+                            setVoidPaymentTarget({ invoice: receiptInvoice, payment: p });
+                          }}
+                          className="no-print rounded border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+                        >
+                          Void
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
 
             {/* Prominent Overall Fee Balance Summary */}
-            <div className="mt-4 grid grid-cols-3 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-700 dark:bg-slate-800/70">
+            <div className="mt-4 grid grid-cols-2 gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3.5 sm:grid-cols-4 dark:border-slate-700 dark:bg-slate-800/70">
               <div>
                 <span className="block text-[11px] text-slate-500 dark:text-slate-400">
                   Total Invoice Billed
                 </span>
                 <span className="font-mono text-sm font-semibold text-slate-900 tabular-nums dark:text-slate-100">
                   {formatCurrency(receiptInvoice.totalAmount, tenant.currency)}
+                </span>
+              </div>
+              <div>
+                <span className="block text-[11px] text-slate-500 dark:text-slate-400">
+                  Waivers &amp; Credit Notes
+                </span>
+                <span className="font-mono text-sm font-semibold text-blue-700 tabular-nums dark:text-blue-400">
+                  {formatCurrency(
+                    (receiptInvoice.waiverTotal || 0) + (receiptInvoice.creditNotesTotal || 0),
+                    tenant.currency
+                  )}
                 </span>
               </div>
               <div>
@@ -3924,252 +4111,63 @@ export function FeesModule({
         </div>
       )}
 
-      {/* Printable & Shareable Fee Structure Modal */}
-      {shareStructureModal &&
-        (() => {
-          const modalLines = getStructureVotelines(shareStructureModal);
-          const safeTotal = Math.max(1, shareStructureModal.totalFee);
-          const independentSummary = summarizeIndependentVotelinesForStructure(
-            shareStructureModal,
-            independentVotelines
-          );
-          return (
-            <div className="print-modal-root fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4">
-              <div className="print-modal-sheet my-6 max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 no-print">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => window.print()}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
-                    >
-                      <Printer className="h-3.5 w-3.5" />
-                      Print / Save PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleExportStructureExcel(shareStructureModal)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                    >
-                      <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                      Download Excel (.xlsx)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleCopyFeeStructureText(shareStructureModal)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                      {copiedStructureId === shareStructureModal.id ? 'Copied' : 'Copy Text'}
-                    </button>
-                    <a
-                      href={buildFeeStructureWhatsAppHref(shareStructureModal)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
-                    >
-                      <MessageCircle className="h-3.5 w-3.5" />
-                      Share WhatsApp
-                    </a>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShareStructureModal(null)}
-                    aria-label="Close fee structure preview"
-                    className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
+      {shareStructureModal && (
+        <PrintableFeeStructureModal
+          tenant={tenant}
+          structure={shareStructureModal}
+          independentVotelines={independentVotelines}
+          copiedStructureId={copiedStructureId}
+          onClose={() => setShareStructureModal(null)}
+          onExportExcel={handleExportStructureExcel}
+          onCopyText={handleCopyFeeStructureText}
+          buildWhatsAppHref={buildFeeStructureWhatsAppHref}
+          onAddIndependentVoteline={(fs) => {
+            setIvlScope('grade');
+            setIvlGrade(fs.grade);
+            setIvlTerm(fs.term);
+            setShareStructureModal(null);
+            setActiveTab('independent');
+          }}
+        />
+      )}
 
-                <TenantDocumentHeader
-                  tenant={tenant}
-                  documentTitle="Official Fee Structure"
-                  subtitle={`${shareStructureModal.grade} · ${shareStructureModal.term}`}
-                  rightMeta={[
-                    { label: 'Academic Year', value: tenant.academicYear },
-                    { label: 'Currency', value: tenant.currency },
-                  ]}
-                />
-
-                {/* Main Fee Structure Votelines */}
-                <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400">
-                      <tr>
-                        <th className="w-10 px-3.5 py-2.5">#</th>
-                        <th className="px-3.5 py-2.5">Votehead / Voteline Description</th>
-                        <th className="px-3.5 py-2.5 text-right">Share</th>
-                        <th className="px-3.5 py-2.5 text-right">
-                          Amount ({tenant.currency})
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {modalLines.map((line, idx) => (
-                        <tr key={line.id}>
-                          <td className="px-3.5 py-2 font-mono text-slate-400 tabular-nums">
-                            {idx + 1}
-                          </td>
-                          <td className="px-3.5 py-2 font-medium text-slate-900 dark:text-slate-100">
-                            {line.name}
-                          </td>
-                          <td className="px-3.5 py-2 text-right font-mono text-slate-500 tabular-nums dark:text-slate-400">
-                            {((line.amount / safeTotal) * 100).toFixed(1)}%
-                          </td>
-                          <td className="px-3.5 py-2 text-right font-mono font-semibold text-slate-900 tabular-nums dark:text-slate-100">
-                            {formatCurrency(line.amount, tenant.currency)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot className="border-t border-slate-200 bg-slate-50/80 font-bold dark:border-slate-800 dark:bg-slate-800/60">
-                      <tr>
-                        <td colSpan={3} className="px-3.5 py-3 text-slate-900 dark:text-slate-100">
-                          Total Term Fee ({shareStructureModal.grade} · {shareStructureModal.term})
-                        </td>
-                        <td className="px-3.5 py-3 text-right font-mono text-sm text-blue-700 tabular-nums dark:text-blue-400">
-                          {formatCurrency(shareStructureModal.totalFee, tenant.currency)}
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-
-                {/* Independent Votelines Section (Strictly Separate Totals from Main Fee Structure) */}
-                <div className="mt-5 break-inside-avoid">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <h3 className="text-xs font-bold text-slate-900 dark:text-slate-100">
-                        Independent / Auxiliary Votelines (Separate from Main Fee Structure)
-                      </h3>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Optional or route-specific charges (e.g. Transport Fee, Academic Trip Fee) billed separately with an independent subtotal.
-                      </p>
-                    </div>
-                    {independentSummary.lines.length === 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIvlScope('grade');
-                          setIvlGrade(shareStructureModal.grade);
-                          setIvlTerm(shareStructureModal.term);
-                          setShareStructureModal(null);
-                          setActiveTab('independent');
-                        }}
-                        className="no-print inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300"
-                      >
-                        <Plus className="h-3 w-3" />
-                        Add Independent Voteline
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
-                    <table className="w-full text-left text-xs">
-                      <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400">
-                        <tr>
-                          <th className="w-10 px-3.5 py-2">#</th>
-                          <th className="px-3.5 py-2">Independent Voteline</th>
-                          <th className="px-3.5 py-2">Scope / Description</th>
-                          <th className="px-3.5 py-2 text-right">
-                            Amount ({tenant.currency})
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                        {independentSummary.lines.length === 0 ? (
-                          <tr>
-                            <td
-                              colSpan={4}
-                              className="px-3.5 py-3 text-center text-[11px] text-slate-500 dark:text-slate-400"
-                            >
-                              No independent votelines assigned for {shareStructureModal.grade} ({shareStructureModal.term}).
-                            </td>
-                          </tr>
-                        ) : (
-                          independentSummary.lines.map((item, idx) => (
-                            <tr key={item.key}>
-                              <td className="px-3.5 py-2 font-mono text-slate-400 tabular-nums">
-                                {idx + 1}
-                              </td>
-                              <td className="px-3.5 py-2 font-medium text-slate-900 dark:text-slate-100">
-                                {item.name}
-                              </td>
-                              <td className="px-3.5 py-2 text-[11px] text-slate-500 dark:text-slate-400">
-                                {item.note ||
-                                  `${item.learnerCount} ${
-                                    item.learnerCount === 1 ? 'learner' : 'learners'
-                                  } assigned`}
-                              </td>
-                              <td className="px-3.5 py-2 text-right font-mono font-semibold text-slate-900 tabular-nums dark:text-slate-100">
-                                {formatCurrency(item.unitAmount, tenant.currency)}
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                      <tfoot className="border-t border-slate-200 bg-slate-50/80 font-bold dark:border-slate-800 dark:bg-slate-800/60">
-                        <tr>
-                          <td colSpan={3} className="px-3.5 py-2.5 text-slate-900 dark:text-slate-100">
-                            Independent Votelines Total (Separate · Excluded from Main Fee Structure)
-                          </td>
-                          <td className="px-3.5 py-2.5 text-right font-mono text-sm text-emerald-700 tabular-nums dark:text-emerald-400">
-                            {formatCurrency(
-                              independentSummary.separateScheduleTotal,
-                              tenant.currency
-                            )}
-                          </td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-
-                  {/* Clear Side-by-Side Totals Separation Strip */}
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3.5 py-2.5 dark:border-slate-800 dark:bg-slate-800/40">
-                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                        Main Fee Structure Total
-                      </span>
-                      <span className="mt-0.5 block font-mono text-sm font-bold text-blue-700 tabular-nums dark:text-blue-400">
-                        {formatCurrency(shareStructureModal.totalFee, tenant.currency)}
-                      </span>
-                    </div>
-                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3.5 py-2.5 dark:border-slate-800 dark:bg-slate-800/40">
-                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                        Independent Votelines Total (Separate)
-                      </span>
-                      <span className="mt-0.5 block font-mono text-sm font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
-                        {formatCurrency(
-                          independentSummary.separateScheduleTotal,
-                          tenant.currency
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {tenant.mpesaConfig?.enabled && (
-                  <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/80 px-4 py-3 text-xs dark:border-slate-800 dark:bg-slate-800/50">
-                    <p className="font-semibold text-slate-900 dark:text-slate-100">
-                      Settlement Instructions
-                    </p>
-                    <p className="mt-1 text-slate-600 dark:text-slate-300">
-                      Lipa na M-Pesa Paybill:{' '}
-                      <strong className="font-mono text-slate-900 dark:text-slate-100">
-                        {tenant.mpesaConfig.paybillNumber}
-                      </strong>{' '}
-                      ({tenant.mpesaConfig.accountName}) · Account Number:{' '}
-                      <strong className="font-mono text-slate-900 dark:text-slate-100">
-                        Learner Admission Code
-                      </strong>
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })()}
+      <FeeAdjustmentsModals
+        currency={tenant.currency}
+        students={students}
+        saving={saving}
+        voidPaymentTarget={voidPaymentTarget}
+        voidPaymentReason={voidPaymentReason}
+        setVoidPaymentReason={setVoidPaymentReason}
+        onCloseVoidPayment={() => setVoidPaymentTarget(null)}
+        onSubmitVoidPayment={handleVoidPaymentSubmit}
+        creditNoteModalInvoice={creditNoteModalInvoice}
+        creditNoteAmount={creditNoteAmount}
+        setCreditNoteAmount={setCreditNoteAmount}
+        creditNoteReason={creditNoteReason}
+        setCreditNoteReason={setCreditNoteReason}
+        onCloseCreditNote={() => setCreditNoteModalInvoice(null)}
+        onSubmitCreditNote={handleCreateCreditNoteSubmit}
+        waiverModalOpen={waiverModalOpen}
+        waiverForm={waiverForm}
+        setWaiverForm={setWaiverForm}
+        onCloseWaiver={() => setWaiverModalOpen(false)}
+        onSubmitWaiver={handleCreateWaiverSubmit}
+        siblingModalOpen={siblingModalOpen}
+        siblingForm={siblingForm}
+        setSiblingForm={setSiblingForm}
+        onCloseSibling={() => setSiblingModalOpen(false)}
+        onSubmitSibling={handleSaveSiblingDiscountSubmit}
+        carryForwardModalOpen={carryForwardModalOpen}
+        carryForwardForm={carryForwardForm}
+        setCarryForwardForm={setCarryForwardForm}
+        onCloseCarryForward={() => setCarryForwardModalOpen(false)}
+        onSubmitCarryForward={handleCarryForwardSubmit}
+        ivlVoidTarget={ivlVoidTarget}
+        ivlVoidReason={ivlVoidReason}
+        setIvlVoidReason={setIvlVoidReason}
+        onCloseIvlVoid={() => setIvlVoidTarget(null)}
+        onSubmitIvlVoid={handleConfirmDeleteIndependentVoteline}
+      />
     </div>
   );
 }

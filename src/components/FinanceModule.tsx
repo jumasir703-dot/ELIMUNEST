@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   ArrowDownRight,
@@ -6,6 +6,7 @@ import {
   ArrowUpRight,
   BookOpen,
   CheckCircle2,
+  ClipboardList,
   CreditCard,
   Download,
   FileSpreadsheet,
@@ -15,6 +16,7 @@ import {
   PiggyBank,
   Plus,
   Receipt,
+  RotateCcw,
   Search,
   ShieldCheck,
   Trash2,
@@ -33,6 +35,7 @@ import {
   type ExpenseAttachmentType,
   type ExpenseCategory,
   type ExpenseStatus,
+  type FinanceAuditEntry,
   type PaymentMethod,
   type SchoolExpense,
   type TenantWorkspaceData,
@@ -61,7 +64,8 @@ type FinanceSubModule =
   | 'reconciliation'
   | 'payroll'
   | 'budgets'
-  | 'books';
+  | 'books'
+  | 'audit';
 
 interface StagedAttachment {
   localId: string;
@@ -128,7 +132,6 @@ export function FinanceModule({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Bank Transfer');
   const [reference, setReference] = useState('');
   const [expenseDate, setExpenseDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [initialStatus, setInitialStatus] = useState<ExpenseStatus>('Pending Approval');
   const [notes, setNotes] = useState('');
   const [newDocType, setNewDocType] = useState<ExpenseAttachmentType>('Official Receipt');
   const [stagedAttachments, setStagedAttachments] = useState<StagedAttachment[]>([]);
@@ -143,16 +146,54 @@ export function FinanceModule({
   const [uploadingExistingDoc, setUploadingExistingDoc] = useState(false);
   const existingFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Per-row action state
+  // Per-row action state & audit modal state
   const [busyExpenseId, setBusyExpenseId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [expenseReasonModal, setExpenseReasonModal] = useState<{
+    mode: 'void' | 'reverse';
+    expense: SchoolExpense;
+  } | null>(null);
+  const [expenseReasonText, setExpenseReasonText] = useState('');
+
+  // Admin finance audit trail
+  const [auditLogs, setAuditLogs] = useState<FinanceAuditEntry[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditSearch, setAuditSearch] = useState('');
 
   const canManageExpenses =
     currentRole === 'Super Admin' || currentRole === 'Admin' || currentRole === 'Bursar';
+  const canViewAudit =
+    currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
+
+  const activeExpenses = useMemo(
+    () => expenses.filter((e) => !e.voided),
+    [expenses]
+  );
+
+  useEffect(() => {
+    if (subModule !== 'audit' || !canViewAudit) return;
+    let cancelled = false;
+    setAuditLoading(true);
+    saasApi
+      .getFinanceAuditLogs(tenant.id, 150)
+      .then((res) => {
+        if (!cancelled) setAuditLogs(res.logs || []);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          onNotify(err instanceof Error ? err.message : 'Unable to load finance audit log', 'error');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAuditLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [subModule, canViewAudit, tenant.id, onNotify]);
 
   const docsModalExpense = useMemo(
-    () => expenses.find((e) => e.id === docsModalExpenseId) || null,
-    [expenses, docsModalExpenseId]
+    () => activeExpenses.find((e) => e.id === docsModalExpenseId) || null,
+    [activeExpenses, docsModalExpenseId]
   );
 
   const activePreviewAttachment: ExpenseAttachment | null = useMemo(() => {
@@ -169,7 +210,8 @@ export function FinanceModule({
 
     let paidExpenses = 0;
     let committedExpenses = 0;
-    for (const exp of expenses) {
+    for (const exp of activeExpenses) {
+      if (exp.reversed) continue;
       if (exp.status === 'Paid') {
         paidExpenses += exp.amount;
       } else {
@@ -189,11 +231,11 @@ export function FinanceModule({
       totalExpenses,
       netCashPosition,
     };
-  }, [invoices, expenses]);
+  }, [invoices, activeExpenses]);
 
   const filteredExpenses = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return expenses
+    return activeExpenses
       .filter((exp) => {
         if (categoryFilter !== 'All' && exp.category !== categoryFilter) return false;
         if (statusFilter !== 'All' && exp.status !== statusFilter) return false;
@@ -210,7 +252,7 @@ export function FinanceModule({
         (a, b) =>
           b.expenseDate.localeCompare(a.expenseDate) || b.createdAt.localeCompare(a.createdAt)
       );
-  }, [expenses, searchQuery, categoryFilter, statusFilter]);
+  }, [activeExpenses, searchQuery, categoryFilter, statusFilter]);
 
   const categoryBreakdown = useMemo(() => {
     const map = new Map<
@@ -220,7 +262,8 @@ export function FinanceModule({
     for (const cat of EXPENSE_CATEGORIES) {
       map.set(cat, { category: cat, total: 0, paid: 0, count: 0 });
     }
-    for (const exp of expenses) {
+    for (const exp of activeExpenses) {
+      if (exp.reversed) continue;
       const entry = map.get(exp.category) || {
         category: exp.category,
         total: 0,
@@ -240,7 +283,7 @@ export function FinanceModule({
         ...item,
         sharePct: grandTotal > 0 ? Math.round((item.total / grandTotal) * 100) : 0,
       }));
-  }, [expenses]);
+  }, [activeExpenses]);
 
   function resetExpenseForm() {
     setTitle('');
@@ -250,7 +293,6 @@ export function FinanceModule({
     setPaymentMethod('Bank Transfer');
     setReference('');
     setExpenseDate(new Date().toISOString().slice(0, 10));
-    setInitialStatus('Pending Approval');
     setNotes('');
     setNewDocType('Official Receipt');
     setStagedAttachments([]);
@@ -317,7 +359,7 @@ export function FinanceModule({
         paymentMethod,
         reference: reference.trim(),
         expenseDate,
-        status: initialStatus,
+        status: 'Pending Approval',
         recordedBy: `${currentRole} Desk`,
         notes: notes.trim() || undefined,
         attachments: stagedAttachments.map((att) => ({
@@ -420,19 +462,28 @@ export function FinanceModule({
     }
   }
 
-  async function handleDeleteExpense(expense: SchoolExpense) {
-    if (!canManageExpenses) {
-      onNotify('Switch role to Bursar, Admin, or Super Admin to delete vouchers.', 'error');
+  async function handleConfirmExpenseReason(e: React.FormEvent) {
+    e.preventDefault();
+    if (!expenseReasonModal || !canManageExpenses) return;
+    if (!expenseReasonText.trim()) {
+      onNotify('Please enter an audit reason.', 'error');
       return;
     }
-    setBusyExpenseId(expense.id);
+    const target = expenseReasonModal.expense;
+    setBusyExpenseId(target.id);
     try {
-      await saasApi.deleteExpense(tenant.id, expense.id);
-      setConfirmDeleteId(null);
+      if (expenseReasonModal.mode === 'reverse') {
+        await saasApi.reverseExpense(tenant.id, target.id, expenseReasonText.trim());
+        onNotify(`Expense voucher ${target.voucherNumber} reversed.`);
+      } else {
+        await saasApi.deleteExpense(tenant.id, target.id, expenseReasonText.trim());
+        onNotify(`Expense voucher ${target.voucherNumber} voided.`);
+      }
+      setExpenseReasonModal(null);
+      setExpenseReasonText('');
       await onRefresh();
-      onNotify(`Expense voucher ${expense.voucherNumber} removed.`);
     } catch (err) {
-      onNotify(err instanceof Error ? err.message : 'Failed to delete expense voucher', 'error');
+      onNotify(err instanceof Error ? err.message : 'Failed to update expense voucher', 'error');
     } finally {
       setBusyExpenseId(null);
     }
@@ -524,7 +575,7 @@ export function FinanceModule({
             }`}
           >
             <Receipt className="h-3.5 w-3.5" />
-            Expensing ({expenses.length})
+            Expensing ({activeExpenses.length})
           </button>
           <button
             type="button"
@@ -536,7 +587,7 @@ export function FinanceModule({
             }`}
           >
             <ShieldCheck className="h-3.5 w-3.5" />
-            eTIMS Check ({(workspace.etimsChecks || []).length})
+            eTIMS Check ({(workspace.etimsChecks || []).filter((c) => !c.voided).length})
           </button>
           <button
             type="button"
@@ -548,7 +599,7 @@ export function FinanceModule({
             }`}
           >
             <ArrowLeftRight className="h-3.5 w-3.5" />
-            Bank &amp; M-Pesa ({(workspace.reconciliationLines || []).length})
+            Bank &amp; M-Pesa ({(workspace.reconciliationLines || []).filter((l) => !l.voided).length})
           </button>
           <button
             type="button"
@@ -560,7 +611,7 @@ export function FinanceModule({
             }`}
           >
             <Users className="h-3.5 w-3.5" />
-            Payroll ({(workspace.payrollEntries || []).length})
+            Payroll ({(workspace.payrollEntries || []).filter((p) => !p.voided).length})
           </button>
           <button
             type="button"
@@ -586,6 +637,20 @@ export function FinanceModule({
             <BookOpen className="h-3.5 w-3.5" />
             Financial Books
           </button>
+          {canViewAudit && (
+            <button
+              type="button"
+              onClick={() => setSubModule('audit')}
+              className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold whitespace-nowrap transition-colors ${
+                subModule === 'audit'
+                  ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+              }`}
+            >
+              <ClipboardList className="h-3.5 w-3.5" />
+              Audit Log
+            </button>
+          )}
         </div>
       </div>
 
@@ -613,7 +678,7 @@ export function FinanceModule({
             {formatCurrency(treasurySummary.paidExpenses, tenant.currency)}
           </div>
           <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-            {expenses.filter((e) => e.status === 'Paid').length} paid vouchers
+            {activeExpenses.filter((e) => !e.reversed && e.status === 'Paid').length} paid vouchers
           </p>
         </div>
 
@@ -626,7 +691,7 @@ export function FinanceModule({
             {formatCurrency(treasurySummary.committedExpenses, tenant.currency)}
           </div>
           <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-            {expenses.filter((e) => e.status !== 'Paid').length} awaiting disbursement
+            {activeExpenses.filter((e) => !e.reversed && e.status !== 'Paid').length} awaiting disbursement
           </p>
         </div>
 
@@ -716,6 +781,102 @@ export function FinanceModule({
 
       {subModule === 'books' && (
         <FinancialBooksPanel workspace={workspace} onNotify={onNotify} />
+      )}
+
+      {subModule === 'audit' && canViewAudit && (
+        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                Read-Only Finance Audit Trail
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Immutable log of payments, voids, reversals, expenses, payroll, budgets, approvals, and M-Pesa config updates.
+              </p>
+            </div>
+            <input
+              type="text"
+              value={auditSearch}
+              onChange={(e) => setAuditSearch(e.target.value)}
+              placeholder="Filter actor, action, entity..."
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-900 sm:w-64 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            />
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[820px] text-left text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-400">
+                <tr>
+                  <th className="px-3 py-2.5">Timestamp</th>
+                  <th className="px-3 py-2.5">Actor &amp; Role</th>
+                  <th className="px-3 py-2.5">Action</th>
+                  <th className="px-3 py-2.5">Entity</th>
+                  <th className="px-3 py-2.5">Details / Reason</th>
+                  <th className="px-3 py-2.5">IP</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {auditLoading ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-8 text-center text-slate-500">
+                      Loading finance audit log...
+                    </td>
+                  </tr>
+                ) : (
+                  auditLogs
+                    .filter((entry) => {
+                      const q = auditSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        entry.who.toLowerCase().includes(q) ||
+                        entry.role.toLowerCase().includes(q) ||
+                        entry.action.toLowerCase().includes(q) ||
+                        entry.entity.toLowerCase().includes(q) ||
+                        entry.entityId.toLowerCase().includes(q)
+                      );
+                    })
+                    .map((entry) => (
+                      <tr key={entry.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                        <td className="px-3 py-2 font-mono text-[11px] text-slate-600 dark:text-slate-400">
+                          {new Date(entry.timestamp).toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-semibold text-slate-900 dark:text-slate-100">
+                            {entry.who}
+                          </div>
+                          <div className="text-[11px] text-slate-500">{entry.role}</div>
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className="inline-block rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                            {entry.action}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium text-slate-800 dark:text-slate-200">
+                            {entry.entity}
+                          </div>
+                          <div className="font-mono text-[10px] text-slate-400">{entry.entityId}</div>
+                        </td>
+                        <td className="max-w-xs truncate px-3 py-2 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                          {entry.after ? JSON.stringify(entry.after).slice(0, 110) : '—'}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-slate-500">
+                          {entry.ip || '—'}
+                        </td>
+                      </tr>
+                    ))
+                )}
+                {!auditLoading && auditLogs.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-8 text-center text-slate-500">
+                      No finance audit log entries recorded yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {subModule === 'expensing' && (
@@ -893,12 +1054,13 @@ export function FinanceModule({
                     ) : (
                       filteredExpenses.map((exp) => {
                         const isBusy = busyExpenseId === exp.id;
-                        const isConfirmingDelete = confirmDeleteId === exp.id;
                         const docCount = (exp.attachments || []).length;
                         return (
                           <tr
                             key={exp.id}
-                            className="transition-colors hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
+                            className={`transition-colors hover:bg-slate-50/80 dark:hover:bg-slate-800/40 ${
+                              exp.reversed ? 'opacity-65' : ''
+                            }`}
                           >
                             <td className="px-4 py-3 align-top">
                               <div className="font-mono font-semibold text-slate-900 dark:text-slate-100">
@@ -921,6 +1083,11 @@ export function FinanceModule({
                               {exp.notes && (
                                 <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
                                   {exp.notes}
+                                </p>
+                              )}
+                              {exp.reversed && exp.reversalReason && (
+                                <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">
+                                  Reversed: {exp.reversalReason}
                                 </p>
                               )}
                             </td>
@@ -961,17 +1128,19 @@ export function FinanceModule({
 
                             <td className="px-4 py-3 align-top">
                               <span
-                                className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap ${getStatusBadgeClass(
-                                  exp.status
-                                )}`}
+                                className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap ${
+                                  exp.reversed
+                                    ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800/70 dark:bg-rose-950/40 dark:text-rose-300'
+                                    : getStatusBadgeClass(exp.status)
+                                }`}
                               >
-                                {exp.status}
+                                {exp.reversed ? 'Reversed' : exp.status}
                               </span>
                             </td>
 
                             <td className="px-4 py-3 text-right align-top">
                               <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
-                                {exp.status === 'Pending Approval' && (
+                                {!exp.reversed && exp.status === 'Pending Approval' && (
                                   <button
                                     type="button"
                                     disabled={!canManageExpenses || isBusy}
@@ -981,7 +1150,7 @@ export function FinanceModule({
                                     Approve
                                   </button>
                                 )}
-                                {exp.status !== 'Paid' && (
+                                {!exp.reversed && exp.status === 'Approved' && (
                                   <button
                                     type="button"
                                     disabled={!canManageExpenses || isBusy}
@@ -993,37 +1162,35 @@ export function FinanceModule({
                                   </button>
                                 )}
 
-                                {canManageExpenses &&
-                                  (isConfirmingDelete ? (
-                                    <div className="inline-flex items-center gap-1">
-                                      <button
-                                        type="button"
-                                        disabled={isBusy}
-                                        onClick={() => handleDeleteExpense(exp)}
-                                        className="rounded-md bg-rose-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
-                                      >
-                                        Confirm
-                                      </button>
-                                      <button
-                                        type="button"
-                                        disabled={isBusy}
-                                        onClick={() => setConfirmDeleteId(null)}
-                                        className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300"
-                                      >
-                                        Cancel
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      disabled={isBusy}
-                                      onClick={() => setConfirmDeleteId(exp.id)}
-                                      title="Delete expense voucher"
-                                      className="rounded-md border border-slate-200 p-1.5 text-slate-500 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-rose-900 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
-                                  ))}
+                                {canManageExpenses && !exp.reversed && exp.status === 'Paid' && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => {
+                                      setExpenseReasonText('');
+                                      setExpenseReasonModal({ mode: 'reverse', expense: exp });
+                                    }}
+                                    className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50 dark:border-rose-800/70 dark:bg-rose-950/40 dark:text-rose-300"
+                                  >
+                                    <RotateCcw className="h-3 w-3" />
+                                    Reverse
+                                  </button>
+                                )}
+
+                                {canManageExpenses && !exp.reversed && exp.status !== 'Paid' && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => {
+                                      setExpenseReasonText('');
+                                      setExpenseReasonModal({ mode: 'void', expense: exp });
+                                    }}
+                                    title="Void unpaid expense voucher"
+                                    className="rounded-md border border-slate-200 p-1.5 text-slate-500 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 dark:border-slate-700 dark:text-slate-400 dark:hover:border-rose-900 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1173,17 +1340,9 @@ export function FinanceModule({
                   <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
                     Voucher Workflow Status
                   </label>
-                  <select
-                    value={initialStatus}
-                    onChange={(e) => setInitialStatus(e.target.value as ExpenseStatus)}
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    {EXPENSE_STATUSES.map((st) => (
-                      <option key={st} value={st}>
-                        {st}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="rounded-lg border border-blue-200 bg-blue-50/70 px-3 py-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+                    Starts as <strong>Pending Approval</strong> (Maker-Checker: requires a different approver).
+                  </div>
                 </div>
               </div>
 
@@ -1398,19 +1557,21 @@ export function FinanceModule({
                               >
                                 <Download className="h-3.5 w-3.5" />
                               </a>
-                              {canManageExpenses && (
-                                <button
-                                  type="button"
-                                  disabled={uploadingExistingDoc}
-                                  onClick={() =>
-                                    handleDeleteExistingAttachment(docsModalExpense, att.id)
-                                  }
-                                  title="Delete document"
-                                  className="rounded p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50 dark:hover:bg-rose-950/40"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              )}
+                              {canManageExpenses &&
+                                docsModalExpense.status !== 'Paid' &&
+                                !docsModalExpense.reversed && (
+                                  <button
+                                    type="button"
+                                    disabled={uploadingExistingDoc}
+                                    onClick={() =>
+                                      handleDeleteExistingAttachment(docsModalExpense, att.id)
+                                    }
+                                    title="Delete document"
+                                    className="rounded p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50 dark:hover:bg-rose-950/40"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                             </div>
                           </div>
                         );
@@ -1419,47 +1580,52 @@ export function FinanceModule({
                   )}
                 </div>
 
-                {canManageExpenses && (
-                  <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                      Attach Additional Receipt or Signed Voucher
-                    </label>
-                    <div className="flex flex-col gap-2">
-                      <select
-                        value={existingDocType}
-                        onChange={(e) =>
-                          setExistingDocType(e.target.value as ExpenseAttachmentType)
-                        }
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                      >
-                        {EXPENSE_ATTACHMENT_TYPES.map((dt) => (
-                          <option key={dt} value={dt}>
-                            {dt}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        ref={existingFileInputRef}
-                        type="file"
-                        accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv"
-                        onChange={(e) => handleUploadAttachmentToExisting(e.target.files)}
-                        className="hidden"
-                      />
-                      <button
-                        type="button"
-                        disabled={
-                          uploadingExistingDoc ||
-                          (docsModalExpense.attachments || []).length >= 6
-                        }
-                        onClick={() => existingFileInputRef.current?.click()}
-                        className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
-                      >
-                        <Upload className="h-3.5 w-3.5" />
-                        {uploadingExistingDoc ? 'Uploading...' : 'Upload Supporting File'}
-                      </button>
+                {canManageExpenses &&
+                  (docsModalExpense.status === 'Paid' || docsModalExpense.reversed ? (
+                    <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300">
+                      Posted Paid/Reversed vouchers are locked; supporting documents are read-only.
                     </div>
-                  </div>
-                )}
+                  ) : (
+                    <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+                      <label className="mb-1.5 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Attach Additional Receipt or Signed Voucher
+                      </label>
+                      <div className="flex flex-col gap-2">
+                        <select
+                          value={existingDocType}
+                          onChange={(e) =>
+                            setExistingDocType(e.target.value as ExpenseAttachmentType)
+                          }
+                          className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        >
+                          {EXPENSE_ATTACHMENT_TYPES.map((dt) => (
+                            <option key={dt} value={dt}>
+                              {dt}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          ref={existingFileInputRef}
+                          type="file"
+                          accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv"
+                          onChange={(e) => handleUploadAttachmentToExisting(e.target.files)}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          disabled={
+                            uploadingExistingDoc ||
+                            (docsModalExpense.attachments || []).length >= 6
+                          }
+                          onClick={() => existingFileInputRef.current?.click()}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                          {uploadingExistingDoc ? 'Uploading...' : 'Upload Supporting File'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
               </div>
 
               {/* Right Pane: Document Viewer */}
@@ -1527,6 +1693,62 @@ export function FinanceModule({
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {expenseReasonModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4">
+          <form
+            onSubmit={handleConfirmExpenseReason}
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+          >
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+              {expenseReasonModal.mode === 'reverse'
+                ? 'Reverse Paid Expense Voucher'
+                : 'Void Unpaid Expense Voucher'}
+            </h3>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              {expenseReasonModal.expense.voucherNumber} · {expenseReasonModal.expense.title} (
+              {formatCurrency(expenseReasonModal.expense.amount, tenant.currency)})
+            </p>
+            <div className="mt-4">
+              <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Audit Reason *
+              </label>
+              <textarea
+                rows={3}
+                required
+                value={expenseReasonText}
+                onChange={(e) => setExpenseReasonText(e.target.value)}
+                placeholder={
+                  expenseReasonModal.mode === 'reverse'
+                    ? 'e.g. Supplier refunded payment; reversing voucher in ledger'
+                    : 'e.g. Cancelled requisition prior to payment'
+                }
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              />
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setExpenseReasonModal(null)}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busyExpenseId === expenseReasonModal.expense.id}
+                className="rounded-lg bg-rose-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+              >
+                {busyExpenseId === expenseReasonModal.expense.id
+                  ? 'Processing...'
+                  : expenseReasonModal.mode === 'reverse'
+                  ? 'Confirm Reversal'
+                  : 'Confirm Void'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

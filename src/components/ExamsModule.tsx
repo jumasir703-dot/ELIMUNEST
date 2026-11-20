@@ -9,12 +9,14 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  Lock,
   MessageCircle,
   Phone,
   Plus,
   Printer,
   Search,
   Trophy,
+  Unlock,
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
@@ -22,6 +24,7 @@ import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
 import {
   buildBroadsheetRows,
   buildGradeAnalyticsReport,
+  isNonSatExamResult,
   resolveSubjectTeacher,
   shortenCycleTitle,
   sortExamCyclesChronologically,
@@ -43,6 +46,7 @@ import {
   KCSE_844_GRADING_SCALE,
   KENYAN_CBC_CLUSTERS,
   STANDARD_ASSESSMENT_TYPES,
+  type ExamResultStatus,
   type TenantWorkspaceData,
   type UserRole,
 } from '../shared/types';
@@ -124,7 +128,14 @@ export function ExamsModule({
   const [queueSearch, setQueueSearch] = useState('');
   const [queueStreamFilter, setQueueStreamFilter] = useState<string>('All');
   const [queueSelectedStudentId, setQueueSelectedStudentId] = useState<string | null>(null);
+  const isAdminRole =
+    currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
+  const isParentRole = currentRole === 'Parent';
+
   const [showCycleModal, setShowCycleModal] = useState(false);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
+  const [unlockReason, setUnlockReason] = useState('');
+  const [unlockingCycle, setUnlockingCycle] = useState(false);
 
   const availableStreams = useMemo(
     () => getStreamsForGrade(tenant, selectedGrade),
@@ -191,7 +202,7 @@ export function ExamsModule({
     [students, selectedGrade, effectiveStreamFilter]
   );
 
-  // Build single-subject gradebook rows with CBE / 8-4-4 grades & ranking
+  // Build single-subject gradebook rows with CBE / 8-4-4 grades & ranking (never clamps invalid scores)
   const singleSubjectRows = useMemo(() => {
     if (isAllSubjectsMode) return [];
     const cycleId = activeCycle?.id || '';
@@ -202,32 +213,62 @@ export function ExamsModule({
           r.studentId === stu.id &&
           r.subject === effectiveSubject
       );
+      const existingStatus: ExamResultStatus = existing
+        ? existing.resultStatus ||
+          (existing.letterGrade === 'ABS'
+            ? 'Absent'
+            : existing.letterGrade === 'EXM'
+            ? 'Exempt'
+            : 'Scored')
+        : 'Scored';
+      const isNonSat = Boolean(existing && isNonSatExamResult(existing));
       const rawInput = draftScores[`${stu.id}:${effectiveSubject}`];
-      const numericScore =
-        rawInput !== undefined && rawInput !== ''
-          ? Math.max(0, Math.min(100, Number(rawInput)))
-          : existing?.score ?? null;
+
+      let numericScore: number | null = null;
+      let isInvalid = false;
+      if (rawInput !== undefined) {
+        const trimmed = rawInput.trim();
+        if (trimmed !== '') {
+          const parsed = Number(trimmed);
+          if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+            isInvalid = true;
+          } else {
+            numericScore = Math.round(parsed);
+          }
+        }
+      } else if (existing && !isNonSat) {
+        numericScore = existing.score;
+      }
 
       const computed =
-        numericScore !== null ? computeClientGrade(numericScore, stu.grade) : null;
+        !isNonSat && numericScore !== null ? computeClientGrade(numericScore, stu.grade) : null;
       return {
         student: stu,
         existing,
+        existingStatus,
+        isNonSat,
+        isInvalid,
         score: numericScore,
-        letterGrade: computed?.letterGrade ?? '—',
-        gpaPoints: computed?.gpaPoints ?? null,
+        letterGrade: isNonSat
+          ? existingStatus === 'Exempt'
+            ? 'EXM'
+            : 'ABS'
+          : isInvalid
+          ? 'ERR'
+          : computed?.letterGrade ?? '—',
+        gpaPoints: isNonSat ? null : computed?.gpaPoints ?? null,
         remarks: existing?.remarks || '',
       };
     });
 
     const sortedScores = rows
-      .filter((r) => r.score !== null)
+      .filter((r) => !r.isNonSat && !r.isInvalid && r.score !== null)
       .map((r) => r.score as number)
       .sort((a, b) => b - a);
 
     return rows.map((row) => ({
       ...row,
-      rank: row.score !== null ? sortedScores.indexOf(row.score) + 1 : null,
+      rank: !row.isNonSat && !row.isInvalid && row.score !== null ? sortedScores.indexOf(row.score) + 1 : null,
     }));
   }, [isAllSubjectsMode, gradeStudents, examResults, activeCycle, effectiveSubject, draftScores]);
 
@@ -386,17 +427,40 @@ export function ExamsModule({
     onNotify(`Downloaded branded Merit List for ${selectedGrade} (${scopeLabel}).`);
   }
 
-  async function saveScore(studentId: string, rawVal: string) {
-    if (!activeCycle || rawVal === '' || isAllSubjectsMode) return;
-    const score = Number(rawVal);
-    if (Number.isNaN(score)) return;
+  async function saveScore(
+    studentId: string,
+    rawVal: string,
+    resultStatus: ExamResultStatus = 'Scored'
+  ) {
+    if (!activeCycle || isAllSubjectsMode || isParentRole) return;
+    if (activeCycle.status === 'Published') {
+      onNotify(
+        `Exam cycle "${activeCycle.title}" is Published and locked. An Admin must unlock it first.`,
+        'error'
+      );
+      return;
+    }
+
+    let scoreToSend: number | null = null;
+    if (resultStatus === 'Scored') {
+      const trimmed = rawVal.trim();
+      if (trimmed === '') return;
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+        onNotify('Invalid mark: enter a numeric score between 0 and 100.', 'error');
+        return;
+      }
+      scoreToSend = Math.round(parsed);
+    }
+
     setSavingStudentId(studentId);
     try {
       await saasApi.upsertExamScore(tenant.id, {
         examCycleId: activeCycle.id,
         studentId,
         subject: effectiveSubject,
-        score,
+        score: scoreToSend,
+        resultStatus,
       });
       await onRefresh();
       setDraftScores((prev) => {
@@ -419,6 +483,28 @@ export function ExamsModule({
       onNotify(`${activeCycle.title} published across ${tenant.name}.`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Failed to publish cycle', 'error');
+    }
+  }
+
+  async function handleUnlockCycle(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeCycle) return;
+    const cleanReason = unlockReason.trim();
+    if (!cleanReason) {
+      onNotify('Provide an audit reason before unlocking a published exam cycle.', 'error');
+      return;
+    }
+    setUnlockingCycle(true);
+    try {
+      await saasApi.unlockExamCycle(tenant.id, activeCycle.id, cleanReason);
+      await onRefresh();
+      setShowUnlockModal(false);
+      setUnlockReason('');
+      onNotify(`${activeCycle.title} unlocked for editing (audit logged).`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to unlock cycle', 'error');
+    } finally {
+      setUnlockingCycle(false);
     }
   }
 
@@ -602,22 +688,29 @@ export function ExamsModule({
     const results = examResults
       .filter((r) => r.examCycleId === activeCycle.id && r.studentId === student.id)
       .map((r) => {
-        const graded = computeClientGrade(r.score, student.grade);
+        const nonSat = isNonSatExamResult(r);
+        const status: ExamResultStatus =
+          r.resultStatus ||
+          (r.letterGrade === 'ABS' ? 'Absent' : r.letterGrade === 'EXM' ? 'Exempt' : 'Scored');
+        const graded = nonSat ? null : computeClientGrade(r.score, student.grade);
         const teacherInfo = resolveSubjectTeacher(tenant, timetable, student, r.subject);
         return {
           ...r,
-          letterGrade: graded.letterGrade,
-          gpaPoints: graded.gpaPoints,
+          resultStatus: status,
+          isNonSat: nonSat,
+          letterGrade: nonSat ? (status === 'Exempt' ? 'EXM' : 'ABS') : graded!.letterGrade,
+          gpaPoints: nonSat ? 0 : graded!.gpaPoints,
           teacherName: teacherInfo.name,
           teacherInitials: teacherInfo.initials,
         };
       });
-    const totalMarks = results.reduce((sum, r) => sum + r.score, 0);
-    const maxPossible = results.reduce((sum, r) => sum + (r.maxScore || 100), 0);
+    const scoredResults = results.filter((r) => !r.isNonSat);
+    const totalMarks = scoredResults.reduce((sum, r) => sum + r.score, 0);
+    const maxPossible = scoredResults.reduce((sum, r) => sum + (r.maxScore || 100), 0);
     const avgScore =
       maxPossible > 0 ? Math.round((totalMarks / maxPossible) * 1000) / 10 : 0;
     const overallGradeInfo =
-      results.length > 0 ? computeClientGrade(avgScore, student.grade) : null;
+      scoredResults.length > 0 ? computeClientGrade(avgScore, student.grade) : null;
     const rankRow = allSubjectsRankedRows.find((r) => r.student.id === student.id);
     const totalRanked = allSubjectsRankedRows.filter((r) => r.rank !== null).length;
 
@@ -628,7 +721,7 @@ export function ExamsModule({
     const rawProgression = candidateCycles
       .map((cycle) => {
         const cycleResults = examResults.filter(
-          (r) => r.examCycleId === cycle.id && r.studentId === student.id
+          (r) => r.examCycleId === cycle.id && r.studentId === student.id && !isNonSatExamResult(r)
         );
         if (cycleResults.length === 0) return null;
         const cTotal = cycleResults.reduce((sum, r) => sum + r.score, 0);
@@ -669,7 +762,7 @@ export function ExamsModule({
         ? progressionPoints[progressionPoints.length - 1]
         : null;
 
-    const subjectComparison = results.map((r) => {
+    const subjectComparison = scoredResults.map((r) => {
       const prevMatch = previousCyclePoint?.cycleResults.find(
         (pr) => pr.subject.trim().toLowerCase() === r.subject.trim().toLowerCase()
       );
@@ -788,45 +881,64 @@ export function ExamsModule({
               <BarChart3 className="h-3.5 w-3.5" />
               Class Analytics
             </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('entry')}
-              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                activeTab === 'entry'
-                  ? 'bg-slate-900 text-white dark:bg-blue-600'
-                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
-              }`}
-            >
-              <FileSpreadsheet className="h-3.5 w-3.5" />
-              Exam Results Entry
-            </button>
+            {!isParentRole && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('entry')}
+                className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  activeTab === 'entry'
+                    ? 'bg-slate-900 text-white dark:bg-blue-600'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                }`}
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                Exam Results Entry
+              </button>
+            )}
           </div>
-          <button
-            onClick={() => {
-              setQueueStreamFilter(effectiveStreamFilter);
-              setQueueSelectedStudentId(gradeStudents[0]?.id || null);
-              setShowWhatsAppQueueModal(true);
-            }}
-            disabled={!activeCycle || gradeStudents.length === 0}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
-          >
-            <MessageCircle className="h-3.5 w-3.5" />
-            WhatsApp &amp; SMS Dispatch
-          </button>
-          <button
-            onClick={() => setShowCycleModal(true)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            New Exam Cycle
-          </button>
-          {activeTab !== 'entry' && activeCycle && activeCycle.status !== 'Published' && (
+          {!isParentRole && (
+            <button
+              onClick={() => {
+                setQueueStreamFilter(effectiveStreamFilter);
+                setQueueSelectedStudentId(gradeStudents[0]?.id || null);
+                setShowWhatsAppQueueModal(true);
+              }}
+              disabled={!activeCycle || gradeStudents.length === 0}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
+            >
+              <MessageCircle className="h-3.5 w-3.5" />
+              WhatsApp &amp; SMS Dispatch
+            </button>
+          )}
+          {!isParentRole && (
+            <button
+              onClick={() => setShowCycleModal(true)}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              New Exam Cycle
+            </button>
+          )}
+          {activeTab !== 'entry' && activeCycle && isAdminRole && activeCycle.status !== 'Published' && (
             <button
               onClick={handlePublishCycle}
               className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
               Publish Results
+            </button>
+          )}
+          {activeTab !== 'entry' && activeCycle && isAdminRole && activeCycle.status === 'Published' && (
+            <button
+              type="button"
+              onClick={() => {
+                setUnlockReason('');
+                setShowUnlockModal(true);
+              }}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950/70"
+            >
+              <Unlock className="h-3.5 w-3.5" />
+              Unlock Cycle
             </button>
           )}
         </div>
@@ -1039,6 +1151,27 @@ export function ExamsModule({
             </button>
           )}
         </div>
+
+        {(activeCycle?.status === 'Published' || (activeCycle?.unlockHistory && activeCycle.unlockHistory.length > 0)) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2.5 text-xs dark:border-slate-800">
+            {activeCycle.status === 'Published' ? (
+              <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700 dark:text-emerald-400">
+                <Lock className="h-3.5 w-3.5" />
+                Published &amp; Locked — marks cannot be modified unless unlocked by a School Admin.
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 font-medium text-amber-700 dark:text-amber-400">
+                <Unlock className="h-3.5 w-3.5" />
+                Unlocked for editing
+              </span>
+            )}
+            {activeCycle.unlockHistory && activeCycle.unlockHistory.length > 0 && (
+              <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                Last unlocked by {activeCycle.unlockHistory[0].unlockedBy} ({formatDateShort(activeCycle.unlockHistory[0].unlockedAt)}): &ldquo;{activeCycle.unlockHistory[0].reason}&rdquo;
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Active Grading Scale Reference Strip */}
@@ -1181,15 +1314,17 @@ export function ExamsModule({
                             <FileText className="h-3.5 w-3.5" />
                             Report Card
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => openReportCardModal(row.student.id, true)}
-                            title={`Send report card via WhatsApp to guardian (${row.student.guardianPhone || 'admissions contact'})`}
-                            className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
-                          >
-                            <MessageCircle className="h-3.5 w-3.5" />
-                            {reportCardDispatchesByStudent.has(row.student.id) ? 'Sent ✓' : 'WhatsApp'}
-                          </button>
+                          {!isParentRole && (
+                            <button
+                              type="button"
+                              onClick={() => openReportCardModal(row.student.id, true)}
+                              title={`Send report card via WhatsApp to guardian (${row.student.guardianPhone || 'admissions contact'})`}
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+                            >
+                              <MessageCircle className="h-3.5 w-3.5" />
+                              {reportCardDispatchesByStudent.has(row.student.id) ? 'Sent ✓' : 'WhatsApp'}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1222,14 +1357,16 @@ export function ExamsModule({
                 ) : (
                   singleSubjectRows.map((row) => {
                     const key = `${row.student.id}:${effectiveSubject}`;
+                    const cycleLocked = activeCycle?.status === 'Published' || isParentRole;
                     const inputVal =
                       draftScores[key] !== undefined
                         ? draftScores[key]
-                        : row.existing
+                        : row.existing && !row.isNonSat
                         ? String(row.existing.score)
                         : '';
                     const isDirty =
                       draftScores[key] !== undefined &&
+                      draftScores[key].trim() !== '' &&
                       Number(draftScores[key]) !== row.existing?.score;
                     return (
                       <tr key={row.student.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
@@ -1243,29 +1380,59 @@ export function ExamsModule({
                           </span>
                         </td>
                         <td className="px-4 py-2.5">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <input
                               type="number"
                               min={0}
                               max={100}
+                              disabled={cycleLocked}
                               value={inputVal}
                               onChange={(e) =>
                                 setDraftScores((prev) => ({ ...prev, [key]: e.target.value }))
                               }
                               onBlur={() => {
-                                if (isDirty) saveScore(row.student.id, inputVal);
+                                if (isDirty && !row.isInvalid) saveScore(row.student.id, inputVal, 'Scored');
                               }}
                               onKeyDown={(e) => {
-                                if (e.key === 'Enter') saveScore(row.student.id, inputVal);
+                                if (e.key === 'Enter' && !row.isInvalid) saveScore(row.student.id, inputVal, 'Scored');
                               }}
-                              placeholder="—"
-                              className="w-20 rounded-md border border-slate-200 bg-white px-2.5 py-1 font-mono text-sm text-slate-900 tabular-nums focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              placeholder={row.isNonSat ? row.letterGrade : '—'}
+                              className={`w-20 rounded-md border bg-white px-2.5 py-1 font-mono text-sm text-slate-900 tabular-nums focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100 disabled:opacity-60 dark:bg-slate-800 dark:text-slate-100 dark:disabled:bg-slate-900 ${
+                                row.isInvalid
+                                  ? 'border-red-500 ring-1 ring-red-500'
+                                  : 'border-slate-200 focus:border-blue-600 dark:border-slate-700'
+                              }`}
                             />
-                            {isDirty && (
+                            {!cycleLocked && (
+                              <select
+                                aria-label={`Status for ${row.student.fullName}`}
+                                value={row.existingStatus}
+                                disabled={savingStudentId === row.student.id}
+                                onChange={(e) => {
+                                  const nextStatus = e.target.value as ExamResultStatus;
+                                  if (nextStatus === 'Absent' || nextStatus === 'Exempt') {
+                                    void saveScore(row.student.id, '', nextStatus);
+                                  } else if (inputVal.trim() !== '' && !row.isInvalid) {
+                                    void saveScore(row.student.id, inputVal, 'Scored');
+                                  }
+                                }}
+                                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                              >
+                                <option value="Scored">Scored</option>
+                                <option value="Absent">ABS</option>
+                                <option value="Exempt">EXM</option>
+                              </select>
+                            )}
+                            {row.isInvalid && (
+                              <span className="text-[11px] font-semibold text-red-600 dark:text-red-400">
+                                0–100 only
+                              </span>
+                            )}
+                            {isDirty && !row.isInvalid && !cycleLocked && (
                               <button
                                 type="button"
                                 disabled={savingStudentId === row.student.id}
-                                onClick={() => saveScore(row.student.id, inputVal)}
+                                onClick={() => saveScore(row.student.id, inputVal, 'Scored')}
                                 className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
                               >
                                 Save
@@ -1274,12 +1441,20 @@ export function ExamsModule({
                           </div>
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-xs font-semibold tabular-nums">
-                          <span className={getGradeBadgeColor(row.letterGrade, is844)}>
-                            {row.letterGrade}
-                          </span>
+                          {row.isNonSat ? (
+                            <span className="text-amber-700 dark:text-amber-400">
+                              {row.letterGrade}
+                            </span>
+                          ) : row.isInvalid ? (
+                            <span className="text-red-600 dark:text-red-400">Invalid</span>
+                          ) : (
+                            <span className={getGradeBadgeColor(row.letterGrade, is844)}>
+                              {row.letterGrade}
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-600 tabular-nums dark:text-slate-400">
-                          {row.gpaPoints !== null ? `${row.gpaPoints} / ${maxPoints}` : '—'}
+                          {row.isNonSat ? 'Excluded' : row.gpaPoints !== null ? `${row.gpaPoints} / ${maxPoints}` : '—'}
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-600 tabular-nums dark:text-slate-400">
                           {row.rank ? `#${row.rank}` : '—'}
@@ -1294,15 +1469,17 @@ export function ExamsModule({
                               <FileText className="h-3.5 w-3.5" />
                               Report Card
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => openReportCardModal(row.student.id, true)}
-                              title={`Send report card via WhatsApp to guardian (${row.student.guardianPhone || 'admissions contact'})`}
-                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
-                            >
-                              <MessageCircle className="h-3.5 w-3.5" />
-                              {reportCardDispatchesByStudent.has(row.student.id) ? 'Sent ✓' : 'WhatsApp'}
-                            </button>
+                            {!isParentRole && (
+                              <button
+                                type="button"
+                                onClick={() => openReportCardModal(row.student.id, true)}
+                                title={`Send report card via WhatsApp to guardian (${row.student.guardianPhone || 'admissions contact'})`}
+                                className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-emerald-700 hover:underline dark:text-emerald-400"
+                              >
+                                <MessageCircle className="h-3.5 w-3.5" />
+                                {reportCardDispatchesByStudent.has(row.student.id) ? 'Sent ✓' : 'WhatsApp'}
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1518,13 +1695,13 @@ export function ExamsModule({
                           {r.subject}
                         </td>
                         <td className="py-2.5 text-right font-mono tabular-nums text-slate-800 dark:text-slate-200">
-                          {r.score} / {r.maxScore}
+                          {r.isNonSat ? r.resultStatus : `${r.score} / ${r.maxScore}`}
                         </td>
                         <td className="py-2.5 text-right font-mono font-semibold text-slate-900 dark:text-slate-100">
                           {r.letterGrade}
                         </td>
                         <td className="py-2.5 text-right font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                          {r.gpaPoints} / {reportCardData.studentMaxPts}
+                          {r.isNonSat ? '—' : `${r.gpaPoints} / ${reportCardData.studentMaxPts}`}
                         </td>
                         <td className="py-2.5 pl-4 text-xs text-slate-600 dark:text-slate-400">
                           {r.remarks}
@@ -2234,6 +2411,61 @@ export function ExamsModule({
                   className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
                 >
                   Create Cycle
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Unlock Published Cycle Modal */}
+      {showUnlockModal && activeCycle && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-slate-100">
+                <Unlock className="h-4 w-4 text-amber-600" />
+                Unlock Published Exam Cycle
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowUnlockModal(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
+              Unlocking <strong>{activeCycle.title}</strong> re-opens mark entry and score edits for teachers. This action is recorded in the cycle audit trail.
+            </p>
+            <form onSubmit={handleUnlockCycle} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Audit Reason (Required)
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={unlockReason}
+                  onChange={(e) => setUnlockReason(e.target.value)}
+                  placeholder="e.g. Moderation remark entered for Grade 9 Mathematics Paper 2"
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowUnlockModal(false)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={unlockingCycle || !unlockReason.trim()}
+                  className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {unlockingCycle ? 'Unlocking...' : 'Confirm Unlock Cycle'}
                 </button>
               </div>
             </form>

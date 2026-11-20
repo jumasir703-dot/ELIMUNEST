@@ -12,12 +12,15 @@ import {
   Download,
   Eye,
   KeyRound,
+  Landmark,
   Layers,
   Lock,
   LogOut,
   Moon,
+  Plus,
   Power,
   RefreshCw,
+  Save,
   Server,
   ShieldAlert,
   ShieldCheck,
@@ -43,6 +46,8 @@ import {
   type DevImpersonationTarget,
   type DevPlatformTelemetry,
   type DevTenantTelemetryRow,
+  type PayeBand,
+  type PayrollStatutoryRateSchedule,
   type SubscriptionCycle,
   type TenantPlan,
   type TenantStatus,
@@ -52,7 +57,8 @@ export type DevRouteSection =
   | 'telemetry'
   | 'onboarding'
   | 'subscriptions'
-  | 'impersonation';
+  | 'impersonation'
+  | 'statutory-rates';
 
 interface DeveloperPanelProps {
   section: DevRouteSection;
@@ -102,6 +108,13 @@ const DEV_SECTIONS: Array<{
     label: 'Safe Impersonation',
     shortLabel: 'Impersonation',
     icon: UserCheck,
+  },
+  {
+    id: 'statutory-rates',
+    path: '/dev/statutory-rates',
+    label: 'Statutory Payroll Rates',
+    shortLabel: 'Statutory Rates',
+    icon: Landmark,
   },
 ];
 
@@ -210,6 +223,43 @@ export function DeveloperPanel({
   const [dbBackupBusy, setDbBackupBusy] = useState<boolean>(false);
   const dbRestoreInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Module 5: Dated Payroll Statutory Schedules
+  const [statutorySchedules, setStatutorySchedules] = useState<PayrollStatutoryRateSchedule[]>([]);
+  const [statForm, setStatForm] = useState<{
+    id?: string;
+    effectiveFrom: string;
+    label: string;
+    nssfLowerLimit: number;
+    nssfUpperLimit: number;
+    nssfRatePct: number;
+    nssfMaxEmployee: number;
+    shifRatePct: number;
+    shifMin: number;
+    housingLevyRatePct: number;
+    nitaLevy: number;
+    personalRelief: number;
+  }>({
+    effectiveFrom: '2026-02-01',
+    label: 'Kenya Statutory Schedule (Feb 2026)',
+    nssfLowerLimit: 9000,
+    nssfUpperLimit: 108000,
+    nssfRatePct: 6,
+    nssfMaxEmployee: 6480,
+    shifRatePct: 2.75,
+    shifMin: 300,
+    housingLevyRatePct: 1.5,
+    nitaLevy: 50,
+    personalRelief: 2400,
+  });
+  const [statBands, setStatBands] = useState<Array<{ limit: string; ratePct: number }>>([
+    { limit: '24000', ratePct: 10 },
+    { limit: '8333', ratePct: 25 },
+    { limit: '467667', ratePct: 30 },
+    { limit: '300000', ratePct: 32.5 },
+    { limit: '', ratePct: 35 },
+  ]);
+  const [statSaving, setStatSaving] = useState(false);
+
   const isAuthorizedDeveloper = Boolean(
     authSession && !authSession.impersonator && isDeveloperRoleClient(authSession.user.role)
   );
@@ -232,19 +282,47 @@ export function DeveloperPanel({
     }
   }, [obAdminName, obAdminLocalEdited]);
 
+  function loadStatutoryScheduleIntoForm(s: PayrollStatutoryRateSchedule) {
+    setStatForm({
+      id: s.id,
+      effectiveFrom: s.effectiveFrom,
+      label: s.label,
+      nssfLowerLimit: s.nssfLowerLimit,
+      nssfUpperLimit: s.nssfUpperLimit,
+      nssfRatePct: Math.round(s.nssfRate * 10000) / 100,
+      nssfMaxEmployee: s.nssfMaxEmployee,
+      shifRatePct: Math.round(s.shifRate * 10000) / 100,
+      shifMin: s.shifMin,
+      housingLevyRatePct: Math.round(s.housingLevyRate * 10000) / 100,
+      nitaLevy: s.nitaLevy,
+      personalRelief: s.personalRelief,
+    });
+    setStatBands(
+      s.payeBands.map((b) => ({
+        limit: b.limit === null ? '' : String(b.limit),
+        ratePct: Math.round(b.rate * 10000) / 100,
+      }))
+    );
+  }
+
   const loadControlPlaneData = useCallback(async () => {
     if (!isAuthorizedDeveloper) return;
     setLoading(true);
     setLoadError(null);
     try {
-      const [telRes, targetRes, logRes] = await Promise.all([
+      const [telRes, targetRes, logRes, statRes] = await Promise.all([
         saasApi.getDevTelemetry(),
         saasApi.getDevImpersonationTargets(),
         saasApi.getDevAuditLogs(80),
+        saasApi.getDevStatutoryRates(),
       ]);
       setTelemetry(telRes.telemetry);
       setTargets(targetRes.targets);
       setAuditLogs(logRes.logs);
+      setStatutorySchedules(statRes.schedules);
+      if (statRes.schedules.length > 0) {
+        loadStatutoryScheduleIntoForm(statRes.schedules[0]);
+      }
 
       if (telRes.telemetry.tenantRows.length > 0) {
         setSelectedSubTenantId((prev) =>
@@ -499,6 +577,50 @@ export function DeveloperPanel({
       onNotify(err instanceof Error ? err.message : 'Database snapshot restore failed.', 'error');
     } finally {
       setDbBackupBusy(false);
+    }
+  }
+
+  async function handleSaveStatutorySchedule(e: React.FormEvent) {
+    e.preventDefault();
+    const parsedBands: PayeBand[] = statBands.map((b) => ({
+      limit: b.limit.trim() === '' ? null : Number(b.limit),
+      rate: Number(b.ratePct) / 100,
+    }));
+    if (
+      parsedBands.some(
+        (b) => (b.limit !== null && (!Number.isFinite(b.limit) || b.limit <= 0)) || !Number.isFinite(b.rate) || b.rate < 0 || b.rate > 1
+      )
+    ) {
+      onNotify('Invalid PAYE band limits or tax percentages.', 'error');
+      return;
+    }
+    setStatSaving(true);
+    try {
+      const res = await saasApi.saveDevStatutoryRate({
+        id: statForm.id,
+        effectiveFrom: statForm.effectiveFrom,
+        label: statForm.label.trim(),
+        currency: 'KES',
+        nssfLowerLimit: Number(statForm.nssfLowerLimit),
+        nssfUpperLimit: Number(statForm.nssfUpperLimit),
+        nssfRate: Number(statForm.nssfRatePct) / 100,
+        nssfMaxEmployee: Number(statForm.nssfMaxEmployee),
+        shifRate: Number(statForm.shifRatePct) / 100,
+        shifMin: Number(statForm.shifMin),
+        housingLevyRate: Number(statForm.housingLevyRatePct) / 100,
+        nitaLevy: Number(statForm.nitaLevy),
+        personalRelief: Number(statForm.personalRelief),
+        payeBands: parsedBands,
+      });
+      onNotify(
+        `Saved statutory rate schedule "${res.schedule.label}" (effective ${res.schedule.effectiveFrom}).`,
+        'success'
+      );
+      await loadControlPlaneData();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to save statutory schedule.', 'error');
+    } finally {
+      setStatSaving(false);
     }
   }
 
@@ -2082,6 +2204,358 @@ export function DeveloperPanel({
                     </button>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================
+              MODULE 5: STATUTORY PAYROLL RATES (/dev/statutory-rates)
+             ============================================================ */}
+          {section === 'statutory-rates' && (
+            <div className="space-y-6">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h1 className="font-display text-xl font-bold tracking-tight">
+                    Kenya Statutory Payroll Rate Schedules
+                  </h1>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    Manage dated statutory configurations for NSSF, SHIF (pre-PAYE deductible), Affordable Housing Levy (employee &amp; employer match), NITA Levy, Personal Relief, and KRA PAYE bands.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStatForm({
+                      id: undefined,
+                      effectiveFrom: new Date().toISOString().slice(0, 10),
+                      label: 'Updated Kenya Statutory Schedule',
+                      nssfLowerLimit: 9000,
+                      nssfUpperLimit: 108000,
+                      nssfRatePct: 6,
+                      nssfMaxEmployee: 6480,
+                      shifRatePct: 2.75,
+                      shifMin: 300,
+                      housingLevyRatePct: 1.5,
+                      nitaLevy: 50,
+                      personalRelief: 2400,
+                    });
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  New Effective-Dated Schedule
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                {/* Schedules History List */}
+                <div className="rounded-xl border border-slate-200 bg-white lg:col-span-5 dark:border-slate-800 dark:bg-slate-900">
+                  <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-800">
+                    <h2 className="font-display text-sm font-bold">Dated Rate Schedules</h2>
+                    <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                      Pay periods resolve the latest schedule whose effective date is on or before the pay month.
+                    </p>
+                  </div>
+                  <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {statutorySchedules.length === 0 ? (
+                      <p className="p-6 text-center text-xs text-slate-500">
+                        No statutory schedules loaded.
+                      </p>
+                    ) : (
+                      statutorySchedules.map((sched, idx) => {
+                        const isEditing = statForm.id === sched.id;
+                        return (
+                          <button
+                            key={sched.id}
+                            type="button"
+                            onClick={() => loadStatutoryScheduleIntoForm(sched)}
+                            className={`block w-full px-5 py-4 text-left text-xs transition-colors ${
+                              isEditing
+                                ? 'bg-blue-50/70 dark:bg-blue-950/30'
+                                : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                {sched.label}
+                              </span>
+                              <span className="rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                                {idx === 0 ? 'Active Latest' : `Effective ${sched.effectiveFrom}`}
+                              </span>
+                            </div>
+                            <div className="mt-1.5 grid grid-cols-2 gap-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                              <span>Effective: {sched.effectiveFrom}</span>
+                              <span>NSSF Max: KES {sched.nssfMaxEmployee.toLocaleString()}</span>
+                              <span>SHIF: {(sched.shifRate * 100).toFixed(2)}% (min {sched.shifMin})</span>
+                              <span>AHL: {(sched.housingLevyRate * 100).toFixed(2)}% + Match</span>
+                              <span>Relief: KES {sched.personalRelief.toLocaleString()}</span>
+                              <span>NITA: KES {sched.nitaLevy.toLocaleString()}</span>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Editor Form */}
+                <form
+                  onSubmit={handleSaveStatutorySchedule}
+                  className="space-y-4 rounded-xl border border-slate-200 bg-white p-6 lg:col-span-7 dark:border-slate-800 dark:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="font-display text-sm font-bold">
+                        {statForm.id ? `Edit Schedule (${statForm.id})` : 'Create New Statutory Schedule'}
+                      </h2>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        SHIF &amp; Housing Levy are deducted before computing KRA PAYE bands.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        Schedule Label
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={statForm.label}
+                        onChange={(e) => setStatForm({ ...statForm, label: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                        Effective From
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={statForm.effectiveFrom}
+                        onChange={(e) => setStatForm({ ...statForm, effectiveFrom: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        NSSF LEL (KES)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={statForm.nssfLowerLimit}
+                        onChange={(e) => setStatForm({ ...statForm, nssfLowerLimit: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        NSSF UEL (KES)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={statForm.nssfUpperLimit}
+                        onChange={(e) => setStatForm({ ...statForm, nssfUpperLimit: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        NSSF Rate (%)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        max={50}
+                        required
+                        value={statForm.nssfRatePct}
+                        onChange={(e) => setStatForm({ ...statForm, nssfRatePct: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        NSSF Max EE (KES)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={statForm.nssfMaxEmployee}
+                        onChange={(e) => setStatForm({ ...statForm, nssfMaxEmployee: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        SHIF Rate (%)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        max={25}
+                        required
+                        value={statForm.shifRatePct}
+                        onChange={(e) => setStatForm({ ...statForm, shifRatePct: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        SHIF Min (KES)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={statForm.shifMin}
+                        onChange={(e) => setStatForm({ ...statForm, shifMin: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        Housing Levy (%)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        max={25}
+                        required
+                        value={statForm.housingLevyRatePct}
+                        onChange={(e) =>
+                          setStatForm({ ...statForm, housingLevyRatePct: Number(e.target.value) })
+                        }
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        NITA Levy (KES)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={statForm.nitaLevy}
+                        onChange={(e) => setStatForm({ ...statForm, nitaLevy: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                        Personal Relief
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={statForm.personalRelief}
+                        onChange={(e) => setStatForm({ ...statForm, personalRelief: Number(e.target.value) })}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                      />
+                    </div>
+                  </div>
+
+                  {/* PAYE Bands Editor */}
+                  <div className="border-t border-slate-200 pt-3 dark:border-slate-800">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Monthly KRA PAYE Tax Bands (Incremental Width &amp; Rate %)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStatBands((prev) => [...prev, { limit: '', ratePct: 35 }])
+                        }
+                        className="text-xs font-semibold text-blue-600 hover:underline dark:text-blue-400"
+                      >
+                        + Add Band
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {statBands.map((band, idx) => (
+                        <div key={idx} className="grid grid-cols-12 items-center gap-2 text-xs">
+                          <span className="col-span-3 font-mono text-[11px] text-slate-500">
+                            Band {idx + 1}
+                          </span>
+                          <div className="col-span-5">
+                            <input
+                              type="number"
+                              min={1}
+                              value={band.limit}
+                              placeholder="Blank = Excess above"
+                              onChange={(e) =>
+                                setStatBands((prev) =>
+                                  prev.map((item, i) =>
+                                    i === idx ? { ...item, limit: e.target.value } : item
+                                  )
+                                )
+                              }
+                              className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                            />
+                          </div>
+                          <div className="col-span-3 flex items-center gap-1">
+                            <input
+                              type="number"
+                              step="0.1"
+                              min={0}
+                              max={100}
+                              required
+                              value={band.ratePct}
+                              onChange={(e) =>
+                                setStatBands((prev) =>
+                                  prev.map((item, i) =>
+                                    i === idx ? { ...item, ratePct: Number(e.target.value) } : item
+                                  )
+                                )
+                              }
+                              className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                            />
+                            <span className="font-mono text-slate-500">%</span>
+                          </div>
+                          <div className="col-span-1 text-right">
+                            {statBands.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setStatBands((prev) => prev.filter((_, i) => i !== idx))
+                                }
+                                className="text-xs font-semibold text-red-600 hover:underline"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={statSaving}
+                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    {statSaving ? 'Saving Schedule...' : 'Save Statutory Schedule'}
+                  </button>
+                </form>
               </div>
             </div>
           )}

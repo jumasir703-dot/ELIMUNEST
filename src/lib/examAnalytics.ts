@@ -10,12 +10,24 @@ import {
   type AssessmentGradeBand,
   type ExamCycle,
   type ExamResult,
+  type ExamResultStatus,
   type Student,
   type TeacherProfile,
   type Tenant,
   type TenantWorkspaceData,
   type TimetableSlot,
 } from '../shared/types';
+
+export function isNonSatExamResult(
+  r: Pick<ExamResult, 'resultStatus' | 'letterGrade'>
+): boolean {
+  return (
+    r.resultStatus === 'Absent' ||
+    r.resultStatus === 'Exempt' ||
+    r.letterGrade === 'ABS' ||
+    r.letterGrade === 'EXM'
+  );
+}
 
 export function getCycleOrderRank(title: string): number {
   const lower = title.toLowerCase();
@@ -158,9 +170,10 @@ export interface KcseBest7Summary {
 }
 
 export function computeKcseBest7(results: ExamResult[], grade: string): KcseBest7Summary | null {
-  if (!is844FormFourGrade(grade) || results.length === 0) return null;
+  const scoredOnly = results.filter((r) => !isNonSatExamResult(r));
+  if (!is844FormFourGrade(grade) || scoredOnly.length === 0) return null;
 
-  const scored = results.map((r) => {
+  const scored = scoredOnly.map((r) => {
     const pct = (r.maxScore || 100) > 0 ? Math.round((r.score / (r.maxScore || 100)) * 100) : r.score;
     const g = computeClientGrade(pct, grade);
     return {
@@ -209,7 +222,14 @@ export interface BroadsheetStudentRow {
   missingSubjects: string[];
   subjectMap: Record<
     string,
-    { score: number; maxScore: number; letterGrade: string; gpaPoints: number; remarks: string }
+    {
+      score: number;
+      maxScore: number;
+      letterGrade: string;
+      gpaPoints: number;
+      resultStatus: ExamResultStatus;
+      remarks: string;
+    }
   >;
   totalScore: number;
   maxPossible: number;
@@ -345,24 +365,41 @@ export function buildBroadsheetRows(params: {
 
   const base = students.map((stu) => {
     const stuResults = activeResults.filter((r) => r.studentId === stu.id);
+    const stuScoredResults = stuResults.filter((r) => !isNonSatExamResult(r));
     const subjectMap: BroadsheetStudentRow['subjectMap'] = {};
     let pointsSum = 0;
 
     for (const r of stuResults) {
-      const graded = computeClientGrade(r.score, stu.grade);
-      subjectMap[r.subject] = {
-        score: r.score,
-        maxScore: r.maxScore || 100,
-        letterGrade: graded.letterGrade,
-        gpaPoints: graded.gpaPoints,
-        remarks: r.remarks || '',
-      };
-      pointsSum += graded.gpaPoints;
+      const nonSat = isNonSatExamResult(r);
+      const status: ExamResultStatus =
+        r.resultStatus ||
+        (r.letterGrade === 'ABS' ? 'Absent' : r.letterGrade === 'EXM' ? 'Exempt' : 'Scored');
+      if (nonSat) {
+        subjectMap[r.subject] = {
+          score: 0,
+          maxScore: r.maxScore || 100,
+          letterGrade: status === 'Exempt' ? 'EXM' : 'ABS',
+          gpaPoints: 0,
+          resultStatus: status,
+          remarks: r.remarks || status,
+        };
+      } else {
+        const graded = computeClientGrade(r.score, stu.grade);
+        subjectMap[r.subject] = {
+          score: r.score,
+          maxScore: r.maxScore || 100,
+          letterGrade: graded.letterGrade,
+          gpaPoints: graded.gpaPoints,
+          resultStatus: 'Scored',
+          remarks: r.remarks || '',
+        };
+        pointsSum += graded.gpaPoints;
+      }
     }
 
-    const subjectsSat = stuResults.length;
-    const totalScore = stuResults.reduce((s, r) => s + r.score, 0);
-    const maxPossible = stuResults.reduce((s, r) => s + (r.maxScore || 100), 0);
+    const subjectsSat = stuScoredResults.length;
+    const totalScore = stuScoredResults.reduce((s, r) => s + r.score, 0);
+    const maxPossible = stuScoredResults.reduce((s, r) => s + (r.maxScore || 100), 0);
     const meanScore =
       maxPossible > 0 ? Math.round((totalScore / maxPossible) * 1000) / 10 : null;
     const meanPoints =
@@ -370,15 +407,17 @@ export function buildBroadsheetRows(params: {
     const overallGradeInfo =
       meanScore !== null ? computeClientGrade(meanScore, stu.grade) : null;
 
-    const satLower = new Set(stuResults.map((r) => r.subject.trim().toLowerCase()));
+    const recordedLower = new Set(stuResults.map((r) => r.subject.trim().toLowerCase()));
     const missingSubjects = registeredSubjects.filter(
-      (sub) => !satLower.has(sub.trim().toLowerCase())
+      (sub) => !recordedLower.has(sub.trim().toLowerCase())
     );
 
-    const kcseBest7 = computeKcseBest7(stuResults, stu.grade);
+    const kcseBest7 = computeKcseBest7(stuScoredResults, stu.grade);
 
     // Baseline comparison
-    const prevResults = baselineResults.filter((r) => r.studentId === stu.id);
+    const prevResults = baselineResults.filter(
+      (r) => r.studentId === stu.id && !isNonSatExamResult(r)
+    );
     let prevMeanScore: number | null = null;
     let prevMeanPoints: number | null = null;
     if (prevResults.length > 0) {
@@ -644,9 +683,10 @@ export function buildGradeAnalyticsReport(params: {
   const expectedStudentsCount = broadsheetRows.length;
   const unsortedSubjectMatrix = registeredSubjects.map((sub) => {
     const subLower = sub.trim().toLowerCase();
-    const entries = activeScopedResults.filter(
+    const allRecordedEntries = activeScopedResults.filter(
       (r) => r.subject.trim().toLowerCase() === subLower
     );
+    const entries = allRecordedEntries.filter((r) => !isNonSatExamResult(r));
     const gradeCounts = emptyBandCounts(scale);
     let scoreSum = 0;
     let ptsSum = 0;
@@ -672,7 +712,7 @@ export function buildGradeAnalyticsReport(params: {
       entries.length > 0 ? Math.round((passCount / entries.length) * 100) : null;
 
     const prevEntries = baselineScopedResults.filter(
-      (r) => r.subject.trim().toLowerCase() === subLower
+      (r) => r.subject.trim().toLowerCase() === subLower && !isNonSatExamResult(r)
     );
     const prevMeanScore =
       prevEntries.length > 0
@@ -687,7 +727,7 @@ export function buildGradeAnalyticsReport(params: {
 
     const completionPct =
       expectedStudentsCount > 0
-        ? Math.min(100, Math.round((entries.length / expectedStudentsCount) * 100))
+        ? Math.min(100, Math.round((allRecordedEntries.length / expectedStudentsCount) * 100))
         : 0;
 
     return {
@@ -725,6 +765,7 @@ export function buildGradeAnalyticsReport(params: {
   // 3. Teacher & Department Subject Performance Comparison
   const teacherGroups = new Map<string, { stream: string; subject: string; results: ExamResult[] }>();
   for (const r of activeScopedResults) {
+    if (isNonSatExamResult(r)) continue;
     const key = `${r.section}::${r.subject.trim().toLowerCase()}`;
     const existing = teacherGroups.get(key) || {
       stream: r.section,
@@ -760,7 +801,8 @@ export function buildGradeAnalyticsReport(params: {
     const prevGrp = baselineScopedResults.filter(
       (r) =>
         r.section === grp.stream &&
-        r.subject.trim().toLowerCase() === grp.subject.trim().toLowerCase()
+        r.subject.trim().toLowerCase() === grp.subject.trim().toLowerCase() &&
+        !isNonSatExamResult(r)
     );
     const prevMeanScore =
       prevGrp.length > 0
@@ -846,7 +888,7 @@ export function buildGradeAnalyticsReport(params: {
     .filter((r) => r.missingSubjects.length > 0)
     .map((r) => ({
       student: r.student,
-      enteredCount: r.subjectsSat,
+      enteredCount: Math.max(0, registeredSubjects.length - r.missingSubjects.length),
       expectedCount: registeredSubjects.length,
       missingSubjects: r.missingSubjects,
     }));

@@ -21,6 +21,7 @@ import {
   sanitizeSchoolEmailDomain,
   getLessonsPerWeekForSubject,
   getStreamsForGrade,
+  getSubjectsForGrade,
   getSubjectsForLevel,
   getTeacherAssignedSubjectsForCohort,
   isDateInLeaveChit,
@@ -43,6 +44,7 @@ import {
   type BudgetAllocation,
   type BudgetApprovalStatus,
   type CbcClusterId,
+  type CreditNoteRecord,
   type CurrencyCode,
   DEFAULT_CURRENCY,
   type DayOfWeek,
@@ -54,6 +56,7 @@ import {
   type EtimsVerificationStatus,
   type ExamCycle,
   type ExamResult,
+  type ExamResultStatus,
   type ExpenseAttachment,
   type ExpenseAttachmentType,
   type ExpenseCategory,
@@ -61,6 +64,10 @@ import {
   type FeeInvoice,
   type FeeStructure,
   type FeeVoteline,
+  type FeeWaiverKind,
+  type FeeWaiverMode,
+  type FeeWaiverRecord,
+  type FinanceAuditEntry,
   type IndependentVotelineItem,
   type IndependentVotelinePayment,
   type LeaveOutChit,
@@ -70,8 +77,11 @@ import {
   type NotificationCategory,
   type NotificationItem,
   type OnboardingChecklist,
+  type PayeBand,
   type PaymentMethod,
+  type PaymentRecord,
   type PayrollEntry,
+  type PayrollStatutoryRateSchedule,
   type PayrollStatus,
   type PublicSchoolDirectoryItem,
   type ReconciliationChannel,
@@ -110,7 +120,9 @@ import {
   computeStatutoryDeductions,
   createEmptyDatabase,
   createSeedDatabase,
+  DEFAULT_STATUTORY_RATE_SCHEDULES,
   PERIOD_TIMES,
+  selectActiveStatutorySchedule,
   type DatabaseState,
   type StoredTenantUser,
 } from './seed.ts';
@@ -1014,6 +1026,125 @@ export class TenantStore {
             });
           }
 
+          if (!Array.isArray(parsed.creditNotes)) {
+            parsed.creditNotes = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.feeWaivers)) {
+            parsed.feeWaivers = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.financeAuditLogs)) {
+            parsed.financeAuditLogs = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.statutoryRateSchedules) || parsed.statutoryRateSchedules.length === 0) {
+            parsed.statutoryRateSchedules = JSON.parse(
+              JSON.stringify(DEFAULT_STATUTORY_RATE_SCHEDULES)
+            ) as PayrollStatutoryRateSchedule[];
+            dirty = true;
+          }
+          for (const counterKey of [
+            'receiptCounters',
+            'studentCounters',
+            'invoiceCounters',
+            'admissionCounters',
+            'voucherCounters',
+            'creditNoteCounters',
+          ] as const) {
+            if (!parsed[counterKey] || typeof parsed[counterKey] !== 'object') {
+              parsed[counterKey] = {};
+              dirty = true;
+            }
+          }
+
+          // Migrate legacy 'Verified' eTIMS status to honest 'Checked manually'
+          parsed.etimsChecks.forEach((chk) => {
+            if ((chk.status as string) === 'Verified') {
+              chk.status = 'Checked manually';
+              dirty = true;
+            }
+          });
+          parsed.expenses.forEach((exp) => {
+            if ((exp.etimsStatus as string) === 'Verified') {
+              exp.etimsStatus = 'Checked manually';
+              dirty = true;
+            }
+            if (!exp.createdByUserId) {
+              exp.createdByUserId = `usr-${exp.tenantId}-bursar`;
+              dirty = true;
+            }
+          });
+          parsed.payrollEntries.forEach((p) => {
+            if (!p.createdByUserId) {
+              p.createdByUserId = `usr-${p.tenantId}-bursar`;
+              dirty = true;
+            }
+            if (p.employerNssf === undefined) {
+              const t = parsed.tenants.find((x) => x.id === p.tenantId);
+              const stat = computeStatutoryDeductions(
+                p.grossPay,
+                t?.currency === 'USD' ? 'USD' : 'KES',
+                parsed.statutoryRateSchedules,
+                p.payPeriod
+              );
+              p.employerNssf = stat.employerNssf;
+              p.employerHousingLevy = stat.employerHousingLevy;
+              p.employerNita = stat.employerNita;
+              p.totalEmployerCost = p.grossPay + stat.employerNssf + stat.employerHousingLevy + stat.employerNita;
+              p.statutoryScheduleId = stat.scheduleId;
+              dirty = true;
+            }
+          });
+          parsed.budgets.forEach((b) => {
+            if (!b.createdByUserId) {
+              b.createdByUserId = `usr-${b.tenantId}-bursar`;
+              dirty = true;
+            }
+          });
+          parsed.approvalRecords.forEach((a) => {
+            if (!a.createdByUserId) {
+              a.createdByUserId = `usr-${a.tenantId}-bursar`;
+              dirty = true;
+            }
+          });
+
+          // Initialize monotonic counters above existing tenant counts
+          parsed.tenants.forEach((t) => {
+            const stuCount = parsed.students.filter((s) => s.tenantId === t.id).length;
+            if ((parsed.studentCounters![t.id] || 0) < stuCount) {
+              parsed.studentCounters![t.id] = stuCount;
+              dirty = true;
+            }
+            const invCount = parsed.invoices.filter((i) => i.tenantId === t.id).length;
+            if ((parsed.invoiceCounters![t.id] || 0) < invCount) {
+              parsed.invoiceCounters![t.id] = invCount;
+              dirty = true;
+            }
+            const admCount = parsed.admissions.filter((a) => a.tenantId === t.id).length;
+            if ((parsed.admissionCounters![t.id] || 0) < admCount) {
+              parsed.admissionCounters![t.id] = admCount;
+              dirty = true;
+            }
+            const expCount = parsed.expenses.filter((e) => e.tenantId === t.id).length;
+            if ((parsed.voucherCounters![t.id] || 0) < expCount) {
+              parsed.voucherCounters![t.id] = expCount;
+              dirty = true;
+            }
+            const payCount = parsed.invoices
+              .filter((i) => i.tenantId === t.id)
+              .reduce((sum, i) => sum + (i.payments?.length || 0), 0);
+            if ((parsed.receiptCounters![t.id] || 0) < payCount) {
+              parsed.receiptCounters![t.id] = payCount;
+              dirty = true;
+            }
+            const cnCount = (parsed.creditNotes || []).filter((c) => c.tenantId === t.id).length;
+            if ((parsed.creditNoteCounters![t.id] || 0) < cnCount) {
+              parsed.creditNoteCounters![t.id] = cnCount;
+              dirty = true;
+            }
+          });
+
     return { state: parsed, dirty };
   }
 
@@ -1203,6 +1334,8 @@ export class TenantStore {
       ['examResults', this.state.examResults],
       ['feeStructures', this.state.feeStructures],
       ['invoices', this.state.invoices],
+      ['creditNotes', this.state.creditNotes || []],
+      ['feeWaivers', this.state.feeWaivers || []],
       ['independentVotelines', this.state.independentVotelines || []],
       ['mpesaTransactions', this.state.mpesaTransactions || []],
       ['expenses', this.state.expenses],
@@ -1211,6 +1344,8 @@ export class TenantStore {
       ['payrollEntries', this.state.payrollEntries || []],
       ['budgets', this.state.budgets || []],
       ['approvalRecords', this.state.approvalRecords || []],
+      ['financeAuditLogs', this.state.financeAuditLogs || []],
+      ['statutoryRateSchedules', this.state.statutoryRateSchedules || []],
       ['announcements', this.state.announcements],
       ['messages', this.state.messages],
       ['whatsappDispatches', this.state.whatsappDispatches || []],
@@ -1429,16 +1564,20 @@ export class TenantStore {
     const allExamResults = this.state.examResults.filter((r) => r.tenantId === tenantId);
     const allFeeStructures = this.state.feeStructures.filter((f) => f.tenantId === tenantId);
     const allInvoices = this.state.invoices.filter((i) => i.tenantId === tenantId);
+    const allCreditNotes = (this.state.creditNotes || []).filter((c) => c.tenantId === tenantId);
+    const allFeeWaivers = (this.state.feeWaivers || []).filter((w) => w.tenantId === tenantId);
     const allVotelines = (this.state.independentVotelines || []).filter(
-      (v) => v.tenantId === tenantId
+      (v) => v.tenantId === tenantId && !v.voided
     );
     const allMpesa = (this.state.mpesaTransactions || []).filter((m) => m.tenantId === tenantId);
-    const allExpenses = this.state.expenses.filter((e) => e.tenantId === tenantId);
-    const allEtims = (this.state.etimsChecks || []).filter((e) => e.tenantId === tenantId);
-    const allRecon = (this.state.reconciliationLines || []).filter((r) => r.tenantId === tenantId);
-    const allPayroll = (this.state.payrollEntries || []).filter((p) => p.tenantId === tenantId);
+    const allExpenses = this.state.expenses.filter((e) => e.tenantId === tenantId && !e.voided);
+    const allEtims = (this.state.etimsChecks || []).filter((e) => e.tenantId === tenantId && !e.voided);
+    const allRecon = (this.state.reconciliationLines || []).filter((r) => r.tenantId === tenantId && !r.voided);
+    const allPayroll = (this.state.payrollEntries || []).filter((p) => p.tenantId === tenantId && !p.voided);
     const allBudgets = (this.state.budgets || []).filter((b) => b.tenantId === tenantId);
-    const allApprovals = (this.state.approvalRecords || []).filter((a) => a.tenantId === tenantId);
+    const allApprovals = (this.state.approvalRecords || []).filter((a) => a.tenantId === tenantId && !a.voided);
+    const allFinanceAudit = (this.state.financeAuditLogs || []).filter((f) => f.tenantId === tenantId).slice(0, 150);
+    const statutoryRateSchedules = this.state.statutoryRateSchedules || DEFAULT_STATUTORY_RATE_SCHEDULES;
     const allAnnouncements = this.state.announcements.filter((a) => a.tenantId === tenantId);
     const allMessages = this.state.messages.filter((m) => m.tenantId === tenantId);
     const allWhatsapp = (this.state.whatsappDispatches || []).filter(
@@ -1476,6 +1615,8 @@ export class TenantStore {
         ),
         feeStructures: allFeeStructures.filter((f) => childGrades.has(f.grade)),
         invoices: allInvoices.filter((i) => childIds.has(i.studentId)),
+        creditNotes: allCreditNotes.filter((c) => childIds.has(c.studentId)),
+        feeWaivers: allFeeWaivers.filter((w) => childIds.has(w.studentId)),
         independentVotelines: allVotelines.filter((v) => childIds.has(v.studentId)),
         mpesaTransactions: [],
         expenses: [],
@@ -1509,6 +1650,8 @@ export class TenantStore {
         examResults: allExamResults,
         feeStructures: [],
         invoices: [],
+        creditNotes: [],
+        feeWaivers: [],
         independentVotelines: [],
         mpesaTransactions: [],
         expenses: [],
@@ -1538,6 +1681,8 @@ export class TenantStore {
         examResults: [],
         feeStructures: allFeeStructures,
         invoices: allInvoices,
+        creditNotes: allCreditNotes,
+        feeWaivers: allFeeWaivers,
         independentVotelines: allVotelines,
         mpesaTransactions: allMpesa,
         expenses: allExpenses,
@@ -1546,6 +1691,7 @@ export class TenantStore {
         payrollEntries: allPayroll,
         budgets: allBudgets,
         approvalRecords: allApprovals,
+        statutoryRateSchedules,
         announcements: allAnnouncements,
         messages: allMessages,
         whatsappDispatches: allWhatsapp,
@@ -1567,6 +1713,8 @@ export class TenantStore {
         examResults: allExamResults,
         feeStructures: [],
         invoices: [],
+        creditNotes: [],
+        feeWaivers: [],
         independentVotelines: [],
         mpesaTransactions: [],
         expenses: [],
@@ -1595,6 +1743,8 @@ export class TenantStore {
       examResults: allExamResults,
       feeStructures: allFeeStructures,
       invoices: allInvoices,
+      creditNotes: allCreditNotes,
+      feeWaivers: allFeeWaivers,
       independentVotelines: allVotelines,
       mpesaTransactions: allMpesa,
       expenses: allExpenses,
@@ -1603,6 +1753,8 @@ export class TenantStore {
       payrollEntries: allPayroll,
       budgets: allBudgets,
       approvalRecords: allApprovals,
+      financeAuditLogs: allFinanceAudit,
+      statutoryRateSchedules,
       announcements: allAnnouncements,
       messages: allMessages,
       whatsappDispatches: allWhatsapp,
@@ -1982,6 +2134,8 @@ export class TenantStore {
     this.state.examResults = this.state.examResults.filter((r) => r.tenantId !== tenantId);
     this.state.feeStructures = this.state.feeStructures.filter((f) => f.tenantId !== tenantId);
     this.state.invoices = this.state.invoices.filter((i) => i.tenantId !== tenantId);
+    this.state.creditNotes = (this.state.creditNotes || []).filter((c) => c.tenantId !== tenantId);
+    this.state.feeWaivers = (this.state.feeWaivers || []).filter((w) => w.tenantId !== tenantId);
     this.state.independentVotelines = (this.state.independentVotelines || []).filter(
       (v) => v.tenantId !== tenantId
     );
@@ -1997,6 +2151,9 @@ export class TenantStore {
     this.state.approvalRecords = (this.state.approvalRecords || []).filter(
       (a) => a.tenantId !== tenantId
     );
+    this.state.financeAuditLogs = (this.state.financeAuditLogs || []).filter(
+      (f) => f.tenantId !== tenantId
+    );
     this.state.announcements = this.state.announcements.filter((a) => a.tenantId !== tenantId);
     this.state.messages = this.state.messages.filter((m) => m.tenantId !== tenantId);
     this.state.whatsappDispatches = (this.state.whatsappDispatches || []).filter(
@@ -2007,6 +2164,16 @@ export class TenantStore {
     );
     if (this.state.mpesaWebhookHashes) {
       delete this.state.mpesaWebhookHashes[tenantId];
+    }
+    for (const key of [
+      'receiptCounters',
+      'studentCounters',
+      'invoiceCounters',
+      'admissionCounters',
+      'voucherCounters',
+      'creditNoteCounters',
+    ] as const) {
+      if (this.state[key]) delete this.state[key]![tenantId];
     }
     this.state.notifications = this.state.notifications.filter((n) => n.tenantId !== tenantId);
     this.state.users = (this.state.users || []).filter((u) => u.tenantId !== tenantId);
@@ -3444,6 +3611,447 @@ export class TenantStore {
     return tenant;
   }
 
+  // Phase 2 Helpers: Monotonic Counters, Validators, Finance Audit, Statutory Schedules
+  private bumpTenantCounter(
+    mapKey:
+      | 'receiptCounters'
+      | 'studentCounters'
+      | 'invoiceCounters'
+      | 'admissionCounters'
+      | 'voucherCounters'
+      | 'creditNoteCounters',
+    tenantId: string,
+    floor = 0
+  ): number {
+    if (!this.state[mapKey] || typeof this.state[mapKey] !== 'object') {
+      this.state[mapKey] = {};
+    }
+    const current = Number(this.state[mapKey]![tenantId] || 0);
+    const next = Math.max(current, floor) + 1;
+    this.state[mapKey]![tenantId] = next;
+    return next;
+  }
+
+  private nextReceiptNumber(tenantId: string): string {
+    const existingRefs = new Set<string>();
+    for (const inv of this.state.invoices) {
+      if (inv.tenantId !== tenantId) continue;
+      for (const p of inv.payments || []) {
+        existingRefs.add(p.receiptNumber.trim().toUpperCase());
+      }
+    }
+    for (const ivl of this.state.independentVotelines || []) {
+      if (ivl.tenantId !== tenantId) continue;
+      for (const p of ivl.payments || []) {
+        existingRefs.add(p.receiptNumber.trim().toUpperCase());
+      }
+    }
+    let candidate = '';
+    do {
+      const seq = this.bumpTenantCounter('receiptCounters', tenantId, existingRefs.size);
+      candidate = `RCT-${String(seq).padStart(6, '0')}`;
+    } while (existingRefs.has(candidate));
+    return candidate;
+  }
+
+  private nextCreditNoteNumber(tenantId: string): string {
+    const floor = (this.state.creditNotes || []).filter((c) => c.tenantId === tenantId).length;
+    const seq = this.bumpTenantCounter('creditNoteCounters', tenantId, floor);
+    return `CN-${String(seq).padStart(6, '0')}`;
+  }
+
+  private nextStudentCode(tenantId: string): string {
+    const existing = new Set(
+      this.state.students
+        .filter((s) => s.tenantId === tenantId)
+        .map((s) => s.studentCode.trim().toUpperCase())
+    );
+    let candidate = '';
+    do {
+      const seq = this.bumpTenantCounter('studentCounters', tenantId, existing.size);
+      candidate = `ADM-${2600 + seq}`;
+    } while (existing.has(candidate));
+    return candidate;
+  }
+
+  private nextUniqueUpi(tenantId: string): string {
+    const existing = new Set(
+      this.state.students
+        .filter((s) => s.tenantId === tenantId)
+        .map((s) => s.upi.trim().toUpperCase())
+    );
+    let candidate = '';
+    do {
+      candidate = `KE-${randomInt(1000000, 9999999)}M`;
+    } while (existing.has(candidate));
+    return candidate;
+  }
+
+  private nextInvoiceNumber(tenant: Tenant): string {
+    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+    const existing = new Set(
+      this.state.invoices
+        .filter((i) => i.tenantId === tenant.id)
+        .map((i) => i.invoiceNumber.trim().toUpperCase())
+    );
+    let candidate = '';
+    do {
+      const seq = this.bumpTenantCounter('invoiceCounters', tenant.id, existing.size);
+      candidate = `${prefix}-INV-${202600 + seq}`;
+    } while (existing.has(candidate));
+    return candidate;
+  }
+
+  private nextAdmissionCode(tenant: Tenant): string {
+    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+    const existing = new Set(
+      this.state.admissions
+        .filter((a) => a.tenantId === tenant.id)
+        .map((a) => a.applicationCode.trim().toUpperCase())
+    );
+    let candidate = '';
+    do {
+      const seq = this.bumpTenantCounter('admissionCounters', tenant.id, existing.size);
+      candidate = `${prefix}-APP-${202600 + seq}`;
+    } while (existing.has(candidate));
+    return candidate;
+  }
+
+  private nextVoucherNumber(tenant: Tenant): string {
+    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+    const existing = new Set(
+      this.state.expenses
+        .filter((e) => e.tenantId === tenant.id)
+        .map((e) => e.voucherNumber.trim().toUpperCase())
+    );
+    let candidate = '';
+    do {
+      const seq = this.bumpTenantCounter('voucherCounters', tenant.id, existing.size);
+      candidate = `${prefix}-EXP-${202600 + seq}`;
+    } while (existing.has(candidate));
+    return candidate;
+  }
+
+  private parseStrictPositiveAmount(raw: unknown, fieldLabel = 'Amount'): number {
+    if (
+      raw === null ||
+      raw === undefined ||
+      typeof raw === 'boolean' ||
+      (typeof raw === 'string' && raw.trim() === '')
+    ) {
+      throw new ConflictError(`${fieldLabel} must be a positive number greater than zero.`, 400);
+    }
+    const num = Number(raw);
+    if (!Number.isFinite(num) || num <= 0) {
+      throw new ConflictError(`${fieldLabel} must be a finite number greater than zero.`, 400);
+    }
+    return Math.round(num);
+  }
+
+  private validatePaymentDate(
+    rawPaidAt: string | undefined,
+    actor?: Pick<TenantUser, 'role'>
+  ): string {
+    const now = Date.now();
+    if (!rawPaidAt || !rawPaidAt.trim()) {
+      return new Date(now).toISOString();
+    }
+    const parsedMs = Date.parse(rawPaidAt);
+    if (Number.isNaN(parsedMs)) {
+      throw new ConflictError('Invalid payment date format.', 400);
+    }
+    if (parsedMs > now + 5 * 60_000) {
+      throw new ConflictError('Payment date cannot be in the future.', 400);
+    }
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    const isPrivilegedAdmin =
+      actor?.role === 'Admin' || actor?.role === 'Super Admin' || actor?.role === 'Developer';
+    if (now - parsedMs > thirtyDaysMs && !isPrivilegedAdmin) {
+      throw new ConflictError(
+        'Payments backdated more than 30 days require School Admin authorization.',
+        403
+      );
+    }
+    return new Date(parsedMs).toISOString();
+  }
+
+  private validateAndNormalizeKenyanPhone(raw: string, fieldLabel = 'Guardian phone'): string {
+    const cleaned = (raw || '').replace(/[\s()-]+/g, '').trim();
+    if (!cleaned) {
+      throw new ConflictError(`${fieldLabel} is required (Kenyan format e.g. +254712345678 or 0712345678).`, 400);
+    }
+    if (/^\+254[17]\d{8}$/.test(cleaned)) return cleaned;
+    if (/^254[17]\d{8}$/.test(cleaned)) return `+${cleaned}`;
+    if (/^0[17]\d{8}$/.test(cleaned)) return `+254${cleaned.slice(1)}`;
+    throw new ConflictError(
+      `Invalid ${fieldLabel} "${raw}". Use valid Kenyan format (+2547XXXXXXXX, +2541XXXXXXXX, 07XXXXXXXX, or 01XXXXXXXX).`,
+      400
+    );
+  }
+
+  private validateStudentDateOfBirth(rawDob: string, grade: string): string {
+    const trimmed = (rawDob || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      throw new ConflictError('Date of birth must be a valid YYYY-MM-DD calendar date.', 400);
+    }
+    const [y, m, d] = trimmed.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (
+      dt.getUTCFullYear() !== y ||
+      dt.getUTCMonth() !== m - 1 ||
+      dt.getUTCDate() !== d
+    ) {
+      throw new ConflictError(`Invalid calendar date of birth "${trimmed}".`, 400);
+    }
+    const now = new Date();
+    if (dt.getTime() >= now.getTime()) {
+      throw new ConflictError('Date of birth must be in the past.', 400);
+    }
+    const ageYears = (now.getTime() - dt.getTime()) / (365.2425 * 24 * 60 * 60 * 1000);
+    if (ageYears < 2 || ageYears > 25) {
+      throw new ConflictError(
+        `Learner age (${ageYears.toFixed(1)} yrs) is outside plausible school enrolment age (2–25 years).`,
+        400
+      );
+    }
+    const gLower = grade.toLowerCase();
+    if ((gLower.includes('playgroup') || gLower === 'pp1' || gLower === 'pp2') && ageYears > 10) {
+      throw new ConflictError(`Date of birth implies age ${Math.floor(ageYears)}, which is not plausible for ${grade}.`, 400);
+    }
+    if (/grade\s*(1[0-2]|9)|form\s*[1-4]/i.test(grade) && ageYears < 10) {
+      throw new ConflictError(`Date of birth implies age ${Math.floor(ageYears)}, which is too young for ${grade}.`, 400);
+    }
+    return trimmed;
+  }
+
+  private ensurePaymentReferenceUnique(
+    tenantId: string,
+    reference: string,
+    method: PaymentMethod
+  ) {
+    const refTrim = (reference || '').trim();
+    if (!refTrim) return;
+    if (method === 'Cash' && /^auto$/i.test(refTrim)) return;
+    const refLower = refTrim.toLowerCase();
+    for (const inv of this.state.invoices) {
+      if (inv.tenantId !== tenantId) continue;
+      for (const p of inv.payments || []) {
+        if (p.voided || p.isReversalEntry) continue;
+        if (p.reference && p.reference.trim().toLowerCase() === refLower) {
+          throw new ConflictError(
+            `Duplicate payment reference "${refTrim}" already exists on invoice ${inv.invoiceNumber}.`,
+            409
+          );
+        }
+      }
+    }
+    for (const ivl of this.state.independentVotelines || []) {
+      if (ivl.tenantId !== tenantId || ivl.voided) continue;
+      for (const p of ivl.payments || []) {
+        if (p.reference && p.reference.trim().toLowerCase() === refLower) {
+          throw new ConflictError(
+            `Duplicate payment reference "${refTrim}" already exists on independent voteline ${ivl.name}.`,
+            409
+          );
+        }
+      }
+    }
+  }
+
+  private recomputeInvoiceTotals(invoice: FeeInvoice) {
+    const activePayments = (invoice.payments || []).filter((p) => !p.isReversalEntry);
+    const voidedIds = new Set(
+      activePayments.filter((p) => p.voided).map((p) => p.id)
+    );
+    let paidSum = 0;
+    for (const p of activePayments) {
+      if (p.voided || voidedIds.has(p.id)) continue;
+      const effectiveApplied =
+        typeof p.appliedAmount === 'number' ? p.appliedAmount : p.amount;
+      paidSum += effectiveApplied;
+    }
+    const creditNotes = Math.max(0, Number(invoice.creditNotesTotal || 0));
+    const waivers = Math.max(0, Number(invoice.waiverTotal || 0));
+    const siblingDisc = Math.max(0, Number(invoice.siblingDiscountApplied || 0));
+    const netBilled = Math.max(0, invoice.totalAmount - creditNotes - waivers - siblingDisc);
+    invoice.paidAmount = Math.max(0, Math.round(paidSum));
+    invoice.balance = Math.max(0, Math.round(netBilled - invoice.paidAmount));
+    if (invoice.balance === 0) {
+      invoice.status = 'Paid';
+    } else if (invoice.paidAmount > 0 || creditNotes + waivers + siblingDisc > 0) {
+      invoice.status = 'Partial';
+    } else {
+      invoice.status = 'Pending';
+    }
+  }
+
+  private findSiblingCountForStudent(
+    tenantId: string,
+    guardianPhone: string,
+    guardianEmail: string,
+    excludeStudentId?: string
+  ): number {
+    const normPhone = guardianPhone.trim();
+    const normEmail = guardianEmail.trim().toLowerCase();
+    return this.state.students.filter((s) => {
+      if (s.tenantId !== tenantId || s.status !== 'Active') return false;
+      if (excludeStudentId && s.id === excludeStudentId) return false;
+      const samePhone = Boolean(normPhone && s.guardianPhone.trim() === normPhone);
+      const sameEmail = Boolean(normEmail && s.guardianEmail.trim().toLowerCase() === normEmail);
+      return samePhone || sameEmail;
+    }).length;
+  }
+
+  private applySiblingDiscountIfEligible(tenant: Tenant, student: Student, invoice: FeeInvoice) {
+    const cfg = tenant.siblingDiscountConfig;
+    if (!cfg?.enabled || cfg.percentage <= 0) return;
+    const minSiblings = Math.max(2, cfg.minSiblings || 2);
+    const otherSiblings = this.findSiblingCountForStudent(
+      tenant.id,
+      student.guardianPhone,
+      student.guardianEmail,
+      student.id
+    );
+    if (otherSiblings + 1 >= minSiblings) {
+      const discountAmt = Math.min(
+        invoice.totalAmount,
+        Math.round((invoice.totalAmount * Math.min(50, cfg.percentage)) / 100)
+      );
+      if (discountAmt > 0) {
+        invoice.siblingDiscountApplied = discountAmt;
+        this.recomputeInvoiceTotals(invoice);
+      }
+    }
+  }
+
+  private appendFinanceAudit(
+    tenantId: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'> | undefined,
+    action: string,
+    entity: string,
+    entityId: string,
+    before: unknown,
+    after: unknown,
+    ip?: string
+  ): FinanceAuditEntry {
+    if (!Array.isArray(this.state.financeAuditLogs)) {
+      this.state.financeAuditLogs = [];
+    }
+    const entry: FinanceAuditEntry = {
+      id: `faud-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      timestamp: new Date().toISOString(),
+      actorUserId: actor?.id || 'system',
+      who: actor?.fullName || actor?.email || 'System',
+      role: actor?.role || 'Admin',
+      action,
+      entity,
+      entityId,
+      before,
+      after,
+      ip,
+    };
+    this.state.financeAuditLogs.unshift(entry);
+    if (this.state.financeAuditLogs.length > 2000) {
+      this.state.financeAuditLogs = this.state.financeAuditLogs.slice(0, 2000);
+    }
+    return entry;
+  }
+
+  getFinanceAuditLogs(tenantId: string, limit = 150): FinanceAuditEntry[] {
+    this.requireTenant(tenantId);
+    const safeLimit = Math.max(1, Math.min(500, Math.round(limit)));
+    return (this.state.financeAuditLogs || [])
+      .filter((e) => e.tenantId === tenantId)
+      .slice(0, safeLimit);
+  }
+
+  listStatutoryRateSchedules(): PayrollStatutoryRateSchedule[] {
+    if (!Array.isArray(this.state.statutoryRateSchedules) || this.state.statutoryRateSchedules.length === 0) {
+      this.state.statutoryRateSchedules = JSON.parse(
+        JSON.stringify(DEFAULT_STATUTORY_RATE_SCHEDULES)
+      ) as PayrollStatutoryRateSchedule[];
+    }
+    return [...this.state.statutoryRateSchedules].sort((a, b) =>
+      b.effectiveFrom.localeCompare(a.effectiveFrom)
+    );
+  }
+
+  upsertStatutoryRateSchedule(
+    input: {
+      id?: string;
+      effectiveFrom: string;
+      label: string;
+      currency?: CurrencyCode;
+      nssfLowerLimit: number;
+      nssfUpperLimit: number;
+      nssfRate: number;
+      nssfMaxEmployee: number;
+      shifRate: number;
+      shifMin: number;
+      housingLevyRate: number;
+      nitaLevy: number;
+      personalRelief: number;
+      payeBands: PayeBand[];
+    },
+    actorEmail: string
+  ): PayrollStatutoryRateSchedule {
+    const effectiveFrom = (input.effectiveFrom || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      throw new ConflictError('effectiveFrom must be a valid YYYY-MM-DD date.', 400);
+    }
+    const label = (input.label || '').trim();
+    if (!label) {
+      throw new ConflictError('Schedule label is required.', 400);
+    }
+    if (!Array.isArray(input.payeBands) || input.payeBands.length === 0) {
+      throw new ConflictError('Provide at least one PAYE tax band.', 400);
+    }
+    const sanitizedBands: PayeBand[] = input.payeBands.map((b, idx) => {
+      const rate = Number(b.rate);
+      if (!Number.isFinite(rate) || rate < 0 || rate > 1) {
+        throw new ConflictError(`PAYE band #${idx + 1} rate must be a decimal between 0 and 1.`, 400);
+      }
+      const limit = b.limit === null || b.limit === undefined ? null : Math.round(Number(b.limit));
+      if (limit !== null && (!Number.isFinite(limit) || limit <= 0)) {
+        throw new ConflictError(`PAYE band #${idx + 1} limit must be positive or null.`, 400);
+      }
+      return { limit, rate };
+    });
+
+    if (!Array.isArray(this.state.statutoryRateSchedules)) {
+      this.state.statutoryRateSchedules = [];
+    }
+
+    const schedule: PayrollStatutoryRateSchedule = {
+      id: input.id?.trim() || `stat-${randomUUID().slice(0, 6)}`,
+      effectiveFrom,
+      label,
+      currency: input.currency === 'USD' ? 'USD' : 'KES',
+      nssfLowerLimit: Math.max(0, Math.round(Number(input.nssfLowerLimit))),
+      nssfUpperLimit: Math.max(0, Math.round(Number(input.nssfUpperLimit))),
+      nssfRate: Number(input.nssfRate),
+      nssfMaxEmployee: Math.max(0, Math.round(Number(input.nssfMaxEmployee))),
+      shifRate: Number(input.shifRate),
+      shifMin: Math.max(0, Math.round(Number(input.shifMin))),
+      housingLevyRate: Number(input.housingLevyRate),
+      nitaLevy: Math.max(0, Math.round(Number(input.nitaLevy))),
+      personalRelief: Math.max(0, Math.round(Number(input.personalRelief))),
+      payeBands: sanitizedBands,
+      updatedBy: actorEmail,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const idx = this.state.statutoryRateSchedules.findIndex((s) => s.id === schedule.id);
+    if (idx >= 0) {
+      this.state.statutoryRateSchedules[idx] = schedule;
+    } else {
+      this.state.statutoryRateSchedules.push(schedule);
+    }
+    this.persist();
+    return schedule;
+  }
+
   // Admissions
   createAdmission(
     tenantId: string,
@@ -3461,22 +4069,30 @@ export class TenantStore {
     }
   ): AdmissionApplication {
     const tenant = this.requireTenant(tenantId);
-    const existingCount = this.state.admissions.filter((a) => a.tenantId === tenantId).length;
-    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+    const studentName = (input.studentName || '').trim();
+    if (studentName.length < 2) {
+      throw new ConflictError('Student full name must be at least 2 characters.', 400);
+    }
+    const targetGrade = (input.targetGrade || '').trim() || tenant.grades[0] || 'Grade 7';
+    const validatedDob = this.validateStudentDateOfBirth(input.dateOfBirth, targetGrade);
+    const normalizedPhone = this.validateAndNormalizeKenyanPhone(
+      input.guardianPhone,
+      'Guardian phone'
+    );
     const now = new Date().toISOString();
 
     const app: AdmissionApplication = {
       id: `adm-${randomUUID().slice(0, 8)}`,
       tenantId,
-      applicationCode: `${prefix}-APP-${202600 + existingCount + 1}`,
-      studentName: input.studentName.trim(),
-      dateOfBirth: input.dateOfBirth,
+      applicationCode: this.nextAdmissionCode(tenant),
+      studentName,
+      dateOfBirth: validatedDob,
       gender: input.gender,
-      targetGrade: input.targetGrade,
+      targetGrade,
       assignedSection: input.assignedSection || 'A',
       guardianName: input.guardianName.trim(),
       guardianEmail: input.guardianEmail.trim(),
-      guardianPhone: input.guardianPhone.trim(),
+      guardianPhone: normalizedPhone,
       previousSchool: input.previousSchool.trim() || 'Transfer Applicant',
       stage: 'Submitted',
       checklist: {
@@ -3541,23 +4157,31 @@ export class TenantStore {
     // Auto-onboard student & initial fee invoice when transitioning to Enrolled
     if (app.stage === 'Enrolled' && previousStage !== 'Enrolled') {
       this.assertLearnerCap(tenant);
-      const stuCount = this.state.students.filter((s) => s.tenantId === tenantId).length;
-      const prefix = tenant.slug.slice(0, 3).toUpperCase();
+      const validatedDob = this.validateStudentDateOfBirth(app.dateOfBirth, app.targetGrade);
+      const normalizedPhone = this.validateAndNormalizeKenyanPhone(
+        app.guardianPhone,
+        'Guardian phone'
+      );
+      app.guardianPhone = normalizedPhone;
+      const studentCode = this.nextStudentCode(tenantId);
+      const upi = this.nextUniqueUpi(tenantId);
+
       enrolledStudent = {
         id: `stu-${randomUUID().slice(0, 8)}`,
         tenantId,
-        studentCode: `ADM-${2600 + stuCount + 1}`,
-        upi: `KE-${Math.floor(1000000 + Math.random() * 8999999)}A`,
+        studentCode,
+        upi,
         fullName: app.studentName,
         grade: app.targetGrade,
         section: app.assignedSection,
         guardianName: app.guardianName,
         guardianEmail: app.guardianEmail,
-        guardianPhone: app.guardianPhone,
+        guardianPhone: normalizedPhone,
         gender: app.gender,
-        dateOfBirth: app.dateOfBirth,
+        dateOfBirth: validatedDob,
         enrolledAt: new Date().toISOString().slice(0, 10),
         status: 'Active',
+        creditBalance: 0,
       };
       this.state.students.unshift(enrolledStudent);
 
@@ -3565,12 +4189,11 @@ export class TenantStore {
         this.state.feeStructures.find((f) => f.tenantId === tenantId && f.grade === app.targetGrade) ||
         this.state.feeStructures.find((f) => f.tenantId === tenantId);
       const totalAmount = feeStruct ? feeStruct.totalFee : 4800;
-      const invCount = this.state.invoices.filter((i) => i.tenantId === tenantId).length;
 
       generatedInvoice = {
         id: `inv-${randomUUID().slice(0, 8)}`,
         tenantId,
-        invoiceNumber: `${prefix}-INV-${202600 + invCount + 1}`,
+        invoiceNumber: this.nextInvoiceNumber(tenant),
         studentId: enrolledStudent.id,
         studentName: enrolledStudent.fullName,
         studentCode: enrolledStudent.studentCode,
@@ -3584,6 +4207,7 @@ export class TenantStore {
         payments: [],
         createdAt: new Date().toISOString(),
       };
+      this.applySiblingDiscountIfEligible(tenant, enrolledStudent, generatedInvoice);
       this.state.invoices.unshift(generatedInvoice);
 
       this.pushNotification(
@@ -3626,35 +4250,63 @@ export class TenantStore {
   ): { student: Student; invoice: FeeInvoice } {
     const tenant = this.requireTenant(tenantId);
     this.assertLearnerCap(tenant);
-    const stuCount = this.state.students.filter((s) => s.tenantId === tenantId).length;
-    const prefix = tenant.slug.slice(0, 3).toUpperCase();
+
+    const fullName = (input.fullName || '').trim();
+    if (fullName.length < 2) {
+      throw new ConflictError('Learner full name must be at least 2 characters.', 400);
+    }
+    const resolvedGrade = (input.grade || '').trim() || tenant.grades[0] || 'Grade 9';
+    const validatedDob = this.validateStudentDateOfBirth(input.dateOfBirth, resolvedGrade);
+    const normalizedPhone = this.validateAndNormalizeKenyanPhone(
+      input.guardianPhone,
+      'Guardian phone'
+    );
 
     const studentCode =
       input.studentCode && input.studentCode.trim()
         ? input.studentCode.trim().toUpperCase()
-        : `ADM-${2600 + stuCount + 1}`;
+        : this.nextStudentCode(tenantId);
     const upi =
       input.upi && input.upi.trim()
         ? input.upi.trim().toUpperCase()
-        : `KE-${Math.floor(1000000 + Math.random() * 8999999)}M`;
+        : this.nextUniqueUpi(tenantId);
 
-    const resolvedGrade = input.grade || tenant.grades[0] || 'Grade 9';
+    const dupCode = this.state.students.some(
+      (s) => s.tenantId === tenantId && s.studentCode.trim().toUpperCase() === studentCode
+    );
+    if (dupCode) {
+      throw new ConflictError(
+        `Admission number / student code "${studentCode}" is already assigned to another learner in ${tenant.name}.`,
+        409
+      );
+    }
+    const dupUpi = this.state.students.some(
+      (s) => s.tenantId === tenantId && s.upi.trim().toUpperCase() === upi
+    );
+    if (dupUpi) {
+      throw new ConflictError(
+        `NEMIS / UPI "${upi}" is already registered to another learner in ${tenant.name}.`,
+        409
+      );
+    }
+
     const validStreams = getStreamsForGrade(tenant, resolvedGrade);
     const student: Student = {
       id: `stu-${randomUUID().slice(0, 8)}`,
       tenantId,
       studentCode,
       upi,
-      fullName: input.fullName.trim(),
+      fullName,
       grade: resolvedGrade,
       section: input.section || validStreams[0] || 'A',
       guardianName: input.guardianName.trim(),
       guardianEmail: input.guardianEmail?.trim() || '',
-      guardianPhone: input.guardianPhone.trim(),
+      guardianPhone: normalizedPhone,
       gender: input.gender || 'Female',
-      dateOfBirth: input.dateOfBirth || '2012-01-01',
+      dateOfBirth: validatedDob,
       enrolledAt: input.enrolledAt || new Date().toISOString().slice(0, 10),
       status: 'Active',
+      creditBalance: 0,
     };
     this.state.students.unshift(student);
 
@@ -3662,12 +4314,11 @@ export class TenantStore {
       this.state.feeStructures.find((f) => f.tenantId === tenantId && f.grade === student.grade) ||
       this.state.feeStructures.find((f) => f.tenantId === tenantId);
     const totalAmount = feeStruct ? feeStruct.totalFee : 4800;
-    const invCount = this.state.invoices.filter((i) => i.tenantId === tenantId).length;
 
     const invoice: FeeInvoice = {
       id: `inv-${randomUUID().slice(0, 8)}`,
       tenantId,
-      invoiceNumber: `${prefix}-INV-${202600 + invCount + 1}`,
+      invoiceNumber: this.nextInvoiceNumber(tenant),
       studentId: student.id,
       studentName: student.fullName,
       studentCode: student.studentCode,
@@ -3681,6 +4332,7 @@ export class TenantStore {
       payments: [],
       createdAt: new Date().toISOString(),
     };
+    this.applySiblingDiscountIfEligible(tenant, student, invoice);
     this.state.invoices.unshift(invoice);
 
     this.persist();
@@ -4586,6 +5238,109 @@ export class TenantStore {
     return cycle;
   }
 
+  private parseStrictExamScore(
+    rawScore: unknown,
+    studentName: string,
+    subject: string,
+    resultStatus?: ExamResultStatus
+  ): { status: ExamResultStatus; score: number } {
+    const status: ExamResultStatus =
+      resultStatus === 'Absent' || resultStatus === 'Exempt' ? resultStatus : 'Scored';
+    if (status === 'Absent' || status === 'Exempt') {
+      return { status, score: 0 };
+    }
+    if (
+      rawScore === null ||
+      rawScore === undefined ||
+      typeof rawScore === 'boolean' ||
+      (typeof rawScore === 'string' && rawScore.trim() === '')
+    ) {
+      throw new ConflictError(
+        `Invalid score for ${studentName} in ${subject}. Provide a numeric score between 0 and 100 or mark Absent/Exempt.`,
+        400
+      );
+    }
+    const rawNum = Number(rawScore);
+    if (!Number.isFinite(rawNum) || rawNum < 0 || rawNum > 100) {
+      throw new ConflictError(
+        `Invalid score for ${studentName} in ${subject}. Marks must be between 0 and 100.`,
+        400
+      );
+    }
+    return { status: 'Scored', score: Math.round(rawNum) };
+  }
+
+  private assertTeacherCanGradeSubject(
+    tenant: Tenant,
+    actor: Pick<TenantUser, 'role' | 'email' | 'fullName'> | undefined,
+    requestedTeacherId: string | undefined,
+    grade: string,
+    section: string,
+    subject: string
+  ): TeacherProfile | undefined {
+    if (!actor || actor.role !== 'Teacher') {
+      if (requestedTeacherId && requestedTeacherId !== '__ADMIN__') {
+        const t = tenant.teachers.find((x) => x.id === requestedTeacherId);
+        if (t) {
+          const tenantSlots = this.state.timetable.filter((s) => s.tenantId === tenant.id);
+          const allowed = getTeacherAssignedSubjectsForCohort(tenant, t, grade, section, tenantSlots);
+          if (!allowed.some((s) => s.toLowerCase() === subject.toLowerCase())) {
+            throw new ConflictError(
+              `${t.name} is not assigned to teach "${subject}" in ${grade} Stream ${section}.`,
+              403
+            );
+          }
+        }
+        return t;
+      }
+      return undefined;
+    }
+
+    if (requestedTeacherId === '__ADMIN__') {
+      throw new ConflictError(
+        'Teachers cannot use Admin override. Enter marks only for classes and subjects assigned to you.',
+        403
+      );
+    }
+    const matchedTeacher =
+      tenant.teachers.find((t) => t.email.trim().toLowerCase() === actor.email.trim().toLowerCase()) ||
+      (requestedTeacherId ? tenant.teachers.find((t) => t.id === requestedTeacherId) : undefined);
+
+    if (!matchedTeacher) {
+      throw new ConflictError(
+        `Teacher profile for ${actor.fullName} is not configured in ${tenant.name} faculty roster.`,
+        403
+      );
+    }
+    if (matchedTeacher.email.trim().toLowerCase() !== actor.email.trim().toLowerCase()) {
+      throw new ConflictError(
+        'Teachers can only submit scores under their own teacher assignment.',
+        403
+      );
+    }
+    const tenantSlots = this.state.timetable.filter((s) => s.tenantId === tenant.id);
+    if (!isTeacherAssignedToCohort(matchedTeacher, grade, section, tenantSlots)) {
+      throw new ConflictError(
+        `${matchedTeacher.name} is not assigned to ${grade} Stream ${section}.`,
+        403
+      );
+    }
+    const allowed = getTeacherAssignedSubjectsForCohort(
+      tenant,
+      matchedTeacher,
+      grade,
+      section,
+      tenantSlots
+    );
+    if (!allowed.some((s) => s.toLowerCase() === subject.toLowerCase())) {
+      throw new ConflictError(
+        `${matchedTeacher.name} is not assigned to teach "${subject}" in ${grade} Stream ${section}.`,
+        403
+      );
+    }
+    return matchedTeacher;
+  }
+
   upsertExamScore(
     tenantId: string,
     input: {
@@ -4593,17 +5348,49 @@ export class TenantStore {
       studentId: string;
       subject: string;
       score: number;
+      resultStatus?: ExamResultStatus;
       remarks?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'role' | 'email' | 'fullName'>
   ): ExamResult {
-    this.requireTenant(tenantId);
+    const tenant = this.requireTenant(tenantId);
     const student = this.state.students.find((s) => s.id === input.studentId && s.tenantId === tenantId);
     if (!student) throw new ConflictError('Student not found in tenant.', 404);
     const cycle = this.state.examCycles.find((c) => c.id === input.examCycleId && c.tenantId === tenantId);
     if (!cycle) throw new ConflictError('Exam cycle not found in tenant.', 404);
 
-    const clampedScore = Math.max(0, Math.min(100, Math.round(input.score)));
-    const { letterGrade, gpaPoints } = computeLetterGrade(clampedScore, student.grade);
+    if (cycle.status === 'Published') {
+      throw new ConflictError(
+        `Exam cycle "${cycle.title}" is Published and locked. An Admin must unlock it with a reason before marks can be edited.`,
+        409
+      );
+    }
+
+    const subject = (input.subject || '').trim();
+    if (!subject) {
+      throw new ConflictError('Subject is required.', 400);
+    }
+    this.assertTeacherCanGradeSubject(
+      tenant,
+      actor,
+      undefined,
+      student.grade,
+      student.section,
+      subject
+    );
+
+    const parsed = this.parseStrictExamScore(
+      input.score,
+      student.fullName,
+      subject,
+      input.resultStatus
+    );
+    const gradeCalc =
+      parsed.status === 'Absent'
+        ? { letterGrade: 'ABS', gpaPoints: 0 }
+        : parsed.status === 'Exempt'
+        ? { letterGrade: 'EXM', gpaPoints: 0 }
+        : computeLetterGrade(parsed.score, student.grade);
     const now = new Date().toISOString();
 
     const existing = this.state.examResults.find(
@@ -4611,13 +5398,14 @@ export class TenantStore {
         r.tenantId === tenantId &&
         r.examCycleId === input.examCycleId &&
         r.studentId === input.studentId &&
-        r.subject === input.subject
+        r.subject.toLowerCase() === subject.toLowerCase()
     );
 
     if (existing) {
-      existing.score = clampedScore;
-      existing.letterGrade = letterGrade;
-      existing.gpaPoints = gpaPoints;
+      existing.score = parsed.score;
+      existing.resultStatus = parsed.status;
+      existing.letterGrade = gradeCalc.letterGrade;
+      existing.gpaPoints = gradeCalc.gpaPoints;
       if (input.remarks !== undefined) existing.remarks = input.remarks;
       existing.updatedAt = now;
       this.persist();
@@ -4634,12 +5422,19 @@ export class TenantStore {
       studentCode: student.studentCode,
       grade: student.grade,
       section: student.section,
-      subject: input.subject,
-      score: clampedScore,
+      subject,
+      score: parsed.score,
       maxScore: 100,
-      letterGrade,
-      gpaPoints,
-      remarks: input.remarks?.trim() || (clampedScore >= 85 ? 'Strong mastery' : 'Term evaluation'),
+      letterGrade: gradeCalc.letterGrade,
+      gpaPoints: gradeCalc.gpaPoints,
+      resultStatus: parsed.status,
+      remarks:
+        input.remarks?.trim() ||
+        (parsed.status !== 'Scored'
+          ? parsed.status
+          : parsed.score >= 85
+          ? 'Strong mastery'
+          : 'Term evaluation'),
       updatedAt: now,
     };
     this.state.examResults.push(res);
@@ -4656,8 +5451,15 @@ export class TenantStore {
       grade: string;
       section: string;
       teacherId: string;
-      entries: Array<{ studentId: string; subject: string; score: number; remarks?: string }>;
-    }
+      entries: Array<{
+        studentId: string;
+        subject: string;
+        score: number;
+        resultStatus?: ExamResultStatus;
+        remarks?: string;
+      }>;
+    },
+    actor?: Pick<TenantUser, 'role' | 'email' | 'fullName'>
   ): { results: ExamResult[]; cycle: ExamCycle; savedCount: number } {
     const tenant = this.requireTenant(tenantId);
     const grade = (input.grade || '').trim();
@@ -4697,16 +5499,50 @@ export class TenantStore {
       throw new ConflictError('Select a valid exam type / cycle.', 404);
     }
 
+    if (cycle.status === 'Published') {
+      throw new ConflictError(
+        `Exam cycle "${cycle.title}" is Published and locked. An Admin must unlock it with a reason before saving marks.`,
+        409
+      );
+    }
+
     const isAdminOverride = input.teacherId === '__ADMIN__';
+    if (actor?.role === 'Teacher' && isAdminOverride) {
+      throw new ConflictError(
+        'Teachers cannot use Admin override when saving marks.',
+        403
+      );
+    }
+
     let teacher: TeacherProfile | undefined;
     let allowedSet: Set<string> | null = null;
 
-    if (!isAdminOverride) {
-      teacher = tenant.teachers.find((t) => t.id === input.teacherId);
+    if (!isAdminOverride || actor?.role === 'Teacher') {
+      teacher =
+        actor?.role === 'Teacher'
+          ? tenant.teachers.find((t) => t.email.trim().toLowerCase() === actor.email.trim().toLowerCase()) ||
+            tenant.teachers.find((t) => t.id === input.teacherId)
+          : tenant.teachers.find((t) => t.id === input.teacherId);
+
       if (!teacher) {
         throw new ConflictError('Select a valid teacher before saving results.', 400);
       }
+      if (
+        actor?.role === 'Teacher' &&
+        teacher.email.trim().toLowerCase() !== actor.email.trim().toLowerCase()
+      ) {
+        throw new ConflictError(
+          'Teachers can only submit marks for their own assigned classes and subjects.',
+          403
+        );
+      }
       const tenantSlots = this.state.timetable.filter((s) => s.tenantId === tenantId);
+      if (actor?.role === 'Teacher' && !isTeacherAssignedToCohort(teacher, grade, section, tenantSlots)) {
+        throw new ConflictError(
+          `${teacher.name} is not assigned to teach ${grade} Stream ${section}.`,
+          403
+        );
+      }
       const allowedSubjects = getTeacherAssignedSubjectsForCohort(
         tenant,
         teacher,
@@ -4749,15 +5585,18 @@ export class TenantStore {
         );
       }
 
-      const rawNum = Number(entry.score);
-      if (!Number.isFinite(rawNum) || rawNum < 0 || rawNum > 100) {
-        throw new ConflictError(
-          `Invalid score for ${student.fullName} in ${subject}. Marks must be between 0 and 100.`,
-          400
-        );
-      }
-      const clampedScore = Math.max(0, Math.min(100, Math.round(rawNum)));
-      const { letterGrade, gpaPoints } = computeLetterGrade(clampedScore, student.grade);
+      const parsed = this.parseStrictExamScore(
+        entry.score,
+        student.fullName,
+        subject,
+        entry.resultStatus
+      );
+      const gradeCalc =
+        parsed.status === 'Absent'
+          ? { letterGrade: 'ABS', gpaPoints: 0 }
+          : parsed.status === 'Exempt'
+          ? { letterGrade: 'EXM', gpaPoints: 0 }
+          : computeLetterGrade(parsed.score, student.grade);
 
       const existing = this.state.examResults.find(
         (r) =>
@@ -4768,9 +5607,10 @@ export class TenantStore {
       );
 
       if (existing) {
-        existing.score = clampedScore;
-        existing.letterGrade = letterGrade;
-        existing.gpaPoints = gpaPoints;
+        existing.score = parsed.score;
+        existing.resultStatus = parsed.status;
+        existing.letterGrade = gradeCalc.letterGrade;
+        existing.gpaPoints = gradeCalc.gpaPoints;
         if (entry.remarks !== undefined && entry.remarks.trim()) {
           existing.remarks = entry.remarks.trim();
         }
@@ -4787,13 +5627,18 @@ export class TenantStore {
           grade: student.grade,
           section: student.section,
           subject,
-          score: clampedScore,
+          score: parsed.score,
           maxScore: 100,
-          letterGrade,
-          gpaPoints,
+          letterGrade: gradeCalc.letterGrade,
+          gpaPoints: gradeCalc.gpaPoints,
+          resultStatus: parsed.status,
           remarks:
             entry.remarks?.trim() ||
-            (clampedScore >= 85 ? 'Strong mastery' : 'Term evaluation'),
+            (parsed.status !== 'Scored'
+              ? parsed.status
+              : parsed.score >= 85
+              ? 'Strong mastery'
+              : 'Term evaluation'),
           updatedAt: now,
         };
         this.state.examResults.push(res);
@@ -4816,9 +5661,37 @@ export class TenantStore {
   }
 
   publishExamCycle(tenantId: string, examCycleId: string): ExamCycle {
-    this.requireTenant(tenantId);
+    const tenant = this.requireTenant(tenantId);
     const cycle = this.state.examCycles.find((c) => c.id === examCycleId && c.tenantId === tenantId);
     if (!cycle) throw new ConflictError('Exam cycle not found.', 404);
+
+    const activeStudents = this.state.students.filter(
+      (s) => s.tenantId === tenantId && s.status === 'Active'
+    );
+    const cycleResults = this.state.examResults.filter(
+      (r) => r.tenantId === tenantId && r.examCycleId === examCycleId
+    );
+    const resultKeys = new Set(
+      cycleResults.map((r) => `${r.studentId}::${r.subject.trim().toLowerCase()}`)
+    );
+
+    const missing: string[] = [];
+    for (const student of activeStudents) {
+      const subjects = getSubjectsForGrade(tenant, student.grade);
+      for (const subject of subjects) {
+        if (!resultKeys.has(`${student.id}::${subject.trim().toLowerCase()}`)) {
+          missing.push(`${student.fullName} (${student.grade} · ${subject})`);
+        }
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new ConflictError(
+        `Cannot publish "${cycle.title}": ${missing.length} mark(s) missing across enrolled learners (record a score or mark Absent/Exempt). First missing: ${missing.slice(0, 3).join(', ')}`,
+        400
+      );
+    }
+
     cycle.status = 'Published';
     this.persist();
     this.pushNotification(
@@ -4829,6 +5702,46 @@ export class TenantStore {
       'exams'
     );
     this.syncTenant(tenantId, 'exam:published');
+    return cycle;
+  }
+
+  unlockExamCycle(
+    tenantId: string,
+    examCycleId: string,
+    reason: string,
+    actor: Pick<TenantUser, 'role' | 'fullName' | 'email'>
+  ): ExamCycle {
+    this.requireTenant(tenantId);
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Only School Admin can unlock a published exam cycle.', 403);
+    }
+    const cleanReason = (reason || '').trim();
+    if (!cleanReason) {
+      throw new ConflictError('Provide an audit reason before unlocking a published exam cycle.', 400);
+    }
+    const cycle = this.state.examCycles.find((c) => c.id === examCycleId && c.tenantId === tenantId);
+    if (!cycle) throw new ConflictError('Exam cycle not found.', 404);
+    if (cycle.status !== 'Published') {
+      throw new ConflictError(`Exam cycle "${cycle.title}" is not currently Published.`, 400);
+    }
+
+    cycle.status = 'Grading';
+    if (!Array.isArray(cycle.unlockHistory)) cycle.unlockHistory = [];
+    cycle.unlockHistory.unshift({
+      unlockedAt: new Date().toISOString(),
+      unlockedBy: actor.fullName || actor.email,
+      reason: cleanReason,
+    });
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'exam',
+      `Exam Cycle Unlocked: ${cycle.title}`,
+      `Unlocked for grading by ${actor.fullName || actor.email}. Reason: ${cleanReason}`,
+      'exams'
+    );
+    this.syncTenant(tenantId, 'exam:unlocked');
     return cycle;
   }
 
@@ -4937,26 +5850,26 @@ export class TenantStore {
 
   createInvoice(
     tenantId: string,
-    input: { studentId: string; term: string; dueDate: string; totalAmount: number }
+    input: { studentId: string; term: string; dueDate: string; totalAmount: number },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): FeeInvoice {
     const tenant = this.requireTenant(tenantId);
     const student = this.state.students.find((s) => s.id === input.studentId && s.tenantId === tenantId);
     if (!student) throw new ConflictError('Student not found in tenant.', 404);
 
-    const count = this.state.invoices.filter((i) => i.tenantId === tenantId).length;
-    const prefix = tenant.slug.slice(0, 3).toUpperCase();
-    const amount = Math.max(1, Number(input.totalAmount));
+    const amount = this.parseStrictPositiveAmount(input.totalAmount, 'Invoice amount');
 
     const invoice: FeeInvoice = {
       id: `inv-${randomUUID().slice(0, 8)}`,
       tenantId,
-      invoiceNumber: `${prefix}-INV-${202600 + count + 1}`,
+      invoiceNumber: this.nextInvoiceNumber(tenant),
       studentId: student.id,
       studentName: student.fullName,
       studentCode: student.studentCode,
       grade: student.grade,
-      term: input.term || tenant.currentTerm,
-      dueDate: input.dueDate,
+      term: (input.term || '').trim() || tenant.currentTerm,
+      dueDate: input.dueDate || '2026-12-01',
       totalAmount: amount,
       paidAmount: 0,
       balance: amount,
@@ -4964,7 +5877,18 @@ export class TenantStore {
       payments: [],
       createdAt: new Date().toISOString(),
     };
+    this.applySiblingDiscountIfEligible(tenant, student, invoice);
     this.state.invoices.unshift(invoice);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CREATE_INVOICE',
+      'FeeInvoice',
+      invoice.id,
+      null,
+      { invoiceNumber: invoice.invoiceNumber, studentId: student.id, totalAmount: invoice.totalAmount, balance: invoice.balance },
+      ip
+    );
     this.persist();
     this.pushNotification(
       tenantId,
@@ -4986,43 +5910,84 @@ export class TenantStore {
       reference: string;
       recordedBy: string;
       paidAt?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): FeeInvoice {
     const tenant = this.requireTenant(tenantId);
     const invoice = this.state.invoices.find((i) => i.id === invoiceId && i.tenantId === tenantId);
     if (!invoice) throw new ConflictError('Invoice not found.', 404);
 
-    const payAmount = Math.min(invoice.balance, Math.max(1, Number(input.amount)));
-    if (payAmount <= 0) {
-      throw new ConflictError('Invoice has no remaining balance.', 400);
+    const amount = this.parseStrictPositiveAmount(input.amount, 'Payment amount');
+    const validMethods = new Set<PaymentMethod>(['Bank Transfer', 'Card', 'Mobile Money', 'Cash']);
+    const method: PaymentMethod = validMethods.has(input.method) ? input.method : 'Bank Transfer';
+    const paidAtIso = this.validatePaymentDate(input.paidAt, actor);
+    const rawRef = (input.reference || '').trim();
+    if (rawRef) {
+      this.ensurePaymentReferenceUnique(tenantId, rawRef, method);
     }
 
-    const receiptNumber = `RCT-${Math.floor(10000 + Math.random() * 89999)}`;
-    const paidAtIso =
-      input.paidAt && !Number.isNaN(Date.parse(input.paidAt))
-        ? new Date(input.paidAt).toISOString()
-        : new Date().toISOString();
+    const beforeSnap = {
+      paidAmount: invoice.paidAmount,
+      balance: invoice.balance,
+      status: invoice.status,
+    };
 
-    invoice.payments.push({
+    const appliedAmount = Math.min(invoice.balance, amount);
+    const creditedExcess = Math.max(0, amount - appliedAmount);
+    const receiptNumber = this.nextReceiptNumber(tenantId);
+    const finalRef =
+      rawRef && !(method === 'Cash' && /^auto$/i.test(rawRef)) ? rawRef : receiptNumber;
+
+    const payment: PaymentRecord = {
       id: `pay-${randomUUID().slice(0, 8)}`,
       receiptNumber,
-      amount: payAmount,
-      method: input.method,
-      reference: input.reference.trim() || receiptNumber,
+      amount,
+      appliedAmount,
+      creditedExcess,
+      method,
+      reference: finalRef,
       paidAt: paidAtIso,
-      recordedBy: input.recordedBy || 'Bursar Office',
-    });
+      recordedBy: (input.recordedBy || '').trim() || actor?.fullName || 'Bursar Office',
+    };
+    invoice.payments.push(payment);
 
-    invoice.paidAmount += payAmount;
-    invoice.balance = Math.max(0, invoice.totalAmount - invoice.paidAmount);
-    invoice.status = invoice.balance === 0 ? 'Paid' : 'Partial';
+    if (creditedExcess > 0) {
+      const student = this.state.students.find(
+        (s) => s.id === invoice.studentId && s.tenantId === tenantId
+      );
+      if (student) {
+        student.creditBalance = Math.max(0, (student.creditBalance || 0) + creditedExcess);
+      }
+    }
+
+    this.recomputeInvoiceTotals(invoice);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'RECORD_PAYMENT',
+      'FeeInvoice',
+      invoice.id,
+      beforeSnap,
+      {
+        paymentId: payment.id,
+        receiptNumber,
+        amount,
+        appliedAmount,
+        creditedExcess,
+        paidAmount: invoice.paidAmount,
+        balance: invoice.balance,
+        status: invoice.status,
+      },
+      ip
+    );
 
     this.persist();
     this.pushNotification(
       tenantId,
       'fee',
       `Payment Received: ${invoice.studentName}`,
-      `${tenant.currency} ${payAmount.toLocaleString()} via ${input.method} (${receiptNumber}). Balance: ${tenant.currency} ${invoice.balance.toLocaleString()}.`,
+      `${tenant.currency} ${amount.toLocaleString()} via ${method} (${receiptNumber})${creditedExcess > 0 ? ` · ${tenant.currency} ${creditedExcess.toLocaleString()} credited to learner account` : ''}. Balance: ${tenant.currency} ${invoice.balance.toLocaleString()}.`,
       'fees'
     );
     this.syncTenant(tenantId, 'fee:payment-recorded');
@@ -5043,7 +6008,9 @@ export class TenantStore {
         reference?: string;
         paidAt?: string;
       }>;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): {
     updatedInvoices: FeeInvoice[];
     processedCount: number;
@@ -5056,17 +6023,37 @@ export class TenantStore {
     }
 
     const validMethods = new Set<PaymentMethod>(['Bank Transfer', 'Card', 'Mobile Money', 'Cash']);
-    const recordedBy = (input.recordedBy || '').trim() || 'Bursar Office';
+    const recordedBy = (input.recordedBy || '').trim() || actor?.fullName || 'Bursar Office';
     const touchedIds = new Set<string>();
     let processedCount = 0;
     let skippedCount = 0;
     let totalCollected = 0;
 
+    // Validate amounts, dates, and duplicate references upfront before mutating state
+    const prepared: Array<{
+      invoice: FeeInvoice;
+      amount: number;
+      method: PaymentMethod;
+      reference: string;
+      paidAtIso: string;
+    }> = [];
+    const batchRefs = new Set<string>();
+
     for (const entry of input.entries) {
-      const requestedAmount = Math.round(Number(entry.amount));
-      if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
-        skippedCount += 1;
-        continue;
+      const amount = this.parseStrictPositiveAmount(entry.amount, 'Batch payment amount');
+      const method: PaymentMethod =
+        entry.method && validMethods.has(entry.method) ? entry.method : 'Bank Transfer';
+      const paidAtIso = this.validatePaymentDate(entry.paidAt, actor);
+      const rawRef = (entry.reference || '').trim();
+      if (rawRef) {
+        if (!(method === 'Cash' && /^auto$/i.test(rawRef))) {
+          this.ensurePaymentReferenceUnique(tenantId, rawRef, method);
+          const refLow = rawRef.toLowerCase();
+          if (batchRefs.has(refLow)) {
+            throw new ConflictError(`Duplicate payment reference "${rawRef}" within batch upload.`, 409);
+          }
+          batchRefs.add(refLow);
+        }
       }
 
       let targetInvoice: FeeInvoice | undefined;
@@ -5082,58 +6069,107 @@ export class TenantStore {
         );
       }
       if (!targetInvoice && entry.studentId) {
-        targetInvoice = this.state.invoices.find(
-          (i) => i.tenantId === tenantId && i.studentId === entry.studentId && i.balance > 0
-        );
+        targetInvoice =
+          this.state.invoices.find(
+            (i) => i.tenantId === tenantId && i.studentId === entry.studentId && i.balance > 0
+          ) ||
+          this.state.invoices.find(
+            (i) => i.tenantId === tenantId && i.studentId === entry.studentId
+          );
       }
       if (!targetInvoice && entry.studentCode) {
         const code = entry.studentCode.trim().toLowerCase();
-        targetInvoice = this.state.invoices.find(
-          (i) =>
-            i.tenantId === tenantId &&
-            i.studentCode.trim().toLowerCase() === code &&
-            i.balance > 0
-        );
+        targetInvoice =
+          this.state.invoices.find(
+            (i) =>
+              i.tenantId === tenantId &&
+              i.studentCode.trim().toLowerCase() === code &&
+              i.balance > 0
+          ) ||
+          this.state.invoices.find(
+            (i) => i.tenantId === tenantId && i.studentCode.trim().toLowerCase() === code
+          );
       }
 
-      if (!targetInvoice || targetInvoice.balance <= 0) {
+      if (!targetInvoice) {
         skippedCount += 1;
         continue;
       }
 
-      const payAmount = Math.min(targetInvoice.balance, requestedAmount);
-      const method: PaymentMethod =
-        entry.method && validMethods.has(entry.method) ? entry.method : 'Bank Transfer';
-      const receiptNumber = `RCT-${Math.floor(10000 + Math.random() * 89999)}`;
-      const paidAtIso =
-        entry.paidAt && !Number.isNaN(Date.parse(entry.paidAt))
-          ? new Date(entry.paidAt).toISOString()
-          : new Date().toISOString();
-
-      targetInvoice.payments.push({
-        id: `pay-${randomUUID().slice(0, 8)}`,
-        receiptNumber,
-        amount: payAmount,
+      prepared.push({
+        invoice: targetInvoice,
+        amount,
         method,
-        reference: (entry.reference || '').trim() || receiptNumber,
-        paidAt: paidAtIso,
-        recordedBy,
+        reference: rawRef,
+        paidAtIso,
       });
-
-      targetInvoice.paidAmount += payAmount;
-      targetInvoice.balance = Math.max(0, targetInvoice.totalAmount - targetInvoice.paidAmount);
-      targetInvoice.status = targetInvoice.balance === 0 ? 'Paid' : 'Partial';
-
-      touchedIds.add(targetInvoice.id);
-      processedCount += 1;
-      totalCollected += payAmount;
     }
 
-    if (processedCount === 0) {
+    if (prepared.length === 0) {
       throw new ConflictError(
-        'No valid open-balance invoices matched the uploaded payment entries.',
+        'No matching invoices were found for the uploaded payment entries.',
         400
       );
+    }
+
+    for (const item of prepared) {
+      const beforeSnap = {
+        paidAmount: item.invoice.paidAmount,
+        balance: item.invoice.balance,
+      };
+      const appliedAmount = Math.min(item.invoice.balance, item.amount);
+      const creditedExcess = Math.max(0, item.amount - appliedAmount);
+      const receiptNumber = this.nextReceiptNumber(tenantId);
+      const finalRef =
+        item.reference && !(item.method === 'Cash' && /^auto$/i.test(item.reference))
+          ? item.reference
+          : receiptNumber;
+
+      const payment: PaymentRecord = {
+        id: `pay-${randomUUID().slice(0, 8)}`,
+        receiptNumber,
+        amount: item.amount,
+        appliedAmount,
+        creditedExcess,
+        method: item.method,
+        reference: finalRef,
+        paidAt: item.paidAtIso,
+        recordedBy,
+      };
+      item.invoice.payments.push(payment);
+
+      if (creditedExcess > 0) {
+        const student = this.state.students.find(
+          (s) => s.id === item.invoice.studentId && s.tenantId === tenantId
+        );
+        if (student) {
+          student.creditBalance = Math.max(0, (student.creditBalance || 0) + creditedExcess);
+        }
+      }
+
+      this.recomputeInvoiceTotals(item.invoice);
+      this.appendFinanceAudit(
+        tenantId,
+        actor,
+        'RECORD_PAYMENT_BATCH',
+        'FeeInvoice',
+        item.invoice.id,
+        beforeSnap,
+        {
+          paymentId: payment.id,
+          receiptNumber,
+          amount: item.amount,
+          appliedAmount,
+          creditedExcess,
+          paidAmount: item.invoice.paidAmount,
+          balance: item.invoice.balance,
+        },
+        ip
+      );
+
+      touchedIds.add(item.invoice.id);
+      processedCount += 1;
+      totalCollected += item.amount;
     }
 
     this.persist();
@@ -5156,6 +6192,468 @@ export class TenantStore {
     };
   }
 
+  voidPayment(
+    tenantId: string,
+    invoiceId: string,
+    paymentId: string,
+    reason: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): FeeInvoice {
+    const tenant = this.requireTenant(tenantId);
+    if (
+      actor.role !== 'Admin' &&
+      actor.role !== 'Bursar' &&
+      actor.role !== 'Super Admin' &&
+      actor.role !== 'Developer'
+    ) {
+      throw new ConflictError('Only School Admin or Bursar can void a payment receipt.', 403);
+    }
+    const cleanReason = (reason || '').trim();
+    if (!cleanReason) {
+      throw new ConflictError('Provide a reason before voiding a payment.', 400);
+    }
+
+    const invoice = this.state.invoices.find((i) => i.id === invoiceId && i.tenantId === tenantId);
+    if (!invoice) throw new ConflictError('Invoice not found.', 404);
+    const payment = (invoice.payments || []).find((p) => p.id === paymentId);
+    if (!payment) throw new ConflictError('Payment record not found on invoice.', 404);
+    if (payment.isReversalEntry) {
+      throw new ConflictError('Cannot void a payment reversal entry.', 409);
+    }
+    if (payment.voided) {
+      throw new ConflictError(`Receipt ${payment.receiptNumber} has already been voided.`, 409);
+    }
+
+    const creditedExcess = Math.max(0, Number(payment.creditedExcess || 0));
+    if (creditedExcess > 0) {
+      const student = this.state.students.find(
+        (s) => s.id === invoice.studentId && s.tenantId === tenantId
+      );
+      if (student) {
+        const currentCred = student.creditBalance || 0;
+        if (currentCred < creditedExcess) {
+          throw new ConflictError(
+            `Cannot void ${payment.receiptNumber}: excess credit of ${tenant.currency} ${creditedExcess.toLocaleString()} has already been applied elsewhere.`,
+            409
+          );
+        }
+        student.creditBalance = currentCred - creditedExcess;
+      }
+    }
+
+    const beforeSnap = {
+      paidAmount: invoice.paidAmount,
+      balance: invoice.balance,
+      status: invoice.status,
+      receiptNumber: payment.receiptNumber,
+    };
+
+    const now = new Date().toISOString();
+    const actorName = actor.fullName || actor.email;
+    payment.voided = true;
+    payment.voidReason = cleanReason;
+    payment.voidedBy = actorName;
+    payment.voidedAt = now;
+
+    // Append explicit reversing entry (never delete original record)
+    invoice.payments.push({
+      id: `rev-${randomUUID().slice(0, 8)}`,
+      receiptNumber: `${payment.receiptNumber}-REV`,
+      amount: -Math.abs(payment.amount),
+      appliedAmount: -Math.abs(
+        typeof payment.appliedAmount === 'number' ? payment.appliedAmount : payment.amount
+      ),
+      creditedExcess: creditedExcess > 0 ? -creditedExcess : 0,
+      method: payment.method,
+      reference: `VOID:${payment.receiptNumber}`,
+      paidAt: now,
+      recordedBy: actorName,
+      isReversalEntry: true,
+      reversedPaymentId: payment.id,
+      voidReason: cleanReason,
+    });
+
+    this.recomputeInvoiceTotals(invoice);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_PAYMENT',
+      'FeeInvoice',
+      invoice.id,
+      beforeSnap,
+      {
+        voidedReceipt: payment.receiptNumber,
+        reason: cleanReason,
+        paidAmount: invoice.paidAmount,
+        balance: invoice.balance,
+        status: invoice.status,
+      },
+      ip
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Payment Voided: ${payment.receiptNumber}`,
+      `${tenant.currency} ${payment.amount.toLocaleString()} reversed on ${invoice.invoiceNumber} by ${actorName}. Reason: ${cleanReason}`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:payment-voided');
+    return invoice;
+  }
+
+  createCreditNote(
+    tenantId: string,
+    input: { invoiceId: string; amount: number; reason: string },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { creditNote: CreditNoteRecord; invoice: FeeInvoice } {
+    const tenant = this.requireTenant(tenantId);
+    const invoice = this.state.invoices.find(
+      (i) => i.id === input.invoiceId && i.tenantId === tenantId
+    );
+    if (!invoice) throw new ConflictError('Invoice not found.', 404);
+
+    const amount = this.parseStrictPositiveAmount(input.amount, 'Credit note amount');
+    const reason = (input.reason || '').trim();
+    if (!reason) throw new ConflictError('Provide a reason for the credit note.', 400);
+
+    if (amount > invoice.balance) {
+      throw new ConflictError(
+        `Credit note amount (${tenant.currency} ${amount.toLocaleString()}) cannot exceed the remaining invoice balance (${tenant.currency} ${invoice.balance.toLocaleString()}). Void a payment instead if refunding paid funds.`,
+        400
+      );
+    }
+
+    const beforeSnap = {
+      creditNotesTotal: invoice.creditNotesTotal || 0,
+      balance: invoice.balance,
+      status: invoice.status,
+    };
+
+    const cn: CreditNoteRecord = {
+      id: `cn-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      creditNoteNumber: this.nextCreditNoteNumber(tenantId),
+      invoiceId: invoice.id,
+      invoiceNumber: invoice.invoiceNumber,
+      studentId: invoice.studentId,
+      studentName: invoice.studentName,
+      studentCode: invoice.studentCode,
+      amount,
+      reason,
+      createdBy: actor.fullName || actor.email,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (!Array.isArray(this.state.creditNotes)) this.state.creditNotes = [];
+    this.state.creditNotes.unshift(cn);
+    invoice.creditNotesTotal = (invoice.creditNotesTotal || 0) + amount;
+    this.recomputeInvoiceTotals(invoice);
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CREATE_CREDIT_NOTE',
+      'CreditNote',
+      cn.id,
+      beforeSnap,
+      {
+        creditNoteNumber: cn.creditNoteNumber,
+        amount,
+        reason,
+        invoiceBalance: invoice.balance,
+      },
+      ip
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Credit Note Issued: ${cn.creditNoteNumber}`,
+      `${tenant.currency} ${amount.toLocaleString()} credited to ${invoice.studentName} (${invoice.invoiceNumber}).`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:credit-note-created');
+    return { creditNote: cn, invoice };
+  }
+
+  createFeeWaiver(
+    tenantId: string,
+    input: {
+      studentId: string;
+      invoiceId?: string;
+      term?: string;
+      kind: FeeWaiverKind;
+      mode: FeeWaiverMode;
+      value: number;
+      reason: string;
+    },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { waiver: FeeWaiverRecord; invoice?: FeeInvoice } {
+    const tenant = this.requireTenant(tenantId);
+    const student = this.state.students.find(
+      (s) => s.id === input.studentId && s.tenantId === tenantId
+    );
+    if (!student) throw new ConflictError('Student not found in tenant.', 404);
+
+    const reason = (input.reason || '').trim();
+    if (!reason) throw new ConflictError('Provide a reason or sponsorship reference.', 400);
+    const val = this.parseStrictPositiveAmount(input.value, 'Waiver / bursary value');
+    const mode: FeeWaiverMode = input.mode === 'Percentage' ? 'Percentage' : 'Fixed';
+    if (mode === 'Percentage' && val > 100) {
+      throw new ConflictError('Percentage waiver/scholarship cannot exceed 100%.', 400);
+    }
+
+    const term = (input.term || '').trim() || tenant.currentTerm;
+    const targetInvoice = input.invoiceId
+      ? this.state.invoices.find(
+          (i) => i.id === input.invoiceId && i.tenantId === tenantId && i.studentId === student.id
+        )
+      : this.state.invoices.find(
+          (i) => i.tenantId === tenantId && i.studentId === student.id && i.term === term
+        ) ||
+        this.state.invoices.find(
+          (i) => i.tenantId === tenantId && i.studentId === student.id && i.balance > 0
+        );
+
+    const feeStruct = this.state.feeStructures.find(
+      (f) => f.tenantId === tenantId && f.grade === student.grade && f.term === term
+    );
+    const basisAmount = targetInvoice ? targetInvoice.totalAmount : feeStruct?.totalFee || 0;
+    const rawDiscount =
+      mode === 'Percentage' ? Math.round((basisAmount * val) / 100) : val;
+    const discountAmount = targetInvoice
+      ? Math.min(targetInvoice.balance, rawDiscount)
+      : rawDiscount;
+
+    if (discountAmount <= 0) {
+      throw new ConflictError('No open fee balance available to apply this waiver/bursary.', 400);
+    }
+
+    const beforeSnap = targetInvoice
+      ? { waiverTotal: targetInvoice.waiverTotal || 0, balance: targetInvoice.balance }
+      : null;
+
+    const validKinds = new Set<FeeWaiverKind>([
+      'Waiver',
+      'Bursary',
+      'Scholarship',
+      'Sibling Discount',
+    ]);
+    const kind: FeeWaiverKind = validKinds.has(input.kind) ? input.kind : 'Bursary';
+
+    const waiver: FeeWaiverRecord = {
+      id: `wvr-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      studentId: student.id,
+      studentName: student.fullName,
+      studentCode: student.studentCode,
+      grade: student.grade,
+      term,
+      kind,
+      mode,
+      value: val,
+      discountAmount,
+      invoiceId: targetInvoice?.id,
+      invoiceNumber: targetInvoice?.invoiceNumber,
+      reason,
+      approvedBy: actor.fullName || actor.email,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (!Array.isArray(this.state.feeWaivers)) this.state.feeWaivers = [];
+    this.state.feeWaivers.unshift(waiver);
+
+    if (targetInvoice) {
+      targetInvoice.waiverTotal = (targetInvoice.waiverTotal || 0) + discountAmount;
+      this.recomputeInvoiceTotals(targetInvoice);
+    }
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'APPLY_FEE_WAIVER',
+      'FeeWaiver',
+      waiver.id,
+      beforeSnap,
+      {
+        kind,
+        mode,
+        value: val,
+        discountAmount,
+        invoiceId: targetInvoice?.id,
+        newBalance: targetInvoice?.balance,
+      },
+      ip
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `${kind} Applied: ${student.fullName}`,
+      `${tenant.currency} ${discountAmount.toLocaleString()} (${reason})${targetInvoice ? ` on ${targetInvoice.invoiceNumber}` : ''}.`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:waiver-created');
+    return { waiver, invoice: targetInvoice };
+  }
+
+  updateSiblingDiscountConfig(
+    tenantId: string,
+    config: { enabled: boolean; percentage: number; minSiblings?: number },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): Tenant {
+    const tenant = this.requireTenant(tenantId);
+    const pct = Number(config.percentage);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 50) {
+      throw new ConflictError('Sibling discount percentage must be between 0% and 50%.', 400);
+    }
+    const minSiblings = Math.max(2, Math.min(10, Math.round(Number(config.minSiblings || 2))));
+    const beforeSnap = tenant.siblingDiscountConfig || { enabled: false, percentage: 0, minSiblings: 2 };
+    tenant.siblingDiscountConfig = {
+      enabled: Boolean(config.enabled),
+      percentage: Math.round(pct * 10) / 10,
+      minSiblings,
+    };
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'UPDATE_SIBLING_DISCOUNT',
+      'Tenant',
+      tenantId,
+      beforeSnap,
+      tenant.siblingDiscountConfig,
+      ip
+    );
+    this.persist();
+    this.syncTenant(tenantId, 'fee:sibling-discount-updated');
+    return tenant;
+  }
+
+  carryForwardTermBalances(
+    tenantId: string,
+    input: { fromTerm?: string; toTerm: string; dueDate?: string },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { createdInvoices: FeeInvoice[]; carriedStudentsCount: number; updatedTerm: string } {
+    const tenant = this.requireTenant(tenantId);
+    const fromTerm = (input.fromTerm || '').trim() || tenant.currentTerm;
+    const toTerm = (input.toTerm || '').trim();
+    if (!toTerm || toTerm.toLowerCase() === fromTerm.toLowerCase()) {
+      throw new ConflictError('Specify a new target term different from the current term.', 400);
+    }
+    const dueDate = (input.dueDate || '').trim() || addDaysIso(new Date().toISOString().slice(0, 10), 30);
+
+    const createdInvoices: FeeInvoice[] = [];
+    const activeStudents = this.state.students.filter(
+      (s) => s.tenantId === tenantId && s.status === 'Active'
+    );
+
+    for (const student of activeStudents) {
+      const priorOpenInvoices = this.state.invoices.filter(
+        (i) =>
+          i.tenantId === tenantId &&
+          i.studentId === student.id &&
+          i.term === fromTerm &&
+          i.balance > 0 &&
+          !i.carriedForwardToTerm
+      );
+      const arrears = priorOpenInvoices.reduce((sum, inv) => sum + inv.balance, 0);
+      for (const inv of priorOpenInvoices) {
+        inv.carriedForwardToTerm = toTerm;
+        inv.balance = 0;
+        inv.status = 'Paid';
+      }
+
+      const feeStruct =
+        this.state.feeStructures.find(
+          (f) => f.tenantId === tenantId && f.grade === student.grade && f.term === toTerm
+        ) ||
+        this.state.feeStructures.find((f) => f.tenantId === tenantId && f.grade === student.grade) ||
+        this.state.feeStructures.find((f) => f.tenantId === tenantId);
+
+      const baseTermFee = feeStruct ? feeStruct.totalFee : 0;
+      const grossNewAmount = baseTermFee + arrears;
+      if (grossNewAmount <= 0 && (student.creditBalance || 0) <= 0) continue;
+
+      const nextInv: FeeInvoice = {
+        id: `inv-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        invoiceNumber: this.nextInvoiceNumber(tenant),
+        studentId: student.id,
+        studentName: student.fullName,
+        studentCode: student.studentCode,
+        grade: student.grade,
+        term: toTerm,
+        dueDate,
+        totalAmount: grossNewAmount,
+        carriedForwardFromAmount: arrears > 0 ? arrears : undefined,
+        paidAmount: 0,
+        balance: grossNewAmount,
+        status: 'Pending',
+        payments: [],
+        createdAt: new Date().toISOString(),
+      };
+      this.applySiblingDiscountIfEligible(tenant, student, nextInv);
+
+      // Apply any existing overpayment creditBalance from previous term
+      const availCredit = Math.max(0, Number(student.creditBalance || 0));
+      if (availCredit > 0 && nextInv.balance > 0) {
+        const appliedCredit = Math.min(availCredit, nextInv.balance);
+        student.creditBalance = availCredit - appliedCredit;
+        nextInv.payments.push({
+          id: `pay-${randomUUID().slice(0, 8)}`,
+          receiptNumber: this.nextReceiptNumber(tenantId),
+          amount: appliedCredit,
+          appliedAmount: appliedCredit,
+          creditedExcess: 0,
+          method: 'Bank Transfer',
+          reference: `CREDIT-CF-${fromTerm.replace(/\s+/g, '')}`,
+          paidAt: new Date().toISOString(),
+          recordedBy: `Credit Carry-Forward (${actor.fullName || actor.email})`,
+        });
+        this.recomputeInvoiceTotals(nextInv);
+      }
+
+      this.state.invoices.unshift(nextInv);
+      createdInvoices.push(nextInv);
+    }
+
+    tenant.currentTerm = toTerm;
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CARRY_FORWARD_TERM',
+      'Tenant',
+      tenantId,
+      { fromTerm },
+      { toTerm, createdInvoicesCount: createdInvoices.length },
+      ip
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'fee',
+      `Term Carry-Forward Complete (${toTerm})`,
+      `Carried arrears & credits from ${fromTerm} to ${toTerm} across ${createdInvoices.length} learner invoice(s).`,
+      'fees'
+    );
+    this.syncTenant(tenantId, 'fee:term-carried-forward');
+    return {
+      createdInvoices,
+      carriedStudentsCount: createdInvoices.length,
+      updatedTerm: toTerm,
+    };
+  }
+
   createIndependentVotelines(
     tenantId: string,
     input: {
@@ -5168,22 +6666,21 @@ export class TenantStore {
       invoiceId?: string;
       grade?: string;
       recordedBy?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): IndependentVotelineItem[] {
     const tenant = this.requireTenant(tenantId);
     const name = (input.name || '').trim();
     if (!name) {
       throw new ConflictError('Enter an independent voteline name (e.g. Transport Fee or Academic Trip Fee).', 400);
     }
-    const amount = Math.round(Number(input.amount));
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new ConflictError('Enter a positive amount for the independent voteline.', 400);
-    }
+    const amount = this.parseStrictPositiveAmount(input.amount, 'Independent voteline amount');
 
     const scope = input.targetScope || 'student';
     const term = (input.term || '').trim() || tenant.currentTerm;
     const note = (input.note || '').trim() || undefined;
-    const recordedBy = (input.recordedBy || '').trim() || 'Bursar Office';
+    const recordedBy = (input.recordedBy || '').trim() || actor?.fullName || 'Bursar Office';
 
     let targetStudents: Student[] = [];
     if (scope === 'grade') {
@@ -5265,6 +6762,17 @@ export class TenantStore {
       created.push(item);
     }
 
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CREATE_INDEPENDENT_VOTELINES',
+      'IndependentVoteline',
+      created[0]?.id || 'batch',
+      null,
+      { name, amount, count: created.length },
+      ip
+    );
+
     this.persist();
     this.pushNotification(
       tenantId,
@@ -5286,14 +6794,16 @@ export class TenantStore {
       reference?: string;
       recordedBy?: string;
       paidAt?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): IndependentVotelineItem {
     const tenant = this.requireTenant(tenantId);
     if (!Array.isArray(this.state.independentVotelines)) {
       this.state.independentVotelines = [];
     }
     const item = this.state.independentVotelines.find(
-      (v) => v.id === itemId && v.tenantId === tenantId
+      (v) => v.id === itemId && v.tenantId === tenantId && !v.voided
     );
     if (!item) {
       throw new ConflictError('Independent voteline record not found.', 404);
@@ -5302,31 +6812,50 @@ export class TenantStore {
       throw new ConflictError('Independent voteline has no remaining balance.', 400);
     }
 
-    const requestedAmount = Math.round(Number(input.amount));
-    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
-      throw new ConflictError('Enter a valid positive payment amount.', 400);
+    const requestedAmount = this.parseStrictPositiveAmount(
+      input.amount,
+      'Independent voteline payment'
+    );
+    const validMethods = new Set<PaymentMethod>(['Bank Transfer', 'Card', 'Mobile Money', 'Cash']);
+    const method: PaymentMethod =
+      input.method && validMethods.has(input.method) ? input.method : 'Mobile Money';
+    const paidAtIso = this.validatePaymentDate(input.paidAt, actor);
+    const rawRef = (input.reference || '').trim();
+    if (rawRef) {
+      this.ensurePaymentReferenceUnique(tenantId, rawRef, method);
     }
+
     const payAmount = Math.min(item.balance, requestedAmount);
-    const receiptNumber = `IVL-RCT-${Math.floor(10000 + Math.random() * 89999)}`;
-    const paidAtIso =
-      input.paidAt && !Number.isNaN(Date.parse(input.paidAt))
-        ? new Date(input.paidAt).toISOString()
-        : new Date().toISOString();
+    const receiptNumber = this.nextReceiptNumber(tenantId);
+    const finalRef =
+      rawRef && !(method === 'Cash' && /^auto$/i.test(rawRef)) ? rawRef : receiptNumber;
 
     const payment: IndependentVotelinePayment = {
       id: `ivlpay-${randomUUID().slice(0, 8)}`,
       receiptNumber,
       amount: payAmount,
-      method: input.method || 'Mobile Money',
-      reference: (input.reference || '').trim() || receiptNumber,
+      method,
+      reference: finalRef,
       paidAt: paidAtIso,
-      recordedBy: (input.recordedBy || '').trim() || 'Bursar Office',
+      recordedBy: (input.recordedBy || '').trim() || actor?.fullName || 'Bursar Office',
     };
 
+    const beforeSnap = { paidAmount: item.paidAmount, balance: item.balance };
     item.payments.push(payment);
     item.paidAmount += payAmount;
     item.balance = Math.max(0, item.amount - item.paidAmount);
     item.status = item.balance === 0 ? 'Paid' : 'Partial';
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'RECORD_IVL_PAYMENT',
+      'IndependentVoteline',
+      item.id,
+      beforeSnap,
+      { receiptNumber, amount: payAmount, balance: item.balance },
+      ip
+    );
 
     this.persist();
     this.pushNotification(
@@ -5340,15 +6869,41 @@ export class TenantStore {
     return item;
   }
 
-  deleteIndependentVoteline(tenantId: string, itemId: string): { deleted: boolean } {
+  deleteIndependentVoteline(
+    tenantId: string,
+    itemId: string,
+    reason?: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { deleted: boolean } {
     this.requireTenant(tenantId);
     const list = this.state.independentVotelines || [];
-    const idx = list.findIndex((v) => v.id === itemId && v.tenantId === tenantId);
-    if (idx === -1) {
+    const item = list.find((v) => v.id === itemId && v.tenantId === tenantId && !v.voided);
+    if (!item) {
       throw new ConflictError('Independent voteline record not found.', 404);
     }
-    list.splice(idx, 1);
-    this.state.independentVotelines = list;
+    if (item.paidAmount > 0) {
+      throw new ConflictError(
+        `Cannot void independent voteline "${item.name}" after payments (${item.paidAmount}) have been posted.`,
+        409
+      );
+    }
+    const cleanReason = (reason || '').trim() || 'Voided by Bursar / Admin';
+    item.voided = true;
+    item.voidReason = cleanReason;
+    item.voidedBy = actor?.fullName || actor?.email || 'Bursar / Admin';
+    item.voidedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_INDEPENDENT_VOTELINE',
+      'IndependentVoteline',
+      item.id,
+      { name: item.name, amount: item.amount },
+      { voided: true, voidReason: cleanReason },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'fee:independent-voteline-deleted');
     return { deleted: true };
@@ -5395,7 +6950,8 @@ export class TenantStore {
       accountReferenceFormat?: string;
       settlementBank?: string;
       regenerateSecret?: boolean;
-    }
+    },
+    ip?: string
   ): { tenant: Tenant; mpesaConfig: TenantMpesaConfig; webhookCallbackUrl?: string } {
     if (
       actor.role !== 'Admin' &&
@@ -5459,7 +7015,20 @@ export class TenantStore {
       updatedBy: actor.fullName || actor.email || actor.role,
     };
 
+    const beforeMpesa = tenant.mpesaConfig
+      ? { paybillNumber: tenant.mpesaConfig.paybillNumber, enabled: tenant.mpesaConfig.enabled }
+      : null;
     tenant.mpesaConfig = config;
+    this.appendFinanceAudit(
+      tenantId,
+      { id: actor.email, fullName: actor.fullName, email: actor.email, role: actor.role },
+      'CONFIGURE_MPESA',
+      'TenantMpesaConfig',
+      tenantId,
+      beforeMpesa,
+      { paybillNumber: config.paybillNumber, enabled: config.enabled, environment: config.environment },
+      ip
+    );
     this.persist();
     this.pushNotification(
       tenantId,
@@ -5481,14 +7050,15 @@ export class TenantStore {
 
   recordManualMpesaEntry(
     tenantId: string,
-    actor: Pick<TenantUser, 'role' | 'fullName' | 'email'>,
+    actor: Pick<TenantUser, 'role' | 'fullName' | 'email'> & { id?: string },
     input: {
       paybillNumber?: string;
       accountReference?: string;
       amount?: number;
       msisdn?: string;
       mpesaReceipt?: string;
-    }
+    },
+    ip?: string
   ): {
     status: 'Unverified';
     transaction: MpesaTransactionLog;
@@ -5590,6 +7160,21 @@ export class TenantStore {
       this.state.reconciliationLines = [];
     }
     this.state.reconciliationLines.unshift(reconLine);
+    this.appendFinanceAudit(
+      tenantId,
+      {
+        id: actor.id || actor.email,
+        fullName: actor.fullName,
+        email: actor.email,
+        role: actor.role,
+      },
+      'RECORD_MANUAL_MPESA',
+      'MpesaTransactionLog',
+      txLog.id,
+      null,
+      { mpesaReceipt, accountReference, amount: txLog.amount, status: 'Unverified' },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:mpesa-manual-unverified');
 
@@ -5877,21 +7462,20 @@ export class TenantStore {
         dataUrl: string;
         uploadedBy?: string;
       }>;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): SchoolExpense {
     const tenant = this.requireTenant(tenantId);
     const title = (input.title || '').trim();
     const vendor = (input.vendor || '').trim();
-    const amount = Math.round(Number(input.amount));
+    const amount = this.parseStrictPositiveAmount(input.amount, 'Expense amount');
 
     if (!title) {
       throw new ConflictError('Expense description / title is required.', 400);
     }
     if (!vendor) {
       throw new ConflictError('Vendor / Payee name is required.', 400);
-    }
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new ConflictError('Expense amount must be greater than zero.', 400);
     }
 
     const validCategories = new Set<string>(EXPENSE_CATEGORIES);
@@ -5902,19 +7486,16 @@ export class TenantStore {
     const paymentMethod: PaymentMethod = validMethods.has(input.paymentMethod)
       ? input.paymentMethod
       : 'Bank Transfer';
-    const validStatuses = new Set<ExpenseStatus>(['Pending Approval', 'Approved', 'Paid']);
-    const status: ExpenseStatus =
-      input.status && validStatuses.has(input.status) ? input.status : 'Pending Approval';
+    // Maker-checker: all new expenses start at Pending Approval
+    const status: ExpenseStatus = 'Pending Approval';
 
-    const count = this.state.expenses.filter((e) => e.tenantId === tenantId).length;
-    const prefix = tenant.slug.slice(0, 3).toUpperCase();
-    const voucherNumber = `${prefix}-EXP-${202600 + count + 1}`;
+    const voucherNumber = this.nextVoucherNumber(tenant);
     const expenseDate =
       input.expenseDate && !Number.isNaN(Date.parse(input.expenseDate))
         ? new Date(input.expenseDate).toISOString().slice(0, 10)
         : new Date().toISOString().slice(0, 10);
 
-    const recordedBy = (input.recordedBy || '').trim() || 'Bursar Office';
+    const recordedBy = (input.recordedBy || '').trim() || actor?.fullName || 'Bursar Office';
     const attachments = this.normalizeExpenseAttachments(input.attachments, recordedBy);
 
     const expense: SchoolExpense = {
@@ -5930,12 +7511,23 @@ export class TenantStore {
       expenseDate,
       status,
       recordedBy,
+      createdByUserId: actor?.id || 'system',
       notes: (input.notes || '').trim() || undefined,
       attachments,
       createdAt: new Date().toISOString(),
     };
 
     this.state.expenses.unshift(expense);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CREATE_EXPENSE',
+      'SchoolExpense',
+      expense.id,
+      null,
+      { voucherNumber, title, vendor, amount, status },
+      ip
+    );
     this.persist();
     this.pushNotification(
       tenantId,
@@ -5962,10 +7554,13 @@ export class TenantStore {
   ): SchoolExpense {
     this.requireTenant(tenantId);
     const expense = this.state.expenses.find(
-      (e) => e.id === expenseId && e.tenantId === tenantId
+      (e) => e.id === expenseId && e.tenantId === tenantId && !e.voided
     );
     if (!expense) {
       throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+    if (expense.status === 'Paid') {
+      throw new ConflictError('Paid expense vouchers are posted and immutable.', 409);
     }
 
     const existing = expense.attachments || [];
@@ -5987,10 +7582,13 @@ export class TenantStore {
   ): SchoolExpense {
     this.requireTenant(tenantId);
     const expense = this.state.expenses.find(
-      (e) => e.id === expenseId && e.tenantId === tenantId
+      (e) => e.id === expenseId && e.tenantId === tenantId && !e.voided
     );
     if (!expense) {
       throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+    if (expense.status === 'Paid') {
+      throw new ConflictError('Paid expense vouchers are posted and immutable.', 409);
     }
     const existing = expense.attachments || [];
     const next = existing.filter((a) => a.id !== attachmentId);
@@ -6003,7 +7601,13 @@ export class TenantStore {
     return expense;
   }
 
-  updateExpenseStatus(tenantId: string, expenseId: string, status: ExpenseStatus): SchoolExpense {
+  updateExpenseStatus(
+    tenantId: string,
+    expenseId: string,
+    status: ExpenseStatus,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): SchoolExpense {
     this.requireTenant(tenantId);
     const validStatuses = new Set<ExpenseStatus>(['Pending Approval', 'Approved', 'Paid']);
     if (!validStatuses.has(status)) {
@@ -6011,30 +7615,156 @@ export class TenantStore {
     }
 
     const expense = this.state.expenses.find(
-      (e) => e.id === expenseId && e.tenantId === tenantId
+      (e) => e.id === expenseId && e.tenantId === tenantId && !e.voided
     );
     if (!expense) {
       throw new ConflictError('Expense voucher not found in tenant.', 404);
     }
+    if (expense.reversed) {
+      throw new ConflictError('Reversed expense vouchers cannot change status.', 409);
+    }
 
+    const rank: Record<ExpenseStatus, number> = {
+      'Pending Approval': 0,
+      Approved: 1,
+      Paid: 2,
+    };
+    if (rank[status] <= rank[expense.status]) {
+      throw new ConflictError(
+        `Expense voucher ${expense.voucherNumber} cannot transition from "${expense.status}" to "${status}". Status transitions are strictly forward-only.`,
+        409
+      );
+    }
+    if (expense.status === 'Pending Approval' && status === 'Paid') {
+      throw new ConflictError(
+        `Expense voucher ${expense.voucherNumber} must be Approved before it can be marked Paid.`,
+        409
+      );
+    }
+
+    if (status === 'Approved') {
+      if (
+        actor &&
+        actor.role !== 'Admin' &&
+        actor.role !== 'Bursar' &&
+        actor.role !== 'Super Admin' &&
+        actor.role !== 'Developer'
+      ) {
+        throw new ConflictError('Only School Admin or a different Bursar can approve expenses.', 403);
+      }
+      if (expense.createdByUserId && actor?.id && expense.createdByUserId === actor.id) {
+        throw new ConflictError(
+          'Maker-checker violation: the user who created an expense voucher cannot approve it.',
+          403
+        );
+      }
+      expense.approvedByUserId = actor?.id;
+      expense.approvedBy = actor?.fullName || actor?.email || 'Finance Approver';
+      expense.approvedAt = new Date().toISOString();
+    }
+
+    const beforeSnap = { status: expense.status };
     expense.status = status;
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'UPDATE_EXPENSE_STATUS',
+      'SchoolExpense',
+      expense.id,
+      beforeSnap,
+      { voucherNumber: expense.voucherNumber, status, approvedBy: expense.approvedBy },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:expense-updated');
     return expense;
   }
 
-  deleteExpense(tenantId: string, expenseId: string): { deleted: boolean } {
+  deleteExpense(
+    tenantId: string,
+    expenseId: string,
+    reason?: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { deleted: boolean } {
     this.requireTenant(tenantId);
-    const idx = this.state.expenses.findIndex(
-      (e) => e.id === expenseId && e.tenantId === tenantId
+    const expense = this.state.expenses.find(
+      (e) => e.id === expenseId && e.tenantId === tenantId && !e.voided
     );
-    if (idx === -1) {
+    if (!expense) {
       throw new ConflictError('Expense voucher not found in tenant.', 404);
     }
-    this.state.expenses.splice(idx, 1);
+    if (expense.status === 'Paid') {
+      throw new ConflictError(
+        `Paid expense voucher ${expense.voucherNumber} cannot be deleted. Reverse it instead with an audit reason.`,
+        409
+      );
+    }
+
+    const cleanReason = (reason || '').trim() || 'Voided prior to payment';
+    expense.voided = true;
+    expense.voidReason = cleanReason;
+    expense.voidedBy = actor?.fullName || actor?.email || 'Finance Office';
+    expense.voidedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_EXPENSE',
+      'SchoolExpense',
+      expense.id,
+      { voucherNumber: expense.voucherNumber, status: expense.status, amount: expense.amount },
+      { voided: true, voidReason: cleanReason },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:expense-deleted');
     return { deleted: true };
+  }
+
+  reverseExpense(
+    tenantId: string,
+    expenseId: string,
+    reason: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): SchoolExpense {
+    this.requireTenant(tenantId);
+    const cleanReason = (reason || '').trim();
+    if (!cleanReason) {
+      throw new ConflictError('Provide a reversal reason before reversing a paid expense.', 400);
+    }
+    const expense = this.state.expenses.find(
+      (e) => e.id === expenseId && e.tenantId === tenantId && !e.voided
+    );
+    if (!expense) {
+      throw new ConflictError('Expense voucher not found in tenant.', 404);
+    }
+    if (expense.status !== 'Paid') {
+      throw new ConflictError('Only Paid expense vouchers require reversal; void unpaid vouchers instead.', 400);
+    }
+    if (expense.reversed) {
+      throw new ConflictError(`Expense voucher ${expense.voucherNumber} has already been reversed.`, 409);
+    }
+
+    expense.reversed = true;
+    expense.reversalReason = cleanReason;
+    expense.reversedBy = actor.fullName || actor.email;
+    expense.reversedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'REVERSE_EXPENSE',
+      'SchoolExpense',
+      expense.id,
+      { voucherNumber: expense.voucherNumber, status: expense.status, amount: expense.amount },
+      { reversed: true, reversalReason: cleanReason },
+      ip
+    );
+    this.persist();
+    this.syncTenant(tenantId, 'finance:expense-reversed');
+    return expense;
   }
 
   // Finance Controls: eTIMS Receipt Verification
@@ -6051,13 +7781,15 @@ export class TenantStore {
       totalAmount: number;
       exemptVat?: boolean;
       checkedBy?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): EtimsVerificationRecord {
     const tenant = this.requireTenant(tenantId);
     const supplierName = (input.supplierName || '').trim();
     const supplierKraPin = (input.supplierKraPin || '').trim().toUpperCase();
     const cuInvoiceNumber = (input.cuInvoiceNumber || '').trim().toUpperCase();
-    const totalAmount = Math.round(Number(input.totalAmount));
+    const totalAmount = this.parseStrictPositiveAmount(input.totalAmount, 'Receipt total amount');
 
     if (!supplierName) {
       throw new ConflictError('Supplier name is required for eTIMS check.', 400);
@@ -6071,12 +7803,9 @@ export class TenantStore {
     if (cuInvoiceNumber.length < 8) {
       throw new ConflictError('Enter a valid eTIMS CU Invoice / Control Unit serial number.', 400);
     }
-    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
-      throw new ConflictError('Receipt total amount must be greater than zero.', 400);
-    }
 
     const linkedExpense = input.expenseId
-      ? this.state.expenses.find((e) => e.id === input.expenseId && e.tenantId === tenantId)
+      ? this.state.expenses.find((e) => e.id === input.expenseId && e.tenantId === tenantId && !e.voided)
       : undefined;
 
     const vatAmount = input.exemptVat
@@ -6088,10 +7817,10 @@ export class TenantStore {
       ? Math.max(0, Math.round(Number(input.taxableAmount)))
       : Math.max(0, totalAmount - vatAmount);
 
-    let status: EtimsVerificationStatus = input.exemptVat ? 'Exempt' : 'Verified';
+    let status: EtimsVerificationStatus = input.exemptVat ? 'Exempt' : 'Checked manually';
     let verificationNotes = input.exemptVat
-      ? 'Zero-rated / VAT-exempt KRA eTIMS tax invoice verified.'
-      : 'Supplier KRA PIN format, CU Invoice serial, and 16% VAT breakdown verified.';
+      ? 'Zero-rated / VAT-exempt KRA eTIMS tax invoice checked manually.'
+      : 'Supplier KRA PIN format, CU Invoice serial, and 16% VAT breakdown checked manually.';
 
     if (linkedExpense && Math.abs(linkedExpense.amount - totalAmount) > 5) {
       status = 'Mismatch';
@@ -6115,7 +7844,7 @@ export class TenantStore {
       totalAmount,
       status,
       verificationNotes,
-      checkedBy: (input.checkedBy || '').trim() || 'Bursar Compliance Desk',
+      checkedBy: (input.checkedBy || '').trim() || actor?.fullName || 'Bursar Compliance Desk',
       checkedAt: new Date().toISOString(),
     };
 
@@ -6127,20 +7856,51 @@ export class TenantStore {
 
     if (!Array.isArray(this.state.etimsChecks)) this.state.etimsChecks = [];
     this.state.etimsChecks.unshift(record);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CHECK_ETIMS_RECEIPT',
+      'EtimsVerificationRecord',
+      record.id,
+      null,
+      { supplierKraPin, cuInvoiceNumber, totalAmount, status },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:etims-verified');
     return record;
   }
 
-  deleteEtimsCheck(tenantId: string, checkId: string): { deleted: boolean } {
+  deleteEtimsCheck(
+    tenantId: string,
+    checkId: string,
+    reason?: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { deleted: boolean } {
     this.requireTenant(tenantId);
-    const idx = (this.state.etimsChecks || []).findIndex(
-      (c) => c.id === checkId && c.tenantId === tenantId
+    const check = (this.state.etimsChecks || []).find(
+      (c) => c.id === checkId && c.tenantId === tenantId && !c.voided
     );
-    if (idx === -1) {
+    if (!check) {
       throw new ConflictError('eTIMS verification record not found.', 404);
     }
-    this.state.etimsChecks.splice(idx, 1);
+    const cleanReason = (reason || '').trim() || 'Voided eTIMS check record';
+    check.voided = true;
+    check.voidReason = cleanReason;
+    check.voidedBy = actor?.fullName || actor?.email || 'Bursar Compliance Desk';
+    check.voidedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_ETIMS_CHECK',
+      'EtimsVerificationRecord',
+      check.id,
+      { cuInvoiceNumber: check.cuInvoiceNumber, status: check.status },
+      { voided: true, voidReason: cleanReason },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:etims-deleted');
     return { deleted: true };
@@ -6168,6 +7928,7 @@ export class TenantStore {
       const invoices = this.state.invoices.filter((i) => i.tenantId === tenantId);
       for (const inv of invoices) {
         for (const pay of inv.payments || []) {
+          if (pay.voided || pay.isReversalEntry) continue;
           const payRef = (pay.reference || '').trim().toLowerCase();
           const recNo = pay.receiptNumber.trim().toLowerCase();
           const refHit =
@@ -6191,9 +7952,10 @@ export class TenantStore {
           }
         }
       }
-      // Fallback exact amount match against single open payment if reference differs
       for (const inv of invoices) {
-        const pay = (inv.payments || []).find((p) => p.amount === line.amount);
+        const pay = (inv.payments || []).find(
+          (p) => !p.voided && !p.isReversalEntry && p.amount === line.amount
+        );
         if (pay) {
           return {
             status: 'Matched',
@@ -6206,8 +7968,7 @@ export class TenantStore {
       return { status: 'Unmatched' };
     }
 
-    // Debit: Match against Paid / Approved Expenses
-    const expenses = this.state.expenses.filter((e) => e.tenantId === tenantId);
+    const expenses = this.state.expenses.filter((e) => e.tenantId === tenantId && !e.voided && !e.reversed);
     for (const exp of expenses) {
       const expRef = (exp.reference || '').trim().toLowerCase();
       const vNo = exp.voucherNumber.trim().toLowerCase();
@@ -6254,7 +8015,9 @@ export class TenantStore {
       direction: 'Credit' | 'Debit';
       amount: number;
       notes?: string;
-    }>
+    }>,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): { imported: ReconciliationLine[]; matchedCount: number; unmatchedCount: number } {
     this.requireTenant(tenantId);
     if (!Array.isArray(lines) || lines.length === 0) {
@@ -6272,12 +8035,9 @@ export class TenantStore {
     for (const raw of lines) {
       const statementRef = (raw.statementRef || '').trim();
       const narration = (raw.narration || '').trim() || statementRef;
-      const amount = Math.round(Number(raw.amount));
-      if (!statementRef || !Number.isFinite(amount) || amount <= 0) {
-        throw new ConflictError(
-          'Each statement line requires a reference code and positive amount.',
-          400
-        );
+      const amount = this.parseStrictPositiveAmount(raw.amount, 'Statement line amount');
+      if (!statementRef) {
+        throw new ConflictError('Each statement line requires a reference code.', 400);
       }
       const channel: ReconciliationChannel = raw.channel === 'M-Pesa' ? 'M-Pesa' : 'Bank';
       const direction: 'Credit' | 'Debit' = raw.direction === 'Debit' ? 'Debit' : 'Credit';
@@ -6318,6 +8078,16 @@ export class TenantStore {
       imported.push(created);
     }
 
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'IMPORT_RECONCILIATION',
+      'ReconciliationLine',
+      imported[0]?.id || 'batch',
+      null,
+      { importedCount: imported.length, matchedCount, unmatchedCount },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:reconciliation-imported');
     return { imported, matchedCount, unmatchedCount };
@@ -6327,7 +8097,7 @@ export class TenantStore {
     this.requireTenant(tenantId);
     let matchedCount = 0;
     for (const line of this.state.reconciliationLines || []) {
-      if (line.tenantId !== tenantId || line.status === 'Matched') continue;
+      if (line.tenantId !== tenantId || line.voided || line.status === 'Matched') continue;
       const res = this.matchStatementLineWithTenantLedger(tenantId, line);
       line.status = res.status;
       line.matchedType = res.matchedType;
@@ -6349,7 +8119,9 @@ export class TenantStore {
       matchedRecordId?: string;
       matchedLabel?: string;
       notes?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): ReconciliationLine {
     this.requireTenant(tenantId);
     const valid = new Set<ReconciliationStatus>(['Matched', 'Unmatched', 'Discrepancy']);
@@ -6357,11 +8129,12 @@ export class TenantStore {
       throw new ConflictError(`Invalid reconciliation status "${patch.status}".`, 400);
     }
     const line = (this.state.reconciliationLines || []).find(
-      (r) => r.id === lineId && r.tenantId === tenantId
+      (r) => r.id === lineId && r.tenantId === tenantId && !r.voided
     );
     if (!line) {
       throw new ConflictError('Reconciliation statement line not found.', 404);
     }
+    const beforeSnap = { status: line.status, matchedRecordId: line.matchedRecordId };
     line.status = patch.status;
     if (patch.status === 'Unmatched') {
       line.matchedType = undefined;
@@ -6373,50 +8146,113 @@ export class TenantStore {
       if (patch.matchedLabel !== undefined) line.matchedLabel = patch.matchedLabel.trim() || undefined;
     }
     if (patch.notes !== undefined) line.notes = patch.notes.trim() || undefined;
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'UPDATE_RECONCILIATION',
+      'ReconciliationLine',
+      line.id,
+      beforeSnap,
+      { status: line.status, matchedRecordId: line.matchedRecordId },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:reconciliation-updated');
     return line;
   }
 
-  deleteReconciliationLine(tenantId: string, lineId: string): { deleted: boolean } {
+  deleteReconciliationLine(
+    tenantId: string,
+    lineId: string,
+    reason?: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { deleted: boolean } {
     this.requireTenant(tenantId);
-    const idx = (this.state.reconciliationLines || []).findIndex(
-      (r) => r.id === lineId && r.tenantId === tenantId
+    const line = (this.state.reconciliationLines || []).find(
+      (r) => r.id === lineId && r.tenantId === tenantId && !r.voided
     );
-    if (idx === -1) {
+    if (!line) {
       throw new ConflictError('Reconciliation statement line not found.', 404);
     }
-    this.state.reconciliationLines.splice(idx, 1);
+    const cleanReason = (reason || '').trim() || 'Voided statement line';
+    line.voided = true;
+    line.voidReason = cleanReason;
+    line.voidedBy = actor?.fullName || actor?.email || 'Bursar Office';
+    line.voidedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_RECONCILIATION',
+      'ReconciliationLine',
+      line.id,
+      { statementRef: line.statementRef, amount: line.amount },
+      { voided: true, voidReason: cleanReason },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:reconciliation-deleted');
     return { deleted: true };
   }
 
   // Finance Controls: Payroll & Statutory Deductions
-  generatePayrollRun(tenantId: string, payPeriod: string): PayrollEntry[] {
+  generatePayrollRun(
+    tenantId: string,
+    payPeriod: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): PayrollEntry[] {
     const tenant = this.requireTenant(tenantId);
     const period = (payPeriod || '').trim() || new Date().toISOString().slice(0, 7);
     if (!Array.isArray(this.state.payrollEntries)) this.state.payrollEntries = [];
 
     const existingStaffIds = new Set(
       this.state.payrollEntries
-        .filter((p) => p.tenantId === tenantId && p.payPeriod === period)
+        .filter((p) => p.tenantId === tenantId && p.payPeriod === period && !p.voided && !p.reversed)
         .map((p) => p.staffId)
     );
 
-    const defaults = buildDefaultPayrollForTenant(tenant, period);
+    const defaults = buildDefaultPayrollForTenant(
+      tenant,
+      period,
+      this.state.statutoryRateSchedules
+    );
     const created: PayrollEntry[] = [];
     for (const entry of defaults) {
       if (!existingStaffIds.has(entry.staffId)) {
-        const nextEntry = { ...entry, id: `payr-${randomUUID().slice(0, 8)}` };
+        const nextEntry: PayrollEntry = {
+          ...entry,
+          id: `payr-${randomUUID().slice(0, 8)}`,
+          status: 'Draft',
+          createdByUserId: actor?.id || 'system',
+          approvedByUserId: undefined,
+          approvedBy: undefined,
+          approvedAt: undefined,
+          updatedAt: new Date().toISOString(),
+        };
         this.state.payrollEntries.push(nextEntry);
         created.push(nextEntry);
       }
     }
+
+    if (created.length > 0) {
+      this.appendFinanceAudit(
+        tenantId,
+        actor,
+        'GENERATE_PAYROLL_RUN',
+        'PayrollEntry',
+        period,
+        null,
+        { payPeriod: period, generatedCount: created.length },
+        ip
+      );
+    }
     this.persist();
     this.syncTenant(tenantId, 'finance:payroll-generated');
     return this.state.payrollEntries.filter(
-      (p) => p.tenantId === tenantId && p.payPeriod === period
+      (p) => p.tenantId === tenantId && p.payPeriod === period && !p.voided
     );
   }
 
@@ -6438,22 +8274,43 @@ export class TenantStore {
       shif?: number;
       housingLevy?: number;
       status?: PayrollStatus;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): PayrollEntry {
     const tenant = this.requireTenant(tenantId);
     const staffName = (input.staffName || '').trim();
     if (!staffName) {
       throw new ConflictError('Staff full name is required for payroll entry.', 400);
     }
-    const basicSalary = Math.max(0, Math.round(Number(input.basicSalary)));
-    const allowances = Math.max(0, Math.round(Number(input.allowances || 0)));
-    const saccoOrLoan = Math.max(0, Math.round(Number(input.saccoOrLoan || 0)));
+    const rawBasic = Number(input.basicSalary);
+    const rawAllowances = Number(input.allowances ?? 0);
+    const rawSacco = Number(input.saccoOrLoan ?? 0);
+    if (!Number.isFinite(rawBasic) || rawBasic < 0) {
+      throw new ConflictError('Basic salary must be a valid non-negative number.', 400);
+    }
+    if (!Number.isFinite(rawAllowances) || rawAllowances < 0) {
+      throw new ConflictError('Allowances must be a valid non-negative number.', 400);
+    }
+    if (!Number.isFinite(rawSacco) || rawSacco < 0) {
+      throw new ConflictError('SACCO / loan deduction must be a valid non-negative number.', 400);
+    }
+
+    const basicSalary = Math.round(rawBasic);
+    const allowances = Math.round(rawAllowances);
+    const saccoOrLoan = Math.round(rawSacco);
     const grossPay = basicSalary + allowances;
     if (grossPay <= 0) {
       throw new ConflictError('Gross salary must be greater than zero.', 400);
     }
 
-    const statutory = computeStatutoryDeductions(grossPay, tenant.currency);
+    const payPeriod = (input.payPeriod || '').trim() || new Date().toISOString().slice(0, 7);
+    const statutory = computeStatutoryDeductions(
+      grossPay,
+      tenant.currency,
+      this.state.statutoryRateSchedules,
+      payPeriod
+    );
     const useAuto = input.autoComputeStatutory !== false;
     const paye = useAuto
       ? statutory.paye
@@ -6470,16 +8327,31 @@ export class TenantStore {
 
     const totalDeductions = paye + nssf + shif + housingLevy + saccoOrLoan;
     const netPay = Math.max(0, grossPay - totalDeductions);
-    const payPeriod = (input.payPeriod || '').trim() || new Date().toISOString().slice(0, 7);
-    const status: PayrollStatus =
-      input.status === 'Approved' || input.status === 'Disbursed' ? input.status : 'Draft';
+    const employerNssf = statutory.employerNssf;
+    const employerHousingLevy = statutory.employerHousingLevy;
+    const employerNita = statutory.employerNita;
+    const totalEmployerCost = grossPay + employerNssf + employerHousingLevy + employerNita;
 
     if (!Array.isArray(this.state.payrollEntries)) this.state.payrollEntries = [];
     const existing = input.id
-      ? this.state.payrollEntries.find((p) => p.id === input.id && p.tenantId === tenantId)
+      ? this.state.payrollEntries.find(
+          (p) => p.id === input.id && p.tenantId === tenantId && !p.voided
+        )
       : undefined;
 
     if (existing) {
+      if (existing.status === 'Disbursed' || existing.reversed) {
+        throw new ConflictError(
+          'Disbursed or reversed payroll entries are posted and immutable. Reverse it instead with an audit reason.',
+          409
+        );
+      }
+      const beforeSnap = {
+        basicSalary: existing.basicSalary,
+        allowances: existing.allowances,
+        netPay: existing.netPay,
+        status: existing.status,
+      };
       existing.payPeriod = payPeriod;
       existing.staffName = staffName;
       existing.staffCategory = input.staffCategory === 'Non-Teaching' ? 'Non-Teaching' : 'Teaching';
@@ -6494,8 +8366,37 @@ export class TenantStore {
       existing.saccoOrLoan = saccoOrLoan;
       existing.totalDeductions = totalDeductions;
       existing.netPay = netPay;
-      existing.status = status;
+      existing.employerNssf = employerNssf;
+      existing.employerHousingLevy = employerHousingLevy;
+      existing.employerNita = employerNita;
+      existing.totalEmployerCost = totalEmployerCost;
+      existing.statutoryScheduleId = statutory.scheduleId;
+      // Editing payroll figures resets approval for maker-checker verification
+      existing.status = 'Draft';
+      existing.createdByUserId = actor?.id || existing.createdByUserId || 'system';
+      existing.approvedByUserId = undefined;
+      existing.approvedBy = undefined;
+      existing.approvedAt = undefined;
       existing.updatedAt = new Date().toISOString();
+
+      this.appendFinanceAudit(
+        tenantId,
+        actor,
+        'UPDATE_PAYROLL_ENTRY',
+        'PayrollEntry',
+        existing.id,
+        beforeSnap,
+        {
+          staffName,
+          grossPay,
+          netPay,
+          employerNssf,
+          employerHousingLevy,
+          employerNita,
+          status: existing.status,
+        },
+        ip
+      );
       this.persist();
       this.syncTenant(tenantId, 'finance:payroll-updated');
       return existing;
@@ -6519,47 +8420,216 @@ export class TenantStore {
       saccoOrLoan,
       totalDeductions,
       netPay,
-      status,
+      employerNssf,
+      employerHousingLevy,
+      employerNita,
+      totalEmployerCost,
+      statutoryScheduleId: statutory.scheduleId,
+      // Maker-checker: all newly created payroll entries start in Draft
+      status: 'Draft',
+      createdByUserId: actor?.id || 'system',
       updatedAt: new Date().toISOString(),
     };
 
     this.state.payrollEntries.push(created);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CREATE_PAYROLL_ENTRY',
+      'PayrollEntry',
+      created.id,
+      null,
+      {
+        staffName,
+        payPeriod,
+        grossPay,
+        netPay,
+        employerNssf,
+        employerHousingLevy,
+        employerNita,
+        status: created.status,
+      },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:payroll-created');
     return created;
   }
 
-  updatePayrollStatus(tenantId: string, entryId: string, status: PayrollStatus): PayrollEntry {
+  updatePayrollStatus(
+    tenantId: string,
+    entryId: string,
+    status: PayrollStatus,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): PayrollEntry {
     this.requireTenant(tenantId);
     const valid = new Set<PayrollStatus>(['Draft', 'Approved', 'Disbursed']);
     if (!valid.has(status)) {
       throw new ConflictError(`Invalid payroll status "${status}".`, 400);
     }
     const entry = (this.state.payrollEntries || []).find(
-      (p) => p.id === entryId && p.tenantId === tenantId
+      (p) => p.id === entryId && p.tenantId === tenantId && !p.voided
     );
     if (!entry) {
       throw new ConflictError('Payroll entry not found in tenant.', 404);
     }
+    if (entry.reversed) {
+      throw new ConflictError('Reversed payroll entries cannot change status.', 409);
+    }
+
+    const rank: Record<PayrollStatus, number> = {
+      Draft: 0,
+      Approved: 1,
+      Disbursed: 2,
+    };
+    if (rank[status] <= rank[entry.status]) {
+      throw new ConflictError(
+        `Payroll entry for ${entry.staffName} cannot transition from "${entry.status}" to "${status}". Status transitions are strictly forward-only.`,
+        409
+      );
+    }
+    if (entry.status === 'Draft' && status === 'Disbursed') {
+      throw new ConflictError(
+        `Payroll entry for ${entry.staffName} must be Approved before it can be Disbursed.`,
+        409
+      );
+    }
+
+    if (status === 'Approved') {
+      if (
+        actor &&
+        actor.role !== 'Admin' &&
+        actor.role !== 'Bursar' &&
+        actor.role !== 'Super Admin' &&
+        actor.role !== 'Developer'
+      ) {
+        throw new ConflictError('Only School Admin or a different Bursar can approve payroll.', 403);
+      }
+      if (entry.createdByUserId && actor?.id && entry.createdByUserId === actor.id) {
+        throw new ConflictError(
+          'Maker-checker violation: the user who prepared a payroll entry cannot approve it.',
+          403
+        );
+      }
+      entry.approvedByUserId = actor?.id;
+      entry.approvedBy = actor?.fullName || actor?.email || 'Finance Approver';
+      entry.approvedAt = new Date().toISOString();
+    }
+
+    const beforeSnap = { status: entry.status };
     entry.status = status;
     entry.updatedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'UPDATE_PAYROLL_STATUS',
+      'PayrollEntry',
+      entry.id,
+      beforeSnap,
+      { staffName: entry.staffName, payPeriod: entry.payPeriod, status, approvedBy: entry.approvedBy },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:payroll-status');
     return entry;
   }
 
-  deletePayrollEntry(tenantId: string, entryId: string): { deleted: boolean } {
+  deletePayrollEntry(
+    tenantId: string,
+    entryId: string,
+    reason?: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { deleted: boolean } {
     this.requireTenant(tenantId);
-    const idx = (this.state.payrollEntries || []).findIndex(
-      (p) => p.id === entryId && p.tenantId === tenantId
+    const entry = (this.state.payrollEntries || []).find(
+      (p) => p.id === entryId && p.tenantId === tenantId && !p.voided
     );
-    if (idx === -1) {
+    if (!entry) {
       throw new ConflictError('Payroll entry not found in tenant.', 404);
     }
-    this.state.payrollEntries.splice(idx, 1);
+    if (entry.status === 'Disbursed') {
+      throw new ConflictError(
+        `Disbursed payroll entry for ${entry.staffName} cannot be deleted. Reverse it instead with an audit reason.`,
+        409
+      );
+    }
+
+    const cleanReason = (reason || '').trim() || 'Voided before disbursement';
+    entry.voided = true;
+    entry.voidReason = cleanReason;
+    entry.voidedBy = actor?.fullName || actor?.email || 'Finance Office';
+    entry.voidedAt = new Date().toISOString();
+    entry.updatedAt = entry.voidedAt;
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_PAYROLL_ENTRY',
+      'PayrollEntry',
+      entry.id,
+      { staffName: entry.staffName, status: entry.status, netPay: entry.netPay },
+      { voided: true, voidReason: cleanReason },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:payroll-deleted');
     return { deleted: true };
+  }
+
+  reversePayrollEntry(
+    tenantId: string,
+    entryId: string,
+    reason: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): PayrollEntry {
+    this.requireTenant(tenantId);
+    const cleanReason = (reason || '').trim();
+    if (!cleanReason) {
+      throw new ConflictError('Provide a reversal reason before reversing a disbursed payroll entry.', 400);
+    }
+    const entry = (this.state.payrollEntries || []).find(
+      (p) => p.id === entryId && p.tenantId === tenantId && !p.voided
+    );
+    if (!entry) {
+      throw new ConflictError('Payroll entry not found in tenant.', 404);
+    }
+    if (entry.status !== 'Disbursed') {
+      throw new ConflictError(
+        'Only Disbursed payroll entries require reversal; void non-disbursed entries instead.',
+        400
+      );
+    }
+    if (entry.reversed) {
+      throw new ConflictError(
+        `Payroll entry for ${entry.staffName} (${entry.payPeriod}) has already been reversed.`,
+        409
+      );
+    }
+
+    const now = new Date().toISOString();
+    entry.reversed = true;
+    entry.reversalReason = cleanReason;
+    entry.reversedBy = actor.fullName || actor.email;
+    entry.reversedAt = now;
+    entry.updatedAt = now;
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'REVERSE_PAYROLL_ENTRY',
+      'PayrollEntry',
+      entry.id,
+      { staffName: entry.staffName, payPeriod: entry.payPeriod, status: entry.status, netPay: entry.netPay },
+      { reversed: true, reversalReason: cleanReason },
+      ip
+    );
+    this.persist();
+    this.syncTenant(tenantId, 'finance:payroll-reversed');
+    return entry;
   }
 
   // Finance Controls: Departmental Budget Allocations & Tracking
@@ -6571,7 +8641,9 @@ export class TenantStore {
       fiscalYear?: string;
       term?: string;
       notes?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): BudgetAllocation {
     const tenant = this.requireTenant(tenantId);
     const validCategories = new Set<string>(EXPENSE_CATEGORIES);
@@ -6589,6 +8661,10 @@ export class TenantStore {
     );
 
     if (existing) {
+      const beforeSnap = {
+        allocatedAmount: existing.allocatedAmount,
+        status: existing.status,
+      };
       const amountChanged = existing.allocatedAmount !== allocatedAmount;
       existing.allocatedAmount = allocatedAmount;
       if (input.fiscalYear) existing.fiscalYear = input.fiscalYear.trim();
@@ -6596,13 +8672,26 @@ export class TenantStore {
       if (input.notes !== undefined) existing.notes = input.notes.trim() || undefined;
       if (amountChanged) {
         existing.status = 'Pending Approval';
+        existing.createdByUserId = actor?.id || existing.createdByUserId || 'system';
         existing.approvedBy = undefined;
         existing.approvedAt = undefined;
         existing.approvalNotes = 'Ceiling revised — awaiting approval.';
       } else if (!existing.status) {
         existing.status = 'Pending Approval';
+        existing.createdByUserId = actor?.id || existing.createdByUserId || 'system';
       }
       existing.updatedAt = new Date().toISOString();
+
+      this.appendFinanceAudit(
+        tenantId,
+        actor,
+        'UPSERT_BUDGET',
+        'BudgetAllocation',
+        existing.id,
+        beforeSnap,
+        { category: existing.category, allocatedAmount, status: existing.status },
+        ip
+      );
       this.persist();
       this.syncTenant(tenantId, 'finance:budget-updated');
       return existing;
@@ -6616,10 +8705,21 @@ export class TenantStore {
       category: input.category,
       allocatedAmount,
       status: 'Pending Approval',
+      createdByUserId: actor?.id || 'system',
       notes: (input.notes || '').trim() || undefined,
       updatedAt: new Date().toISOString(),
     };
     this.state.budgets.push(created);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'UPSERT_BUDGET',
+      'BudgetAllocation',
+      created.id,
+      null,
+      { category: created.category, allocatedAmount, status: created.status },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:budget-created');
     return created;
@@ -6633,7 +8733,9 @@ export class TenantStore {
       status: BudgetApprovalStatus;
       approvedBy: string;
       approvalNotes?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): BudgetAllocation {
     const tenant = this.requireTenant(tenantId);
     if (!Array.isArray(this.state.budgets)) this.state.budgets = [];
@@ -6660,6 +8762,7 @@ export class TenantStore {
         category: input.category,
         allocatedAmount: 0,
         status: 'Draft',
+        createdByUserId: actor?.id || 'system',
         updatedAt: new Date().toISOString(),
       };
       this.state.budgets.push(target);
@@ -6679,26 +8782,55 @@ export class TenantStore {
       throw new ConflictError(`Invalid budget approval status "${String(input.status)}".`, 400);
     }
 
-    if (input.status === 'Approved' && target.allocatedAmount <= 0) {
-      throw new ConflictError(
-        `Set a positive budget ceiling for ${target.category} before approving it.`,
-        400
-      );
+    if (input.status === 'Approved') {
+      if (
+        actor &&
+        actor.role !== 'Admin' &&
+        actor.role !== 'Bursar' &&
+        actor.role !== 'Super Admin' &&
+        actor.role !== 'Developer'
+      ) {
+        throw new ConflictError('Only School Admin or a different Bursar can approve budgets.', 403);
+      }
+      if (target.createdByUserId && actor?.id && target.createdByUserId === actor.id) {
+        throw new ConflictError(
+          'Maker-checker violation: the user who created or revised a budget ceiling cannot approve it.',
+          403
+        );
+      }
+      if (target.allocatedAmount <= 0) {
+        throw new ConflictError(
+          `Set a positive budget ceiling for ${target.category} before approving it.`,
+          400
+        );
+      }
     }
 
+    const beforeSnap = { status: target.status, allocatedAmount: target.allocatedAmount };
     const now = new Date().toISOString();
     target.status = input.status;
     target.approvalNotes = (input.approvalNotes || '').trim() || undefined;
     target.updatedAt = now;
 
     if (input.status === 'Approved' || input.status === 'Rejected') {
-      target.approvedBy = (input.approvedBy || '').trim() || 'Finance Administrator';
+      target.approvedBy =
+        actor?.fullName || actor?.email || (input.approvedBy || '').trim() || 'Finance Administrator';
       target.approvedAt = now;
     } else {
       target.approvedBy = undefined;
       target.approvedAt = undefined;
     }
 
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'APPROVE_BUDGET',
+      'BudgetAllocation',
+      target.id,
+      beforeSnap,
+      { category: target.category, status: target.status, approvedBy: target.approvedBy },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:budget-approval');
     this.pushNotification(
@@ -6726,14 +8858,16 @@ export class TenantStore {
       bursarName?: string;
       decision?: ApprovalDecision;
       remarks?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): ApprovalSignOffRecord {
     const tenant = this.requireTenant(tenantId);
     const subject = (input.subject || '').trim();
     const minuteReference = (input.minuteReference || '').trim();
     const chairpersonName = (input.chairpersonName || '').trim();
     const secretaryName = (input.secretaryName || '').trim();
-    const amount = Math.round(Number(input.amount));
+    const amount = this.parseStrictPositiveAmount(input.amount, 'Sign-off amount');
 
     if (!subject || !minuteReference || !chairpersonName || !secretaryName) {
       throw new ConflictError(
@@ -6741,27 +8875,21 @@ export class TenantStore {
         400
       );
     }
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new ConflictError('Sign-off amount must be greater than zero.', 400);
-    }
 
     const validCommittees = new Set<string>(APPROVAL_COMMITTEES);
     const committee: ApprovalCommittee = validCommittees.has(input.committee)
       ? input.committee
       : 'Board of Management (BOM)';
-    const validDecisions = new Set<ApprovalDecision>([
-      'Pending Sign-Off',
-      'Approved',
-      'Deferred',
-      'Rejected',
-    ]);
+    // Maker-checker: newly submitted approval items start at Pending Sign-Off
     const decision: ApprovalDecision =
-      input.decision && validDecisions.has(input.decision)
+      input.decision === 'Deferred' || input.decision === 'Rejected'
         ? input.decision
         : 'Pending Sign-Off';
 
     const linkedExpense = input.linkedExpenseId
-      ? this.state.expenses.find((e) => e.id === input.linkedExpenseId && e.tenantId === tenantId)
+      ? this.state.expenses.find(
+          (e) => e.id === input.linkedExpenseId && e.tenantId === tenantId && !e.voided
+        )
       : undefined;
 
     if (!Array.isArray(this.state.approvalRecords)) this.state.approvalRecords = [];
@@ -6785,21 +8913,28 @@ export class TenantStore {
       minuteReference,
       chairpersonName,
       secretaryName,
-      bursarName: (input.bursarName || '').trim() || 'School Bursar',
+      bursarName: (input.bursarName || '').trim() || actor?.fullName || 'School Bursar',
       decision,
       remarks: (input.remarks || '').trim() || undefined,
+      createdByUserId: actor?.id || 'system',
       createdAt: new Date().toISOString(),
-      signedAt: decision === 'Approved' ? new Date().toISOString() : undefined,
     };
 
     if (linkedExpense) {
       linkedExpense.boardApprovalRef = `${referenceCode} (${minuteReference})`;
-      if (decision === 'Approved' && linkedExpense.status === 'Pending Approval') {
-        linkedExpense.status = 'Approved';
-      }
     }
 
     this.state.approvalRecords.unshift(record);
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'CREATE_APPROVAL_RECORD',
+      'ApprovalSignOffRecord',
+      record.id,
+      null,
+      { referenceCode, subject, amount, decision },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:approval-created');
     return record;
@@ -6808,7 +8943,9 @@ export class TenantStore {
   updateApprovalDecision(
     tenantId: string,
     recordId: string,
-    patch: { decision: ApprovalDecision; remarks?: string }
+    patch: { decision: ApprovalDecision; remarks?: string },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
   ): ApprovalSignOffRecord {
     this.requireTenant(tenantId);
     const validDecisions = new Set<ApprovalDecision>([
@@ -6822,42 +8959,100 @@ export class TenantStore {
     }
 
     const record = (this.state.approvalRecords || []).find(
-      (a) => a.id === recordId && a.tenantId === tenantId
+      (a) => a.id === recordId && a.tenantId === tenantId && !a.voided
     );
     if (!record) {
       throw new ConflictError('Board / Procurement approval record not found.', 404);
     }
 
+    if (patch.decision === 'Approved') {
+      if (
+        actor &&
+        actor.role !== 'Admin' &&
+        actor.role !== 'Bursar' &&
+        actor.role !== 'Super Admin' &&
+        actor.role !== 'Developer'
+      ) {
+        throw new ConflictError('Only School Admin or a different Bursar can approve sign-offs.', 403);
+      }
+      if (record.createdByUserId && actor?.id && record.createdByUserId === actor.id) {
+        throw new ConflictError(
+          'Maker-checker violation: the user who submitted a sign-off record cannot approve it.',
+          403
+        );
+      }
+    }
+
+    const beforeSnap = { decision: record.decision };
     record.decision = patch.decision;
     if (patch.remarks !== undefined) record.remarks = patch.remarks.trim() || undefined;
     record.signedAt = patch.decision === 'Approved' ? new Date().toISOString() : undefined;
 
     if (record.linkedExpenseId) {
       const linkedExpense = this.state.expenses.find(
-        (e) => e.id === record.linkedExpenseId && e.tenantId === tenantId
+        (e) => e.id === record.linkedExpenseId && e.tenantId === tenantId && !e.voided
       );
       if (linkedExpense) {
         linkedExpense.boardApprovalRef = `${record.referenceCode} (${record.minuteReference})`;
-        if (patch.decision === 'Approved' && linkedExpense.status === 'Pending Approval') {
+        if (
+          patch.decision === 'Approved' &&
+          linkedExpense.status === 'Pending Approval' &&
+          (!linkedExpense.createdByUserId || !actor?.id || linkedExpense.createdByUserId !== actor.id)
+        ) {
           linkedExpense.status = 'Approved';
+          linkedExpense.approvedByUserId = actor?.id;
+          linkedExpense.approvedBy = actor?.fullName || actor?.email || 'BOM Approver';
+          linkedExpense.approvedAt = new Date().toISOString();
         }
       }
     }
 
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'UPDATE_APPROVAL_DECISION',
+      'ApprovalSignOffRecord',
+      record.id,
+      beforeSnap,
+      { referenceCode: record.referenceCode, decision: record.decision },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:approval-updated');
     return record;
   }
 
-  deleteApprovalRecord(tenantId: string, recordId: string): { deleted: boolean } {
+  deleteApprovalRecord(
+    tenantId: string,
+    recordId: string,
+    reason?: string,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): { deleted: boolean } {
     this.requireTenant(tenantId);
-    const idx = (this.state.approvalRecords || []).findIndex(
-      (a) => a.id === recordId && a.tenantId === tenantId
+    const record = (this.state.approvalRecords || []).find(
+      (a) => a.id === recordId && a.tenantId === tenantId && !a.voided
     );
-    if (idx === -1) {
+    if (!record) {
       throw new ConflictError('Board / Procurement approval record not found.', 404);
     }
-    this.state.approvalRecords.splice(idx, 1);
+
+    const cleanReason = (reason || '').trim() || 'Voided approval record';
+    record.voided = true;
+    record.voidReason = cleanReason;
+    record.voidedBy = actor?.fullName || actor?.email || 'Finance Office';
+    record.voidedAt = new Date().toISOString();
+
+    this.appendFinanceAudit(
+      tenantId,
+      actor,
+      'VOID_APPROVAL_RECORD',
+      'ApprovalSignOffRecord',
+      record.id,
+      { referenceCode: record.referenceCode, decision: record.decision, amount: record.amount },
+      { voided: true, voidReason: cleanReason },
+      ip
+    );
     this.persist();
     this.syncTenant(tenantId, 'finance:approval-deleted');
     return { deleted: true };
