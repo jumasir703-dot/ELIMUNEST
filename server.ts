@@ -14,6 +14,7 @@ import {
 import {
   createUserAuthMiddleware,
   createUserSessionToken,
+  extractBearerToken,
   isDeveloperRole,
   isSessionSecretConfigured,
   requireAdminAuth,
@@ -62,7 +63,25 @@ app.set('trust proxy', 1);
 
 app.use(
   helmet({
-    contentSecurityPolicy: false,
+    // A real CSP in production. Vite's dev server needs inline/eval for HMR, so it stays off in dev/test.
+    contentSecurityPolicy: IS_PROD
+      ? {
+          useDefaults: false,
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'"],
+            // Tailwind/Motion inject inline styles at runtime.
+            styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+            fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+            imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+            connectSrc: ["'self'", 'ws:', 'wss:'],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"],
+            formAction: ["'self'"],
+            frameAncestors: ["'none'"],
+          },
+        }
+      : false,
     crossOriginEmbedderPolicy: false,
   })
 );
@@ -161,41 +180,20 @@ wss.on('connection', async (ws: TenantWebSocket, req) => {
   ws.authenticated = false;
   await store.ensureHydrated();
 
-  let initialToken = '';
-  try {
-    const parsedUrl = new URL(req.url || '/ws', 'http://localhost');
-    initialToken = parsedUrl.searchParams.get('token') || '';
-  } catch {
-    initialToken = '';
-  }
-
-  let authTimer: ReturnType<typeof setTimeout> | null = null;
-  if (initialToken) {
-    if (!authenticateWsSocket(initialToken, ws)) {
-      ws.close(4401, 'Unauthorized');
-      return;
+  // Tokens are never accepted in the URL (they leak into logs and browser history).
+  // The client must send { type: 'auth', token } as its first frame within 5 seconds.
+  const authTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+    if (!ws.authenticated && ws.readyState === WebSocket.OPEN) {
+      ws.close(4401, 'Authentication timeout');
     }
-    ws.send(
-      JSON.stringify({
-        type: 'connected',
-        tenantId: ws.tenantId,
-        payload: { timestamp: new Date().toISOString() },
-      })
-    );
-  } else {
-    authTimer = setTimeout(() => {
-      if (!ws.authenticated && ws.readyState === WebSocket.OPEN) {
-        ws.close(4401, 'Authentication timeout');
-      }
-    }, 5000);
-  }
+  }, 5000);
 
   ws.on('pong', () => {
     ws.isAlive = true;
   });
 
   ws.on('close', () => {
-    if (authTimer) clearTimeout(authTimer);
+    clearTimeout(authTimer);
   });
 
   ws.on('message', (raw) => {
@@ -208,7 +206,7 @@ wss.on('connection', async (ws: TenantWebSocket, req) => {
 
       if (!ws.authenticated) {
         if (msg.type === 'auth' && typeof msg.token === 'string') {
-          if (authTimer) clearTimeout(authTimer);
+          clearTimeout(authTimer);
           if (!authenticateWsSocket(msg.token, ws)) {
             ws.close(4401, 'Unauthorized');
             return;
@@ -315,6 +313,8 @@ app.use('/api', async (_req, _res, next) => {
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
+  // Tests log in many times from one IP; production limits are unchanged.
+  skip: () => IS_TEST,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login requests from this IP. Try again in 15 minutes.' },
@@ -323,6 +323,8 @@ const loginLimiter = rateLimit({
 const registerLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 15,
+  // The suite registers many accounts from one IP; production limits are unchanged.
+  skip: () => IS_TEST,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many registration attempts from this IP. Try again later.' },
@@ -334,6 +336,14 @@ const passwordResetLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many password reset requests from this IP. Try again later.' },
+});
+
+const directoryLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again later.' },
 });
 
 const webhookLimiter = rateLimit({
@@ -358,8 +368,9 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.get('/api/auth/schools', (_req, res) => {
-  res.json({ schools: store.getPublicSchoolDirectory() });
+app.get('/api/auth/schools', directoryLimiter, (_req, res) => {
+  // Suspended workspaces are not advertised publicly.
+  res.json({ schools: store.getPublicSchoolDirectory().filter((t) => t.status !== 'Suspended') });
 });
 
 app.post('/api/auth/login', loginLimiter, async (req, res, next) => {
@@ -422,13 +433,39 @@ app.post('/api/auth/forgot-password/verify', passwordResetLimiter, async (req, r
   }
 });
 
-app.post('/api/auth/logout', (_req, res) => {
+app.post('/api/auth/logout', (req, res) => {
+  // Best effort: a valid token is revoked server-side (bumps tokenVersion, which also signs the
+  // account out on other devices). Support/impersonation tokens never revoke the target's sessions.
+  const token = extractBearerToken(req);
+  if (token) {
+    const resolved = resolveLiveSessionFromToken(
+      token,
+      (userId) => store.getUserById(userId),
+      (tid) => store.getTenantStatus(tid)
+    );
+    if (resolved.ok && !resolved.claims.impersonatedBy) {
+      store.revokeUserSessions(resolved.liveUser.id);
+    }
+  }
   res.json({ ok: true });
 });
 
 // Authenticated Per-Tenant Safaricom Daraja C2B Paybill Webhook (secret path param)
+const mpesaAllowedIps = (process.env.MPESA_ALLOWED_IPS || '')
+  .split(',')
+  .map((ip) => ip.trim())
+  .filter(Boolean);
+
 app.post('/api/mpesa/c2b-callback/:tenantSecret', webhookLimiter, (req, res, next) => {
   try {
+    // Optional defence in depth: set MPESA_ALLOWED_IPS (comma-separated Safaricom Daraja source IPs).
+    if (mpesaAllowedIps.length > 0) {
+      const callerIp = (req.ip || '').replace(/^::ffff:/, '');
+      if (!mpesaAllowedIps.includes(callerIp)) {
+        res.status(403).json({ error: 'Webhook source not allowed.' });
+        return;
+      }
+    }
     const matchedTenant = store.verifyMpesaWebhookSecret(String(req.params.tenantSecret || ''));
     if (!matchedTenant) {
       res.status(401).json({ error: 'Unauthorized M-Pesa webhook secret.' });
@@ -986,6 +1023,25 @@ app.get('/api/workspace', (req: AuthenticatedRequest, res, next) => {
   }
 });
 
+// Parent: claim another child (admission number + guardian phone on file must both match)
+const parentLinkLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many link attempts. Try again later.' },
+});
+
+app.post('/api/parent/link-child', parentLinkLimiter, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const student = store.linkParentToStudent(tenantId, req.authUser!, req.body || {});
+    res.json({ studentId: student.id, fullName: student.fullName });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Admissions & Direct Enrollment
 const admissionsGuard = [
   requireRole('Developer', 'Super Admin', 'Admin', 'Registrar'),
@@ -997,6 +1053,18 @@ app.post('/api/students/enroll', ...admissionsGuard, (req: AuthenticatedRequest,
     const tenantId = getTenantId(req);
     const result = store.enrollStudent(tenantId, req.body);
     res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.patch('/api/students/:id/parent', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const raw = req.body?.parentUserId;
+    const parentUserId = raw === null || raw === undefined || raw === '' ? null : String(raw);
+    const student = store.setStudentParent(tenantId, String(req.params.id), parentUserId);
+    res.json({ student });
   } catch (err) {
     next(err);
   }
@@ -1181,7 +1249,15 @@ const attendanceGuard = [
 app.post('/api/attendance/batch', ...attendanceGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const records = store.saveAttendanceBatch(tenantId, req.body);
+    const body = { ...(req.body || {}) };
+    if (req.authUser?.role === 'Teacher') {
+      // Do not trust actorRole / teacherId from the client: bind them to the logged-in teacher.
+      const profile = store.findTeacherProfileForUser(tenantId, req.authUser);
+      body.actorRole = 'Teacher';
+      body.teacherId = profile?.id;
+      body.recordedBy = req.authUser.fullName;
+    }
+    const records = store.saveAttendanceBatch(tenantId, body);
     res.json({ records });
   } catch (err) {
     next(err);

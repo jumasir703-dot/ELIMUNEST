@@ -1161,6 +1161,28 @@ export class TenantStore {
             }
           });
 
+    // Parent linking migration: workspace access is now driven by Student.parentUserId only.
+    // Grandfather links that previously resolved through a guardianEmail match so existing
+    // parents keep access, then stop trusting the email string at read time.
+    if (Array.isArray(parsed.users) && Array.isArray(parsed.students)) {
+      const parentsByTenantEmail = new Map<string, string>();
+      for (const u of parsed.users) {
+        if (u.role === 'Parent' && u.email) {
+          parentsByTenantEmail.set(`${u.tenantId}::${u.email.trim().toLowerCase()}`, u.id);
+        }
+      }
+      for (const st of parsed.students) {
+        if (st.parentUserId || !st.guardianEmail) continue;
+        const match = parentsByTenantEmail.get(
+          `${st.tenantId}::${st.guardianEmail.trim().toLowerCase()}`
+        );
+        if (match) {
+          st.parentUserId = match;
+          dirty = true;
+        }
+      }
+    }
+
     return { state: parsed, dirty };
   }
 
@@ -1586,6 +1608,37 @@ export class TenantStore {
     });
   }
 
+  /**
+   * Admin-initiated flows (enrolment, staff-provisioned Parent accounts) are trusted to link a
+   * learner to an existing Parent account whose school email equals the guardian email recorded.
+   */
+  private findParentUserIdByEmail(tenantId: string, email: string | undefined): string | undefined {
+    const norm = (email || '').trim().toLowerCase();
+    if (!norm) return undefined;
+    return (this.state.users || []).find(
+      (u) => u.tenantId === tenantId && u.role === 'Parent' && u.email.trim().toLowerCase() === norm
+    )?.id;
+  }
+
+  /** Invalidates every outstanding session token for a user (used by logout). */
+  revokeUserSessions(userId: string): void {
+    const stored = (this.state.users || []).find((u) => u.id === userId);
+    if (!stored) return;
+    stored.tokenVersion = (stored.tokenVersion ?? 0) + 1;
+    this.persist();
+  }
+
+  /** Resolves the faculty-roster profile for a logged-in teacher by school email. */
+  findTeacherProfileForUser(
+    tenantId: string,
+    user: Pick<TenantUser, 'email'>
+  ): TeacherProfile | undefined {
+    const tenant = this.state.tenants.find((t) => t.id === tenantId);
+    const email = (user.email || '').trim().toLowerCase();
+    if (!tenant || !email) return undefined;
+    return (tenant.teachers || []).find((t) => (t.email || '').trim().toLowerCase() === email);
+  }
+
   getWorkspace(tenantId: string, authUser?: TenantUser): TenantWorkspaceData {
     const tenant = this.requireTenant(tenantId);
     const allStudents = this.state.students.filter((s) => s.tenantId === tenantId);
@@ -1620,12 +1673,7 @@ export class TenantStore {
     const allNotifications = this.state.notifications.filter((n) => n.tenantId === tenantId);
 
     if (authUser?.role === 'Parent') {
-      const userEmail = authUser.email.trim().toLowerCase();
-      const linkedStudents = allStudents.filter(
-        (s) =>
-          s.parentUserId === authUser.id ||
-          (s.guardianEmail && s.guardianEmail.trim().toLowerCase() === userEmail)
-      );
+      const linkedStudents = allStudents.filter((s) => s.parentUserId === authUser.id);
       const childIds = new Set(linkedStudents.map((s) => s.id));
       const childGrades = new Set(linkedStudents.map((s) => s.grade));
       const childGradeSections = new Set(linkedStudents.map((s) => `${s.grade}::${s.section}`));
@@ -1671,17 +1719,26 @@ export class TenantStore {
     }
 
     if (authUser?.role === 'Teacher') {
+      // Least privilege: a teacher only receives learners in cohorts they are assigned to
+      // (explicit class assignment or a timetable slot). No matching teacher profile => no learners.
+      const teacherProfile = this.findTeacherProfileForUser(tenantId, authUser);
+      const teacherStudents = teacherProfile
+        ? allStudents.filter((s) =>
+            isTeacherAssignedToCohort(teacherProfile, s.grade, s.section, allTimetable)
+          )
+        : [];
+      const teacherStudentIds = new Set(teacherStudents.map((s) => s.id));
       return {
         tenant,
         tenants: [tenant],
-        students: allStudents,
-        admissions: allAdmissions,
+        students: teacherStudents,
+        admissions: [],
         timetable: allTimetable,
-        attendance: allAttendance,
-        staffAttendance: allStaffAttendance,
-        leaveOutChits: allLeaveChits,
+        attendance: allAttendance.filter((a) => teacherStudentIds.has(a.studentId)),
+        staffAttendance: [],
+        leaveOutChits: allLeaveChits.filter((c) => teacherStudentIds.has(c.studentId)),
         examCycles: allExamCycles,
-        examResults: allExamResults,
+        examResults: allExamResults.filter((r) => teacherStudentIds.has(r.studentId)),
         feeStructures: [],
         invoices: [],
         creditNotes: [],
@@ -2294,6 +2351,83 @@ export class TenantStore {
       .map((u) => this.toPublicUser(u));
   }
 
+  /**
+   * Finds the learner a parent is claiming. Requires BOTH admission number and the guardian phone
+   * on file. Failures use one generic message so the endpoint cannot be used to probe which
+   * admission numbers or phone numbers exist.
+   */
+  private findStudentForParentClaim(
+    tenantId: string,
+    studentCode: string | undefined,
+    guardianPhone: string | undefined
+  ): Student {
+    const generic = new ConflictError(
+      'We could not verify that learner. Check the admission number and the guardian phone number the school has on file.',
+      403
+    );
+    const code = (studentCode || '').trim().toLowerCase();
+    if (!code || !(guardianPhone || '').trim()) throw generic;
+    let phone: string;
+    try {
+      phone = this.validateAndNormalizeKenyanPhone(guardianPhone || '', 'Guardian phone');
+    } catch {
+      throw generic;
+    }
+    const student = this.state.students.find(
+      (st) =>
+        st.tenantId === tenantId &&
+        (st.studentCode || '').trim().toLowerCase() === code &&
+        st.status !== 'Graduated'
+    );
+    if (!student) throw generic;
+    let onFile = '';
+    try {
+      onFile = this.validateAndNormalizeKenyanPhone(student.guardianPhone || '', 'Guardian phone');
+    } catch {
+      throw generic;
+    }
+    if (onFile !== phone) throw generic;
+    return student;
+  }
+
+  /** Lets an already-registered parent claim another child (same ownership check). */
+  linkParentToStudent(
+    tenantId: string,
+    parent: Pick<TenantUser, 'id' | 'role'>,
+    input: { studentCode?: string; guardianPhone?: string }
+  ): Student {
+    if (parent.role !== 'Parent') {
+      throw new ConflictError('Only Parent accounts can link a child this way.', 403);
+    }
+    const student = this.findStudentForParentClaim(tenantId, input.studentCode, input.guardianPhone);
+    if (student.parentUserId && student.parentUserId !== parent.id) {
+      throw new ConflictError(
+        'This learner is already linked to another parent account. Ask the school office to relink it.',
+        409
+      );
+    }
+    student.parentUserId = parent.id;
+    this.persist();
+    return student;
+  }
+
+  /** School admin link / unlink of a learner to a Parent account (null clears the link). */
+  setStudentParent(tenantId: string, studentId: string, parentUserId: string | null): Student {
+    const student = this.state.students.find((st) => st.id === studentId && st.tenantId === tenantId);
+    if (!student) throw new ConflictError('Student not found in tenant.', 404);
+    if (parentUserId === null) {
+      delete student.parentUserId;
+    } else {
+      const parent = (this.state.users || []).find(
+        (u) => u.id === parentUserId && u.tenantId === tenantId && u.role === 'Parent'
+      );
+      if (!parent) throw new ConflictError('Parent account not found in this school.', 404);
+      student.parentUserId = parent.id;
+    }
+    this.persist();
+    return student;
+  }
+
   async registerUserAccount(input: {
     tenantId?: string;
     fullName: string;
@@ -2301,6 +2435,10 @@ export class TenantStore {
     phone?: string;
     role?: UserRole;
     password: string;
+    /** Admission number of the child being claimed (required for Parent sign-up). */
+    studentCode?: string;
+    /** Guardian phone number on file at the school for that child. */
+    guardianPhone?: string;
   }): Promise<{ user: TenantUser; tenant: Tenant }> {
     const fullName = (input.fullName || '').trim();
     if (fullName.length < 2) {
@@ -2366,6 +2504,23 @@ export class TenantStore {
       );
     }
 
+    // Ownership check: a parent must prove they know a learner's admission number AND the
+    // guardian phone the school holds for that learner. No match => no account is created.
+    const claimedStudent = this.findStudentForParentClaim(
+      tenant.id,
+      input.studentCode,
+      input.guardianPhone
+    );
+    if (
+      claimedStudent.parentUserId &&
+      (this.state.users || []).some((u) => u.id === claimedStudent.parentUserId)
+    ) {
+      throw new ConflictError(
+        'This learner already has a linked parent account. Ask the school office to link a second guardian.',
+        409
+      );
+    }
+
     const now = new Date().toISOString();
     const newUser: StoredTenantUser = {
       id: `usr-${randomUUID().slice(0, 8)}`,
@@ -2385,6 +2540,7 @@ export class TenantStore {
 
     if (!Array.isArray(this.state.users)) this.state.users = [];
     this.state.users.push(newUser);
+    claimedStudent.parentUserId = newUser.id;
     this.persist();
 
     this.pushNotification(
@@ -2898,6 +3054,18 @@ export class TenantStore {
 
     if (!Array.isArray(this.state.users)) this.state.users = [];
     this.state.users.push(created);
+    if (role === 'Parent') {
+      // The school admin vouches for this account: link learners recorded with this guardian email.
+      for (const st of this.state.students) {
+        if (
+          st.tenantId === tenant.id &&
+          !st.parentUserId &&
+          (st.guardianEmail || '').trim().toLowerCase() === finalEmail
+        ) {
+          st.parentUserId = created.id;
+        }
+      }
+    }
     this.persist();
 
     this.pushNotification(
@@ -4213,6 +4381,7 @@ export class TenantStore {
         section: app.assignedSection,
         guardianName: app.guardianName,
         guardianEmail: app.guardianEmail,
+        parentUserId: this.findParentUserIdByEmail(tenantId, app.guardianEmail),
         guardianPhone: normalizedPhone,
         gender: app.gender,
         dateOfBirth: validatedDob,
@@ -4338,6 +4507,7 @@ export class TenantStore {
       section: input.section || validStreams[0] || 'A',
       guardianName: input.guardianName.trim(),
       guardianEmail: input.guardianEmail?.trim() || '',
+      parentUserId: this.findParentUserIdByEmail(tenantId, input.guardianEmail),
       guardianPhone: normalizedPhone,
       gender: input.gender || 'Female',
       dateOfBirth: validatedDob,
@@ -6052,9 +6222,10 @@ export class TenantStore {
         403
       );
     }
-    const matchedTeacher =
-      tenant.teachers.find((t) => t.email.trim().toLowerCase() === actor.email.trim().toLowerCase()) ||
-      (requestedTeacherId ? tenant.teachers.find((t) => t.id === requestedTeacherId) : undefined);
+    // Identity comes from the authenticated account only; a client-supplied teacherId is never trusted.
+    const matchedTeacher = tenant.teachers.find(
+      (t) => t.email.trim().toLowerCase() === actor.email.trim().toLowerCase()
+    );
 
     if (!matchedTeacher) {
       throw new ConflictError(
