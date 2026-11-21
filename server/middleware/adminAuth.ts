@@ -120,6 +120,7 @@ const DEVELOPER_ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<DeveloperPermissi
   Teacher: new Set<DeveloperPermission>(),
   Bursar: new Set<DeveloperPermission>(),
   Parent: new Set<DeveloperPermission>(),
+  Student: new Set<DeveloperPermission>(),
 };
 
 export interface AdminActor {

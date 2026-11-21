@@ -903,24 +903,26 @@ export default function App() {
               Developer Panel (/dev)
             </button>
           )}
-          <button
-            onClick={() =>
-              handleNavigate(canAccessSuperAdmin ? 'super-admin' : 'settings')
-            }
-            style={{
-              borderColor: sidebarTheme.inputBorder,
-              color: sidebarTheme.textColor,
-            }}
-            className={`w-full rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
-              sidebarTheme.isLight ? 'hover:bg-black/5' : 'hover:bg-white/10'
-            }`}
-          >
-            {isPlatformSuperAdmin
-              ? 'Multi-Tenant Quick Admin'
-              : canAccessSuperAdmin
-              ? 'School Theme & Admin'
-              : 'School Settings'}
-          </button>
+          {(canAccessSuperAdmin || effectiveModules.includes('settings')) && (
+            <button
+              onClick={() =>
+                handleNavigate(canAccessSuperAdmin ? 'super-admin' : 'settings')
+              }
+              style={{
+                borderColor: sidebarTheme.inputBorder,
+                color: sidebarTheme.textColor,
+              }}
+              className={`w-full rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
+                sidebarTheme.isLight ? 'hover:bg-black/5' : 'hover:bg-white/10'
+              }`}
+            >
+              {isPlatformSuperAdmin
+                ? 'Multi-Tenant Quick Admin'
+                : canAccessSuperAdmin
+                ? 'School Theme & Admin'
+                : 'School Settings'}
+            </button>
+          )}
         </div>
       </aside>
 
@@ -1062,7 +1064,11 @@ export default function App() {
                 }
               >
                 {activeModule === 'analytics' && effectiveModules.includes('analytics') && (
-                  <AnalyticsDashboard workspace={workspace} onNavigate={handleNavigate} />
+                  <AnalyticsDashboard
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    onNavigate={handleNavigate}
+                  />
                 )}
                 {activeModule === 'admissions' && effectiveModules.includes('admissions') && (
                   <AdmissionsModule
@@ -1074,6 +1080,7 @@ export default function App() {
                 {activeModule === 'timetable' && effectiveModules.includes('timetable') && (
                   <TimetableModule
                     workspace={workspace}
+                    currentRole={currentRole}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />

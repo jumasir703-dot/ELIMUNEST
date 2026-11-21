@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import * as XLSX from 'xlsx';
 import {
   addDaysIso,
   ALL_TENANT_MODULES,
@@ -42,6 +43,8 @@ import {
   KENYAN_CBC_SUBJECTS,
   MAX_FEE_VOTELINES,
   validatePasswordStrength,
+  type AcademicTerm,
+  type AcademicYear,
   type AdminAuditEntry,
   type AdmissionApplication,
   type AdmissionStage,
@@ -54,6 +57,7 @@ import {
   type BellScheduleRow,
   type BudgetAllocation,
   type BudgetApprovalStatus,
+  type CalendarEntityStatus,
   type CbcClusterId,
   type CreditNoteRecord,
   type CurrencyCode,
@@ -82,6 +86,8 @@ import {
   type IndependentVotelineItem,
   type IndependentVotelinePayment,
   type LeaveOutChit,
+  type LifecycleAuditAction,
+  type LifecycleAuditEntry,
   type MpesaEnvironment,
   type MpesaTransactionLog,
   type NonTeachingStaffProfile,
@@ -95,6 +101,10 @@ import {
   type PayrollEntry,
   type PayrollStatutoryRateSchedule,
   type PayrollStatus,
+  type PromotionAction,
+  type PromotionExecuteItem,
+  type PromotionExecuteResult,
+  type PromotionPreviewRow,
   type PublicSchoolDirectoryItem,
   type ReconciliationChannel,
   type ReconciliationLine,
@@ -103,6 +113,9 @@ import {
   type StaffAttendanceRecord,
   type StaffCategory,
   type Student,
+  type StudentImportResult,
+  type StudentImportRowValidation,
+  type StudentStatus,
   type SubjectTimetableConstraint,
   type SubscriptionCycle,
   type SuperAdminTenantSummary,
@@ -1161,6 +1174,124 @@ export class TenantStore {
             }
           });
 
+          if (!Array.isArray(parsed.academicYears)) {
+            parsed.academicYears = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.academicTerms)) {
+            parsed.academicTerms = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.lifecycleAuditLogs)) {
+            parsed.lifecycleAuditLogs = [];
+            dirty = true;
+          }
+
+          parsed.tenants.forEach((t) => {
+            let tenantYears = parsed.academicYears!.filter((y) => y.tenantId === t.id);
+            if (tenantYears.length === 0) {
+              const yearId = `ay-${t.id.replace(/[^a-z0-9]/gi, '').slice(0, 8)}-${randomUUID().slice(0, 4)}`;
+              const yr: AcademicYear = {
+                id: yearId,
+                tenantId: t.id,
+                name: t.academicYear || '2026–2027',
+                startDate: '2026-09-01',
+                endDate: '2027-07-31',
+                status: 'Open',
+                isCurrent: true,
+                createdAt: t.createdAt || new Date().toISOString(),
+              };
+              parsed.academicYears!.push(yr);
+              tenantYears = [yr];
+              dirty = true;
+            }
+            const currentYear = tenantYears.find((y) => y.isCurrent) || tenantYears[0];
+            let tenantTerms = parsed.academicTerms!.filter((term) => term.tenantId === t.id);
+            if (tenantTerms.length === 0) {
+              const t1: AcademicTerm = {
+                id: `term-${t.id.replace(/[^a-z0-9]/gi, '').slice(0, 8)}-1`,
+                tenantId: t.id,
+                academicYearId: currentYear.id,
+                name: t.currentTerm || 'Term 1',
+                startDate: '2026-09-01',
+                endDate: '2026-12-15',
+                status: 'Open',
+                isCurrent: true,
+                createdAt: t.createdAt || new Date().toISOString(),
+              };
+              parsed.academicTerms!.push(t1);
+              tenantTerms = [t1];
+              dirty = true;
+            }
+            const currentTerm = tenantTerms.find((term) => term.isCurrent) || tenantTerms[0];
+
+            const matchTerm = (termName?: string, dateStr?: string): AcademicTerm => {
+              if (dateStr) {
+                const byDate = tenantTerms.find(
+                  (tr) => tr.startDate <= dateStr && dateStr <= tr.endDate
+                );
+                if (byDate) return byDate;
+              }
+              if (termName) {
+                const clean = termName.trim().toLowerCase();
+                const base = clean.replace(/\s*\([^)]*\)\s*/g, '').trim();
+                const byName =
+                  tenantTerms.find((tr) => tr.name.trim().toLowerCase() === clean) ||
+                  tenantTerms.find(
+                    (tr) =>
+                      tr.name.trim().toLowerCase().replace(/\s*\([^)]*\)\s*/g, '').trim() === base
+                  );
+                if (byName) return byName;
+              }
+              return currentTerm;
+            };
+
+            parsed.examCycles.forEach((cyc) => {
+              if (cyc.tenantId === t.id && !cyc.termId) {
+                const matched = matchTerm(cyc.term, cyc.startDate);
+                cyc.termId = matched.id;
+                cyc.academicYearId = matched.academicYearId;
+                dirty = true;
+              }
+            });
+            parsed.attendance.forEach((att) => {
+              if (att.tenantId === t.id && !att.termId) {
+                att.termId = matchTerm(undefined, att.date).id;
+                dirty = true;
+              }
+            });
+            parsed.leaveOutChits.forEach((chit) => {
+              if (chit.tenantId === t.id && !chit.termId) {
+                chit.termId = matchTerm(undefined, chit.startDate).id;
+                dirty = true;
+              }
+            });
+            parsed.feeStructures.forEach((fsItem) => {
+              if (fsItem.tenantId === t.id && !fsItem.termId) {
+                fsItem.termId = matchTerm(fsItem.term).id;
+                dirty = true;
+              }
+            });
+            parsed.invoices.forEach((inv) => {
+              if (inv.tenantId === t.id && !inv.termId) {
+                inv.termId = matchTerm(inv.term).id;
+                dirty = true;
+              }
+            });
+            parsed.independentVotelines!.forEach((ivl) => {
+              if (ivl.tenantId === t.id && !ivl.termId) {
+                ivl.termId = matchTerm(ivl.term).id;
+                dirty = true;
+              }
+            });
+            parsed.feeWaivers!.forEach((wv) => {
+              if (wv.tenantId === t.id && !wv.termId) {
+                wv.termId = matchTerm(wv.term).id;
+                dirty = true;
+              }
+            });
+          });
+
     return { state: parsed, dirty };
   }
 
@@ -1423,13 +1554,15 @@ export class TenantStore {
           : 'Growth';
       byPlan[plan] += 1;
 
-      const tenantStudents = this.state.students.filter((s) => s.tenantId === tenant.id);
-      const activeLearners = tenantStudents.filter((s) => s.status === 'Active').length;
+      const tenantStudents = this.state.students.filter((s) => s.tenantId === tenant.id && !s.deleted);
+      const activeLearners = tenantStudents.filter(
+        (s) => s.status === 'Active' || s.status === 'On Leave'
+      ).length;
       const cap =
         typeof tenant.learnerCap === 'number' && tenant.learnerCap > 0
           ? tenant.learnerCap
           : DEFAULT_TIER_LEARNER_CAPS[plan];
-      const utilizationPct = cap > 0 ? Math.min(999, Math.round((tenantStudents.length / cap) * 1000) / 10) : 0;
+      const utilizationPct = cap > 0 ? Math.min(999, Math.round((activeLearners / cap) * 1000) / 10) : 0;
 
       totalCapacity += cap;
       totalEnrolled += tenantStudents.length;
@@ -1529,13 +1662,27 @@ export class TenantStore {
     };
   }
 
-  private assertLearnerCap(tenant: Tenant) {
-    const cap =
-      typeof tenant.learnerCap === 'number' && tenant.learnerCap > 0
-        ? tenant.learnerCap
-        : DEFAULT_TIER_LEARNER_CAPS[tenant.plan] || 600;
-    const currentCount = this.state.students.filter((s) => s.tenantId === tenant.id).length;
-    if (currentCount >= cap) {
+  private countEnrolledLearnersForCap(tenantId: string): number {
+    return this.state.students.filter(
+      (s) =>
+        s.tenantId === tenantId &&
+        !s.deleted &&
+        s.status !== 'Graduated' &&
+        s.status !== 'Transferred' &&
+        s.status !== 'Withdrawn'
+    ).length;
+  }
+
+  private getTenantLearnerCap(tenant: Tenant): number {
+    return typeof tenant.learnerCap === 'number' && tenant.learnerCap > 0
+      ? tenant.learnerCap
+      : DEFAULT_TIER_LEARNER_CAPS[tenant.plan] || 600;
+  }
+
+  private assertLearnerCap(tenant: Tenant, additionalCount = 1) {
+    const cap = this.getTenantLearnerCap(tenant);
+    const currentCount = this.countEnrolledLearnersForCap(tenant.id);
+    if (currentCount + additionalCount > cap) {
       throw new ConflictError(
         `Learner cap reached (${currentCount}/${cap}) for ${tenant.name} (${tenant.plan} tier). Raise learner cap or upgrade subscription in the Developer Panel.`,
         409
@@ -1562,7 +1709,7 @@ export class TenantStore {
 
   getSuperAdminOverview(): SuperAdminTenantSummary[] {
     return this.state.tenants.map((tenant) => {
-      const tenantStudents = this.state.students.filter((s) => s.tenantId === tenant.id);
+      const tenantStudents = this.state.students.filter((s) => s.tenantId === tenant.id && !s.deleted);
       const tenantInvoices = this.state.invoices.filter((i) => i.tenantId === tenant.id);
       const totalBilled = tenantInvoices.reduce((acc, inv) => acc + inv.totalAmount, 0);
       const totalCollected = tenantInvoices.reduce((acc, inv) => acc + inv.paidAmount, 0);
@@ -1588,7 +1735,14 @@ export class TenantStore {
 
   getWorkspace(tenantId: string, authUser?: TenantUser): TenantWorkspaceData {
     const tenant = this.requireTenant(tenantId);
-    const allStudents = this.state.students.filter((s) => s.tenantId === tenantId);
+    const tenantStudentsAll = this.state.students.filter((s) => s.tenantId === tenantId);
+    const allStudents = tenantStudentsAll.filter((s) => !s.deleted);
+    const archivedStudentsCount = tenantStudentsAll.filter((s) => Boolean(s.deleted)).length;
+    const allYears = (this.state.academicYears || []).filter((y) => y.tenantId === tenantId);
+    const allTerms = (this.state.academicTerms || []).filter((t) => t.tenantId === tenantId);
+    const allLifecycleAudit = (this.state.lifecycleAuditLogs || [])
+      .filter((l) => l.tenantId === tenantId)
+      .slice(0, 200);
     const allAdmissions = this.state.admissions.filter((a) => a.tenantId === tenantId);
     const allTimetable = this.state.timetable.filter((t) => t.tenantId === tenantId);
     const allAttendance = this.state.attendance.filter((a) => a.tenantId === tenantId);
@@ -1619,6 +1773,64 @@ export class TenantStore {
     );
     const allNotifications = this.state.notifications.filter((n) => n.tenantId === tenantId);
 
+    if (authUser?.role === 'Student') {
+      const ownStudent = allStudents.find(
+        (s) =>
+          (authUser.studentId && s.id === authUser.studentId) ||
+          s.studentUserId === authUser.id
+      );
+      const linked = ownStudent ? [ownStudent] : [];
+      const ownIds = new Set(linked.map((s) => s.id));
+      const ownGradeSections = new Set(linked.map((s) => `${s.grade}::${s.section}`));
+      const publishedCycles = allExamCycles.filter((c) => c.status === 'Published');
+      const publishedCycleIds = new Set(publishedCycles.map((c) => c.id));
+
+      return {
+        tenant,
+        tenants: [tenant],
+        academicYears: allYears,
+        academicTerms: allTerms,
+        students: linked,
+        archivedStudentsCount: 0,
+        lifecycleAuditLogs: [],
+        admissions: [],
+        timetable: allTimetable.filter((slot) =>
+          ownGradeSections.has(`${slot.grade}::${slot.section}`)
+        ),
+        attendance: allAttendance.filter((a) => ownIds.has(a.studentId)),
+        staffAttendance: [],
+        leaveOutChits: allLeaveChits.filter((c) => ownIds.has(c.studentId)),
+        examCycles: publishedCycles,
+        examResults: allExamResults.filter(
+          (r) => ownIds.has(r.studentId) && publishedCycleIds.has(r.examCycleId)
+        ),
+        feeStructures: [],
+        invoices: [],
+        creditNotes: [],
+        feeWaivers: [],
+        independentVotelines: [],
+        mpesaTransactions: [],
+        expenses: [],
+        etimsChecks: [],
+        reconciliationLines: [],
+        payrollEntries: [],
+        budgets: [],
+        approvalRecords: [],
+        announcements: allAnnouncements.filter(
+          (a) => a.audience === 'All School' || a.audience === 'Students'
+        ),
+        messages: [],
+        whatsappDispatches: [],
+        notifications: allNotifications.filter(
+          (n) =>
+            n.category === 'announcement' ||
+            n.category === 'exam' ||
+            n.category === 'timetable' ||
+            n.category === 'attendance'
+        ),
+      };
+    }
+
     if (authUser?.role === 'Parent') {
       const userEmail = authUser.email.trim().toLowerCase();
       const linkedStudents = allStudents.filter(
@@ -1635,7 +1847,11 @@ export class TenantStore {
       return {
         tenant,
         tenants: [tenant],
+        academicYears: allYears,
+        academicTerms: allTerms,
         students: linkedStudents,
+        archivedStudentsCount: 0,
+        lifecycleAuditLogs: [],
         admissions: [],
         timetable: allTimetable.filter((slot) =>
           childGradeSections.has(`${slot.grade}::${slot.section}`)
@@ -1674,7 +1890,11 @@ export class TenantStore {
       return {
         tenant,
         tenants: [tenant],
+        academicYears: allYears,
+        academicTerms: allTerms,
         students: allStudents,
+        archivedStudentsCount: 0,
+        lifecycleAuditLogs: [],
         admissions: allAdmissions,
         timetable: allTimetable,
         attendance: allAttendance,
@@ -1705,7 +1925,11 @@ export class TenantStore {
       return {
         tenant,
         tenants: [tenant],
+        academicYears: allYears,
+        academicTerms: allTerms,
         students: allStudents,
+        archivedStudentsCount: 0,
+        lifecycleAuditLogs: [],
         admissions: [],
         timetable: [],
         attendance: [],
@@ -1737,7 +1961,11 @@ export class TenantStore {
       return {
         tenant,
         tenants: [tenant],
+        academicYears: allYears,
+        academicTerms: allTerms,
         students: allStudents,
+        archivedStudentsCount,
+        lifecycleAuditLogs: allLifecycleAudit,
         admissions: allAdmissions,
         timetable: allTimetable,
         attendance: allAttendance,
@@ -1767,7 +1995,11 @@ export class TenantStore {
     return {
       tenant,
       tenants: this.state.tenants,
+      academicYears: allYears,
+      academicTerms: allTerms,
       students: allStudents,
+      archivedStudentsCount,
+      lifecycleAuditLogs: allLifecycleAudit,
       admissions: allAdmissions,
       timetable: allTimetable,
       attendance: allAttendance,
@@ -1920,6 +2152,33 @@ export class TenantStore {
 
     this.state.tenants.push(tenant);
 
+    const nowIso = new Date().toISOString();
+    const yearId = `ay-${randomUUID().slice(0, 8)}`;
+    const termId = `term-${randomUUID().slice(0, 8)}`;
+    if (!Array.isArray(this.state.academicYears)) this.state.academicYears = [];
+    if (!Array.isArray(this.state.academicTerms)) this.state.academicTerms = [];
+    this.state.academicYears.push({
+      id: yearId,
+      tenantId: id,
+      name: tenant.academicYear,
+      startDate: '2026-09-01',
+      endDate: '2027-07-31',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: nowIso,
+    });
+    this.state.academicTerms.push({
+      id: termId,
+      tenantId: id,
+      academicYearId: yearId,
+      name: tenant.currentTerm || 'Term 1',
+      startDate: '2026-09-01',
+      endDate: '2026-12-15',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: nowIso,
+    });
+
     // Seed default fee structure for first grade so billing works immediately (scaled to tenant currency)
     const isKes = resolvedCurrency === 'KES';
     const defTuition = isKes ? 32000 : 3800;
@@ -1929,6 +2188,7 @@ export class TenantStore {
     this.state.feeStructures.push({
       id: `fs-${randomUUID().slice(0, 6)}`,
       tenantId: id,
+      termId,
       grade: tenant.grades[0],
       term: tenant.currentTerm,
       votelines: [
@@ -1965,6 +2225,8 @@ export class TenantStore {
       {
         id: `exm-${randomUUID().slice(0, 6)}`,
         tenantId: id,
+        academicYearId: yearId,
+        termId,
         title: `${termLabel} Opening Exam`,
         term: termLabel,
         startDate: '2026-09-07',
@@ -1975,6 +2237,8 @@ export class TenantStore {
       {
         id: `exm-${randomUUID().slice(0, 6)}`,
         tenantId: id,
+        academicYearId: yearId,
+        termId,
         title: `${termLabel} Mid-Term Exam`,
         term: termLabel,
         startDate: '2026-10-12',
@@ -1985,6 +2249,8 @@ export class TenantStore {
       {
         id: `exm-${randomUUID().slice(0, 6)}`,
         tenantId: id,
+        academicYearId: yearId,
+        termId,
         title: `${termLabel} End of Term Exam`,
         term: termLabel,
         startDate: '2026-11-20',
@@ -2211,6 +2477,11 @@ export class TenantStore {
     }
     this.state.notifications = this.state.notifications.filter((n) => n.tenantId !== tenantId);
     this.state.users = (this.state.users || []).filter((u) => u.tenantId !== tenantId);
+    this.state.academicYears = (this.state.academicYears || []).filter((y) => y.tenantId !== tenantId);
+    this.state.academicTerms = (this.state.academicTerms || []).filter((t) => t.tenantId !== tenantId);
+    this.state.lifecycleAuditLogs = (this.state.lifecycleAuditLogs || []).filter(
+      (l) => l.tenantId !== tenantId
+    );
 
     this.persist();
     this.onBroadcast?.(tenant.id, 'workspace:sync', {
@@ -3057,6 +3328,30 @@ export class TenantStore {
         );
       }
       emailDomain = this.resolveTenantEmailDomain(tenant);
+
+      if (stored.role === 'Student') {
+        if (!tenant.studentPortalEnabled) {
+          throw new ConflictError(
+            `Student portal login is currently disabled for ${tenant.name}. Ask your school administrator to enable Student Portal access.`,
+            403
+          );
+        }
+        const linkedStudent = this.state.students.find(
+          (s) =>
+            s.tenantId === tenant!.id &&
+            !s.deleted &&
+            ((stored.studentId && s.id === stored.studentId) || s.studentUserId === stored.id)
+        );
+        if (!linkedStudent) {
+          throw new ConflictError('No active learner profile is linked to this student account.', 403);
+        }
+        if (linkedStudent.status === 'Transferred' || linkedStudent.status === 'Withdrawn') {
+          throw new ConflictError(
+            `Student portal access is deactivated (${linkedStudent.status}).`,
+            403
+          );
+        }
+      }
     }
 
     stored.lastLoginAt = new Date().toISOString();
@@ -3931,7 +4226,7 @@ export class TenantStore {
     const normPhone = guardianPhone.trim();
     const normEmail = guardianEmail.trim().toLowerCase();
     return this.state.students.filter((s) => {
-      if (s.tenantId !== tenantId || s.status !== 'Active') return false;
+      if (s.tenantId !== tenantId || s.deleted || s.status !== 'Active') return false;
       if (excludeStudentId && s.id === excludeStudentId) return false;
       const samePhone = Boolean(normPhone && s.guardianPhone.trim() === normPhone);
       const sameEmail = Boolean(normEmail && s.guardianEmail.trim().toLowerCase() === normEmail);
@@ -4227,15 +4522,17 @@ export class TenantStore {
         this.state.feeStructures.find((f) => f.tenantId === tenantId);
       const totalAmount = feeStruct ? feeStruct.totalFee : 4800;
 
+      const currentTermEntity = this.resolveTenantTerm(tenantId, { termName: tenant.currentTerm });
       generatedInvoice = {
         id: `inv-${randomUUID().slice(0, 8)}`,
         tenantId,
+        termId: currentTermEntity?.id,
         invoiceNumber: this.nextInvoiceNumber(tenant),
         studentId: enrolledStudent.id,
         studentName: enrolledStudent.fullName,
         studentCode: enrolledStudent.studentCode,
         grade: enrolledStudent.grade,
-        term: tenant.currentTerm,
+        term: currentTermEntity?.name || tenant.currentTerm,
         dueDate: '2026-12-01',
         totalAmount,
         paidAmount: 0,
@@ -4283,7 +4580,8 @@ export class TenantStore {
       guardianPhone: string;
       guardianEmail?: string;
       enrolledAt?: string;
-    }
+    },
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
   ): { student: Student; invoice: FeeInvoice } {
     const tenant = this.requireTenant(tenantId);
     this.assertLearnerCap(tenant);
@@ -4309,7 +4607,10 @@ export class TenantStore {
         : this.nextUniqueUpi(tenantId);
 
     const dupCode = this.state.students.some(
-      (s) => s.tenantId === tenantId && s.studentCode.trim().toUpperCase() === studentCode
+      (s) =>
+        s.tenantId === tenantId &&
+        !s.deleted &&
+        s.studentCode.trim().toUpperCase() === studentCode
     );
     if (dupCode) {
       throw new ConflictError(
@@ -4318,7 +4619,7 @@ export class TenantStore {
       );
     }
     const dupUpi = this.state.students.some(
-      (s) => s.tenantId === tenantId && s.upi.trim().toUpperCase() === upi
+      (s) => s.tenantId === tenantId && !s.deleted && s.upi.trim().toUpperCase() === upi
     );
     if (dupUpi) {
       throw new ConflictError(
@@ -4352,15 +4653,17 @@ export class TenantStore {
       this.state.feeStructures.find((f) => f.tenantId === tenantId);
     const totalAmount = feeStruct ? feeStruct.totalFee : 4800;
 
+    const currentTermEntity = this.resolveTenantTerm(tenantId, { termName: tenant.currentTerm });
     const invoice: FeeInvoice = {
       id: `inv-${randomUUID().slice(0, 8)}`,
       tenantId,
+      termId: currentTermEntity?.id,
       invoiceNumber: this.nextInvoiceNumber(tenant),
       studentId: student.id,
       studentName: student.fullName,
       studentCode: student.studentCode,
       grade: student.grade,
-      term: tenant.currentTerm,
+      term: currentTermEntity?.name || tenant.currentTerm,
       dueDate: '2026-12-01',
       totalAmount,
       paidAmount: 0,
@@ -4371,6 +4674,18 @@ export class TenantStore {
     };
     this.applySiblingDiscountIfEligible(tenant, student, invoice);
     this.state.invoices.unshift(invoice);
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'STUDENT_ENROLLED',
+      'Student',
+      student.id,
+      `Enrolled ${student.fullName} (${student.studentCode}) into ${student.grade} ${student.section}.`,
+      undefined,
+      null,
+      { studentCode: student.studentCode, grade: student.grade, section: student.section }
+    );
 
     this.persist();
     this.pushNotification(
@@ -5623,11 +5938,12 @@ export class TenantStore {
       days: number;
       reason: string;
       issuedBy?: string;
+      termId?: string;
     }
   ): LeaveOutChit {
     this.requireTenant(tenantId);
     const student = this.state.students.find(
-      (s) => s.id === input.studentId && s.tenantId === tenantId
+      (s) => s.id === input.studentId && s.tenantId === tenantId && !s.deleted
     );
     if (!student) {
       throw new ConflictError('Selected student not found in this school.', 404);
@@ -5640,6 +5956,11 @@ export class TenantStore {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
       throw new ConflictError('Provide a valid start date (YYYY-MM-DD).', 400);
     }
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: input.termId,
+      date: startDate,
+      actionLabel: 'Issuing a leave out chit',
+    });
     const days = Math.max(1, Math.min(90, Math.round(Number(input.days) || 1)));
     const endDate = addDaysIso(startDate, days - 1);
     const issuedBy = (input.issuedBy || '').trim() || 'Administration Desk';
@@ -5648,6 +5969,7 @@ export class TenantStore {
     const chit: LeaveOutChit = {
       id: `loc-${randomUUID().slice(0, 8)}`,
       tenantId,
+      termId: resolvedTerm?.id,
       studentId: student.id,
       studentName: student.fullName,
       studentCode: student.studentCode,
@@ -5672,6 +5994,7 @@ export class TenantStore {
       );
       if (existing) {
         existing.status = 'Absent';
+        existing.termId = resolvedTerm?.id || existing.termId;
         existing.remarks = chitRemark;
         existing.recordedBy = issuedBy;
         existing.updatedAt = now;
@@ -5679,6 +6002,7 @@ export class TenantStore {
         this.state.attendance.push({
           id: `att-${targetDate}-${student.id}`,
           tenantId,
+          termId: resolvedTerm?.id,
           date: targetDate,
           grade: student.grade,
           section: student.section,
@@ -5713,6 +6037,11 @@ export class TenantStore {
     if (!chit) {
       throw new ConflictError('Leave out chit not found.', 404);
     }
+    this.assertTermOpen(tenantId, {
+      termId: chit.termId,
+      date: chit.startDate,
+      actionLabel: 'Deleting a leave out chit',
+    });
     this.state.leaveOutChits = this.state.leaveOutChits.filter(
       (c) => !(c.id === chitId && c.tenantId === tenantId)
     );
@@ -5777,6 +6106,7 @@ export class TenantStore {
       date: string;
       grade: string;
       section: string;
+      termId?: string;
       recordedBy: string;
       actorRole?: UserRole;
       teacherId?: string;
@@ -5801,12 +6131,20 @@ export class TenantStore {
       }
     }
 
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: input.termId,
+      date: input.date,
+      actionLabel: 'Marking attendance',
+    });
+
     const now = new Date().toISOString();
     const saved: AttendanceRecord[] = [];
     const unexcusedAbsences: string[] = [];
 
     for (const entry of input.entries) {
-      const student = this.state.students.find((s) => s.id === entry.studentId && s.tenantId === tenantId);
+      const student = this.state.students.find(
+        (s) => s.id === entry.studentId && s.tenantId === tenantId && !s.deleted
+      );
       if (!student) continue;
 
       const activeChit = this.state.leaveOutChits.find(
@@ -5831,6 +6169,7 @@ export class TenantStore {
 
       if (existing) {
         existing.status = resolvedStatus;
+        existing.termId = resolvedTerm?.id || existing.termId;
         existing.remarks = resolvedRemarks;
         existing.recordedBy = input.recordedBy;
         existing.updatedAt = now;
@@ -5839,6 +6178,7 @@ export class TenantStore {
         const rec: AttendanceRecord = {
           id: `att-${input.date}-${student.id}`,
           tenantId,
+          termId: resolvedTerm?.id,
           date: input.date,
           grade: student.grade,
           section: student.section,
@@ -5969,14 +6309,22 @@ export class TenantStore {
   // Exams & Assessment
   createExamCycle(
     tenantId: string,
-    input: { title: string; term: string; startDate: string; endDate: string }
+    input: { title: string; term: string; termId?: string; startDate: string; endDate: string }
   ): ExamCycle {
     const tenant = this.requireTenant(tenantId);
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: input.termId,
+      termName: (input.term || '').trim() || tenant.currentTerm,
+      date: input.startDate,
+      actionLabel: 'Creating an exam cycle',
+    });
     const cycle: ExamCycle = {
       id: `exm-${randomUUID().slice(0, 8)}`,
       tenantId,
+      academicYearId: resolvedTerm?.academicYearId,
+      termId: resolvedTerm?.id,
       title: input.title.trim(),
-      term: input.term.trim() || tenant.currentTerm,
+      term: resolvedTerm?.name || input.term.trim() || tenant.currentTerm,
       startDate: input.startDate,
       endDate: input.endDate,
       status: 'Grading',
@@ -6104,10 +6452,19 @@ export class TenantStore {
     actor?: Pick<TenantUser, 'role' | 'email' | 'fullName'>
   ): ExamResult {
     const tenant = this.requireTenant(tenantId);
-    const student = this.state.students.find((s) => s.id === input.studentId && s.tenantId === tenantId);
+    const student = this.state.students.find(
+      (s) => s.id === input.studentId && s.tenantId === tenantId && !s.deleted
+    );
     if (!student) throw new ConflictError('Student not found in tenant.', 404);
     const cycle = this.state.examCycles.find((c) => c.id === input.examCycleId && c.tenantId === tenantId);
     if (!cycle) throw new ConflictError('Exam cycle not found in tenant.', 404);
+
+    this.assertTermOpen(tenantId, {
+      termId: cycle.termId,
+      termName: cycle.term,
+      date: cycle.startDate,
+      actionLabel: `Editing exam marks in "${cycle.title}"`,
+    });
 
     if (cycle.status === 'Published') {
       throw new ConflictError(
@@ -6249,6 +6606,13 @@ export class TenantStore {
       throw new ConflictError('Select a valid exam type / cycle.', 404);
     }
 
+    this.assertTermOpen(tenantId, {
+      termId: cycle.termId,
+      termName: cycle.term,
+      date: cycle.startDate,
+      actionLabel: `Saving exam marks for "${cycle.title}"`,
+    });
+
     if (cycle.status === 'Published') {
       throw new ConflictError(
         `Exam cycle "${cycle.title}" is Published and locked. An Admin must unlock it with a reason before saving marks.`,
@@ -6320,7 +6684,7 @@ export class TenantStore {
       }
 
       const student = this.state.students.find(
-        (s) => s.id === entry.studentId && s.tenantId === tenantId
+        (s) => s.id === entry.studentId && s.tenantId === tenantId && !s.deleted
       );
       if (!student) {
         throw new ConflictError(`Student not found in this school (${entry.studentId}).`, 404);
@@ -6415,8 +6779,15 @@ export class TenantStore {
     const cycle = this.state.examCycles.find((c) => c.id === examCycleId && c.tenantId === tenantId);
     if (!cycle) throw new ConflictError('Exam cycle not found.', 404);
 
+    this.assertTermOpen(tenantId, {
+      termId: cycle.termId,
+      termName: cycle.term,
+      date: cycle.startDate,
+      actionLabel: `Publishing "${cycle.title}"`,
+    });
+
     const activeStudents = this.state.students.filter(
-      (s) => s.tenantId === tenantId && s.status === 'Active'
+      (s) => s.tenantId === tenantId && !s.deleted && s.status === 'Active'
     );
     const cycleResults = this.state.examResults.filter(
       (r) => r.tenantId === tenantId && r.examCycleId === examCycleId
@@ -6471,6 +6842,12 @@ export class TenantStore {
     }
     const cycle = this.state.examCycles.find((c) => c.id === examCycleId && c.tenantId === tenantId);
     if (!cycle) throw new ConflictError('Exam cycle not found.', 404);
+    this.assertTermOpen(tenantId, {
+      termId: cycle.termId,
+      termName: cycle.term,
+      date: cycle.startDate,
+      actionLabel: `Unlocking "${cycle.title}"`,
+    });
     if (cycle.status !== 'Published') {
       throw new ConflictError(`Exam cycle "${cycle.title}" is not currently Published.`, 400);
     }
@@ -6501,6 +6878,7 @@ export class TenantStore {
     input: {
       grade: string;
       term: string;
+      termId?: string;
       votelines?: Array<{ id?: string; name: string; amount: number }>;
       tuitionFee?: number;
       labFee?: number;
@@ -6515,6 +6893,11 @@ export class TenantStore {
     if (!grade || !term) {
       throw new ConflictError('Grade and term are required for a fee structure.', 400);
     }
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: input.termId,
+      termName: term,
+      actionLabel: 'Updating fee structure',
+    });
 
     let normalizedVotelines: FeeVoteline[];
     if (Array.isArray(input.votelines)) {
@@ -6583,6 +6966,7 @@ export class TenantStore {
     const fsItem: FeeStructure = {
       id: `fs-${randomUUID().slice(0, 8)}`,
       tenantId,
+      termId: resolvedTerm?.id,
       grade,
       term,
       votelines: normalizedVotelines,
@@ -6600,25 +6984,35 @@ export class TenantStore {
 
   createInvoice(
     tenantId: string,
-    input: { studentId: string; term: string; dueDate: string; totalAmount: number },
+    input: { studentId: string; term: string; termId?: string; dueDate: string; totalAmount: number },
     actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
     ip?: string
   ): FeeInvoice {
     const tenant = this.requireTenant(tenantId);
-    const student = this.state.students.find((s) => s.id === input.studentId && s.tenantId === tenantId);
+    const student = this.state.students.find(
+      (s) => s.id === input.studentId && s.tenantId === tenantId && !s.deleted
+    );
     if (!student) throw new ConflictError('Student not found in tenant.', 404);
+
+    const requestedTermName = (input.term || '').trim() || tenant.currentTerm;
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: input.termId,
+      termName: requestedTermName,
+      actionLabel: 'Issuing a fee invoice',
+    });
 
     const amount = this.parseStrictPositiveAmount(input.totalAmount, 'Invoice amount');
 
     const invoice: FeeInvoice = {
       id: `inv-${randomUUID().slice(0, 8)}`,
       tenantId,
+      termId: resolvedTerm?.id,
       invoiceNumber: this.nextInvoiceNumber(tenant),
       studentId: student.id,
       studentName: student.fullName,
       studentCode: student.studentCode,
       grade: student.grade,
-      term: (input.term || '').trim() || tenant.currentTerm,
+      term: resolvedTerm?.name || requestedTermName,
       dueDate: input.dueDate || '2026-12-01',
       totalAmount: amount,
       paidAmount: 0,
@@ -6667,6 +7061,11 @@ export class TenantStore {
     const tenant = this.requireTenant(tenantId);
     const invoice = this.state.invoices.find((i) => i.id === invoiceId && i.tenantId === tenantId);
     if (!invoice) throw new ConflictError('Invoice not found.', 404);
+    this.assertTermOpen(tenantId, {
+      termId: invoice.termId,
+      termName: invoice.term,
+      actionLabel: `Recording payment on ${invoice.invoiceNumber}`,
+    });
 
     const amount = this.parseStrictPositiveAmount(input.amount, 'Payment amount');
     const validMethods = new Set<PaymentMethod>(['Bank Transfer', 'Card', 'Mobile Money', 'Cash']);
@@ -6846,6 +7245,12 @@ export class TenantStore {
         continue;
       }
 
+      this.assertTermOpen(tenantId, {
+        termId: targetInvoice.termId,
+        termName: targetInvoice.term,
+        actionLabel: `Batch payment for ${targetInvoice.invoiceNumber}`,
+      });
+
       prepared.push({
         invoice: targetInvoice,
         amount,
@@ -6966,6 +7371,11 @@ export class TenantStore {
 
     const invoice = this.state.invoices.find((i) => i.id === invoiceId && i.tenantId === tenantId);
     if (!invoice) throw new ConflictError('Invoice not found.', 404);
+    this.assertTermOpen(tenantId, {
+      termId: invoice.termId,
+      termName: invoice.term,
+      actionLabel: `Voiding payment on ${invoice.invoiceNumber}`,
+    });
     const payment = (invoice.payments || []).find((p) => p.id === paymentId);
     if (!payment) throw new ConflictError('Payment record not found on invoice.', 404);
     if (payment.isReversalEntry) {
@@ -7065,6 +7475,11 @@ export class TenantStore {
       (i) => i.id === input.invoiceId && i.tenantId === tenantId
     );
     if (!invoice) throw new ConflictError('Invoice not found.', 404);
+    this.assertTermOpen(tenantId, {
+      termId: invoice.termId,
+      termName: invoice.term,
+      actionLabel: `Issuing credit note on ${invoice.invoiceNumber}`,
+    });
 
     const amount = this.parseStrictPositiveAmount(input.amount, 'Credit note amount');
     const reason = (input.reason || '').trim();
@@ -7147,7 +7562,7 @@ export class TenantStore {
   ): { waiver: FeeWaiverRecord; invoice?: FeeInvoice } {
     const tenant = this.requireTenant(tenantId);
     const student = this.state.students.find(
-      (s) => s.id === input.studentId && s.tenantId === tenantId
+      (s) => s.id === input.studentId && s.tenantId === tenantId && !s.deleted
     );
     if (!student) throw new ConflictError('Student not found in tenant.', 404);
 
@@ -7170,6 +7585,12 @@ export class TenantStore {
         this.state.invoices.find(
           (i) => i.tenantId === tenantId && i.studentId === student.id && i.balance > 0
         );
+
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: targetInvoice?.termId,
+      termName: targetInvoice?.term || term,
+      actionLabel: 'Applying a fee waiver or bursary',
+    });
 
     const feeStruct = this.state.feeStructures.find(
       (f) => f.tenantId === tenantId && f.grade === student.grade && f.term === term
@@ -7200,6 +7621,7 @@ export class TenantStore {
     const waiver: FeeWaiverRecord = {
       id: `wvr-${randomUUID().slice(0, 8)}`,
       tenantId,
+      termId: resolvedTerm?.id,
       studentId: student.id,
       studentName: student.fullName,
       studentCode: student.studentCode,
@@ -7287,9 +7709,89 @@ export class TenantStore {
     return tenant;
   }
 
+  private carryForwardSingleStudentBalance(
+    tenant: Tenant,
+    student: Student,
+    fromTerm: string,
+    toTerm: string,
+    toTermId: string | undefined,
+    dueDate: string,
+    actorName: string
+  ): { invoice: FeeInvoice; carriedArrears: number } | null {
+    const tenantId = tenant.id;
+    const priorOpenInvoices = this.state.invoices.filter(
+      (i) =>
+        i.tenantId === tenantId &&
+        i.studentId === student.id &&
+        i.term === fromTerm &&
+        i.balance > 0 &&
+        !i.carriedForwardToTerm
+    );
+    const arrears = priorOpenInvoices.reduce((sum, inv) => sum + inv.balance, 0);
+    for (const inv of priorOpenInvoices) {
+      inv.carriedForwardToTerm = toTerm;
+      inv.balance = 0;
+      inv.status = 'Paid';
+    }
+
+    const feeStruct =
+      this.state.feeStructures.find(
+        (f) => f.tenantId === tenantId && f.grade === student.grade && f.term === toTerm
+      ) ||
+      this.state.feeStructures.find((f) => f.tenantId === tenantId && f.grade === student.grade) ||
+      this.state.feeStructures.find((f) => f.tenantId === tenantId);
+
+    const baseTermFee = feeStruct ? feeStruct.totalFee : 0;
+    const grossNewAmount = baseTermFee + arrears;
+    if (grossNewAmount <= 0 && (student.creditBalance || 0) <= 0) return null;
+
+    const nextInv: FeeInvoice = {
+      id: `inv-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      termId: toTermId,
+      invoiceNumber: this.nextInvoiceNumber(tenant),
+      studentId: student.id,
+      studentName: student.fullName,
+      studentCode: student.studentCode,
+      grade: student.grade,
+      term: toTerm,
+      dueDate,
+      totalAmount: grossNewAmount,
+      carriedForwardFromAmount: arrears > 0 ? arrears : undefined,
+      paidAmount: 0,
+      balance: grossNewAmount,
+      status: 'Pending',
+      payments: [],
+      createdAt: new Date().toISOString(),
+    };
+    this.applySiblingDiscountIfEligible(tenant, student, nextInv);
+
+    // Apply any existing overpayment creditBalance from previous term
+    const availCredit = Math.max(0, Number(student.creditBalance || 0));
+    if (availCredit > 0 && nextInv.balance > 0) {
+      const appliedCredit = Math.min(availCredit, nextInv.balance);
+      student.creditBalance = availCredit - appliedCredit;
+      nextInv.payments.push({
+        id: `pay-${randomUUID().slice(0, 8)}`,
+        receiptNumber: this.nextReceiptNumber(tenantId),
+        amount: appliedCredit,
+        appliedAmount: appliedCredit,
+        creditedExcess: 0,
+        method: 'Bank Transfer',
+        reference: `CREDIT-CF-${fromTerm.replace(/\s+/g, '')}`,
+        paidAt: new Date().toISOString(),
+        recordedBy: `Credit Carry-Forward (${actorName})`,
+      });
+      this.recomputeInvoiceTotals(nextInv);
+    }
+
+    this.state.invoices.unshift(nextInv);
+    return { invoice: nextInv, carriedArrears: arrears };
+  }
+
   carryForwardTermBalances(
     tenantId: string,
-    input: { fromTerm?: string; toTerm: string; dueDate?: string },
+    input: { fromTerm?: string; toTerm: string; toTermId?: string; dueDate?: string },
     actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
     ip?: string
   ): { createdInvoices: FeeInvoice[]; carriedStudentsCount: number; updatedTerm: string } {
@@ -7299,84 +7801,42 @@ export class TenantStore {
     if (!toTerm || toTerm.toLowerCase() === fromTerm.toLowerCase()) {
       throw new ConflictError('Specify a new target term different from the current term.', 400);
     }
+    const resolvedTargetTerm = this.assertTermOpen(tenantId, {
+      termId: input.toTermId,
+      termName: toTerm,
+      exactTermNameOnly: true,
+      actionLabel: `Carrying fee balances forward to ${toTerm}`,
+    });
+    const effectiveToTerm = resolvedTargetTerm?.name || toTerm;
     const dueDate = (input.dueDate || '').trim() || addDaysIso(new Date().toISOString().slice(0, 10), 30);
+    const actorName = actor.fullName || actor.email;
 
     const createdInvoices: FeeInvoice[] = [];
     const activeStudents = this.state.students.filter(
-      (s) => s.tenantId === tenantId && s.status === 'Active'
+      (s) => s.tenantId === tenantId && !s.deleted && s.status === 'Active'
     );
 
     for (const student of activeStudents) {
-      const priorOpenInvoices = this.state.invoices.filter(
-        (i) =>
-          i.tenantId === tenantId &&
-          i.studentId === student.id &&
-          i.term === fromTerm &&
-          i.balance > 0 &&
-          !i.carriedForwardToTerm
-      );
-      const arrears = priorOpenInvoices.reduce((sum, inv) => sum + inv.balance, 0);
-      for (const inv of priorOpenInvoices) {
-        inv.carriedForwardToTerm = toTerm;
-        inv.balance = 0;
-        inv.status = 'Paid';
-      }
-
-      const feeStruct =
-        this.state.feeStructures.find(
-          (f) => f.tenantId === tenantId && f.grade === student.grade && f.term === toTerm
-        ) ||
-        this.state.feeStructures.find((f) => f.tenantId === tenantId && f.grade === student.grade) ||
-        this.state.feeStructures.find((f) => f.tenantId === tenantId);
-
-      const baseTermFee = feeStruct ? feeStruct.totalFee : 0;
-      const grossNewAmount = baseTermFee + arrears;
-      if (grossNewAmount <= 0 && (student.creditBalance || 0) <= 0) continue;
-
-      const nextInv: FeeInvoice = {
-        id: `inv-${randomUUID().slice(0, 8)}`,
-        tenantId,
-        invoiceNumber: this.nextInvoiceNumber(tenant),
-        studentId: student.id,
-        studentName: student.fullName,
-        studentCode: student.studentCode,
-        grade: student.grade,
-        term: toTerm,
+      const res = this.carryForwardSingleStudentBalance(
+        tenant,
+        student,
+        fromTerm,
+        effectiveToTerm,
+        resolvedTargetTerm?.id,
         dueDate,
-        totalAmount: grossNewAmount,
-        carriedForwardFromAmount: arrears > 0 ? arrears : undefined,
-        paidAmount: 0,
-        balance: grossNewAmount,
-        status: 'Pending',
-        payments: [],
-        createdAt: new Date().toISOString(),
-      };
-      this.applySiblingDiscountIfEligible(tenant, student, nextInv);
-
-      // Apply any existing overpayment creditBalance from previous term
-      const availCredit = Math.max(0, Number(student.creditBalance || 0));
-      if (availCredit > 0 && nextInv.balance > 0) {
-        const appliedCredit = Math.min(availCredit, nextInv.balance);
-        student.creditBalance = availCredit - appliedCredit;
-        nextInv.payments.push({
-          id: `pay-${randomUUID().slice(0, 8)}`,
-          receiptNumber: this.nextReceiptNumber(tenantId),
-          amount: appliedCredit,
-          appliedAmount: appliedCredit,
-          creditedExcess: 0,
-          method: 'Bank Transfer',
-          reference: `CREDIT-CF-${fromTerm.replace(/\s+/g, '')}`,
-          paidAt: new Date().toISOString(),
-          recordedBy: `Credit Carry-Forward (${actor.fullName || actor.email})`,
-        });
-        this.recomputeInvoiceTotals(nextInv);
+        actorName
+      );
+      if (res) {
+        createdInvoices.push(res.invoice);
       }
-
-      this.state.invoices.unshift(nextInv);
-      createdInvoices.push(nextInv);
     }
 
-    tenant.currentTerm = toTerm;
+    tenant.currentTerm = effectiveToTerm;
+    if (resolvedTargetTerm) {
+      (this.state.academicTerms || []).forEach((t) => {
+        if (t.tenantId === tenantId) t.isCurrent = t.id === resolvedTargetTerm.id;
+      });
+    }
     this.appendFinanceAudit(
       tenantId,
       actor,
@@ -7384,7 +7844,7 @@ export class TenantStore {
       'Tenant',
       tenantId,
       { fromTerm },
-      { toTerm, createdInvoicesCount: createdInvoices.length },
+      { toTerm: effectiveToTerm, createdInvoicesCount: createdInvoices.length },
       ip
     );
 
@@ -7392,15 +7852,15 @@ export class TenantStore {
     this.pushNotification(
       tenantId,
       'fee',
-      `Term Carry-Forward Complete (${toTerm})`,
-      `Carried arrears & credits from ${fromTerm} to ${toTerm} across ${createdInvoices.length} learner invoice(s).`,
+      `Term Carry-Forward Complete (${effectiveToTerm})`,
+      `Carried arrears & credits from ${fromTerm} to ${effectiveToTerm} across ${createdInvoices.length} learner invoice(s).`,
       'fees'
     );
     this.syncTenant(tenantId, 'fee:term-carried-forward');
     return {
       createdInvoices,
       carriedStudentsCount: createdInvoices.length,
-      updatedTerm: toTerm,
+      updatedTerm: effectiveToTerm,
     };
   }
 
@@ -7429,6 +7889,10 @@ export class TenantStore {
 
     const scope = input.targetScope || 'student';
     const term = (input.term || '').trim() || tenant.currentTerm;
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termName: term,
+      actionLabel: 'Adding independent votelines',
+    });
     const note = (input.note || '').trim() || undefined;
     const recordedBy = (input.recordedBy || '').trim() || actor?.fullName || 'Bursar Office';
 
@@ -7439,25 +7903,31 @@ export class TenantStore {
         throw new ConflictError('Select a target grade / class for the independent voteline.', 400);
       }
       const gradeStudents = this.state.students.filter(
-        (s) => s.tenantId === tenantId && s.grade === targetGrade
+        (s) => s.tenantId === tenantId && !s.deleted && s.grade === targetGrade
       );
       const activeGradeStudents = gradeStudents.filter((s) => s.status === 'Active');
       targetStudents = activeGradeStudents.length > 0 ? activeGradeStudents : gradeStudents;
     } else if (scope === 'all') {
-      const allTenantStudents = this.state.students.filter((s) => s.tenantId === tenantId);
+      const allTenantStudents = this.state.students.filter(
+        (s) => s.tenantId === tenantId && !s.deleted
+      );
       const activeStudents = allTenantStudents.filter((s) => s.status === 'Active');
       targetStudents = activeStudents.length > 0 ? activeStudents : allTenantStudents;
     } else {
       let stu: Student | undefined;
       if (input.studentId) {
-        stu = this.state.students.find((s) => s.id === input.studentId && s.tenantId === tenantId);
+        stu = this.state.students.find(
+          (s) => s.id === input.studentId && s.tenantId === tenantId && !s.deleted
+        );
       }
       if (!stu && input.invoiceId) {
         const inv = this.state.invoices.find(
           (i) => i.id === input.invoiceId && i.tenantId === tenantId
         );
         if (inv) {
-          stu = this.state.students.find((s) => s.id === inv.studentId && s.tenantId === tenantId);
+          stu = this.state.students.find(
+            (s) => s.id === inv.studentId && s.tenantId === tenantId && !s.deleted
+          );
         }
       }
       if (!stu) {
@@ -7491,13 +7961,14 @@ export class TenantStore {
       const item: IndependentVotelineItem = {
         id: `ivl-${randomUUID().slice(0, 8)}`,
         tenantId,
+        termId: resolvedTerm?.id,
         studentId: student.id,
         studentName: student.fullName,
         studentCode: student.studentCode,
         grade: student.grade,
         invoiceId: linkedInvoice?.id,
         invoiceNumber: linkedInvoice?.invoiceNumber,
-        term,
+        term: resolvedTerm?.name || term,
         name,
         amount,
         paidAmount: 0,
@@ -7558,6 +8029,11 @@ export class TenantStore {
     if (!item) {
       throw new ConflictError('Independent voteline record not found.', 404);
     }
+    this.assertTermOpen(tenantId, {
+      termId: item.termId,
+      termName: item.term,
+      actionLabel: `Recording payment on "${item.name}"`,
+    });
     if (item.balance <= 0) {
       throw new ConflictError('Independent voteline has no remaining balance.', 400);
     }
@@ -7632,6 +8108,11 @@ export class TenantStore {
     if (!item) {
       throw new ConflictError('Independent voteline record not found.', 404);
     }
+    this.assertTermOpen(tenantId, {
+      termId: item.termId,
+      termName: item.term,
+      actionLabel: `Voiding independent voteline "${item.name}"`,
+    });
     if (item.paidAmount > 0) {
       throw new ConflictError(
         `Cannot void independent voteline "${item.name}" after payments (${item.paidAmount}) have been posted.`,
@@ -9929,5 +10410,1502 @@ export class TenantStore {
     });
     this.persist();
     this.syncTenant(tenantId, 'notifications:read');
+  }
+
+  // =========================================================================
+  // Academic Calendar & Term Close / Reopen
+  // =========================================================================
+
+  private resolveTenantTerm(
+    tenantId: string,
+    opts?: { termId?: string; termName?: string; date?: string; exactTermNameOnly?: boolean }
+  ): AcademicTerm | undefined {
+    const terms = (this.state.academicTerms || []).filter((t) => t.tenantId === tenantId);
+    if (terms.length === 0) return undefined;
+
+    if (opts?.termId && opts.termId.trim()) {
+      const byId = terms.find((t) => t.id === opts.termId!.trim());
+      return byId;
+    }
+
+    if (opts?.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date.trim())) {
+      const d = opts.date.trim();
+      const byDate =
+        terms.find((t) => t.isCurrent && t.startDate <= d && d <= t.endDate) ||
+        terms.find((t) => t.startDate <= d && d <= t.endDate);
+      if (byDate) return byDate;
+    }
+
+    if (opts?.termName && opts.termName.trim()) {
+      const clean = opts.termName.trim().toLowerCase();
+      const base = clean.replace(/\s*\([^)]*\)\s*/g, '').trim();
+      const exact =
+        terms.find((t) => t.isCurrent && t.name.trim().toLowerCase() === clean) ||
+        terms.find((t) => t.name.trim().toLowerCase() === clean);
+      if (exact) return exact;
+      const baseMatch =
+        terms.find(
+          (t) =>
+            t.isCurrent &&
+            t.name.trim().toLowerCase().replace(/\s*\([^)]*\)\s*/g, '').trim() === base
+        ) ||
+        terms.find(
+          (t) => t.name.trim().toLowerCase().replace(/\s*\([^)]*\)\s*/g, '').trim() === base
+        );
+      if (baseMatch) return baseMatch;
+      if (opts.exactTermNameOnly) return undefined;
+    }
+
+    return terms.find((t) => t.isCurrent) || terms[0];
+  }
+
+  private assertTermOpen(
+    tenantId: string,
+    opts?: {
+      termId?: string;
+      termName?: string;
+      date?: string;
+      exactTermNameOnly?: boolean;
+      actionLabel?: string;
+    }
+  ): AcademicTerm | undefined {
+    const term = this.resolveTenantTerm(tenantId, opts);
+    if (opts?.termId && !term) {
+      throw new ConflictError('Specified academic term not found for this school.', 404);
+    }
+    if (term && term.status === 'Closed') {
+      throw new ConflictError(
+        `${opts?.actionLabel || 'This operation'} is locked because "${term.name}" is Closed. An Admin must reopen the term in School Settings before making changes.`,
+        409
+      );
+    }
+    return term;
+  }
+
+  private appendLifecycleAudit(
+    tenantId: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'> | undefined,
+    action: LifecycleAuditAction,
+    entity: LifecycleAuditEntry['entity'],
+    entityId: string,
+    summary: string,
+    reason?: string,
+    before?: unknown,
+    after?: unknown
+  ): LifecycleAuditEntry {
+    if (!Array.isArray(this.state.lifecycleAuditLogs)) {
+      this.state.lifecycleAuditLogs = [];
+    }
+    const entry: LifecycleAuditEntry = {
+      id: `laud-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      timestamp: new Date().toISOString(),
+      actorUserId: actor?.id || 'system',
+      who: actor?.fullName || actor?.email || 'System',
+      role: actor?.role || 'Admin',
+      action,
+      entity,
+      entityId,
+      summary,
+      ...(reason ? { reason } : {}),
+      ...(before !== undefined ? { before } : {}),
+      ...(after !== undefined ? { after } : {}),
+    };
+    this.state.lifecycleAuditLogs.unshift(entry);
+    if (this.state.lifecycleAuditLogs.length > 2000) {
+      this.state.lifecycleAuditLogs = this.state.lifecycleAuditLogs.slice(0, 2000);
+    }
+    return entry;
+  }
+
+  getLifecycleAuditLogs(tenantId: string, limit = 200): LifecycleAuditEntry[] {
+    this.requireTenant(tenantId);
+    const safeLimit = Math.max(1, Math.min(500, Math.round(limit)));
+    return (this.state.lifecycleAuditLogs || [])
+      .filter((l) => l.tenantId === tenantId)
+      .slice(0, safeLimit);
+  }
+
+  listAcademicCalendar(tenantId: string): {
+    academicYears: AcademicYear[];
+    academicTerms: AcademicTerm[];
+  } {
+    this.requireTenant(tenantId);
+    return {
+      academicYears: (this.state.academicYears || []).filter((y) => y.tenantId === tenantId),
+      academicTerms: (this.state.academicTerms || []).filter((t) => t.tenantId === tenantId),
+    };
+  }
+
+  createAcademicYear(
+    tenantId: string,
+    input: { name: string; startDate: string; endDate: string; setAsCurrent?: boolean },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): AcademicYear {
+    const tenant = this.requireTenant(tenantId);
+    const name = (input.name || '').trim();
+    const startDate = (input.startDate || '').trim();
+    const endDate = (input.endDate || '').trim();
+    if (!name) throw new ConflictError('Academic year name is required (e.g. 2027).', 400);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      throw new ConflictError('Provide valid YYYY-MM-DD start and end dates.', 400);
+    }
+    if (startDate >= endDate) {
+      throw new ConflictError('Academic year end date must be after start date.', 400);
+    }
+
+    if (!Array.isArray(this.state.academicYears)) this.state.academicYears = [];
+    const dup = this.state.academicYears.some(
+      (y) => y.tenantId === tenantId && y.name.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (dup) {
+      throw new ConflictError(`Academic year "${name}" already exists for ${tenant.name}.`, 409);
+    }
+
+    const existingForTenant = this.state.academicYears.filter((y) => y.tenantId === tenantId);
+    const makeCurrent = Boolean(input.setAsCurrent) || existingForTenant.length === 0;
+    if (makeCurrent) {
+      existingForTenant.forEach((y) => {
+        y.isCurrent = false;
+      });
+      tenant.academicYear = name;
+    }
+
+    const year: AcademicYear = {
+      id: `ay-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      name,
+      startDate,
+      endDate,
+      status: 'Open',
+      isCurrent: makeCurrent,
+      createdAt: new Date().toISOString(),
+    };
+    this.state.academicYears.push(year);
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'ACADEMIC_YEAR_CREATED',
+      'AcademicYear',
+      year.id,
+      `Created academic year "${year.name}" (${startDate} to ${endDate}).`,
+      undefined,
+      null,
+      year
+    );
+
+    this.persist();
+    this.syncTenant(tenantId, 'calendar:year-created');
+    return year;
+  }
+
+  createAcademicTerm(
+    tenantId: string,
+    input: {
+      academicYearId: string;
+      name: string;
+      startDate: string;
+      endDate: string;
+      setAsCurrent?: boolean;
+    },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): AcademicTerm {
+    const tenant = this.requireTenant(tenantId);
+    const year = (this.state.academicYears || []).find(
+      (y) => y.id === input.academicYearId && y.tenantId === tenantId
+    );
+    if (!year) {
+      throw new ConflictError('Selected academic year not found for this school.', 404);
+    }
+
+    const name = (input.name || '').trim();
+    const startDate = (input.startDate || '').trim();
+    const endDate = (input.endDate || '').trim();
+    if (!name) throw new ConflictError('Term name is required (e.g. Term 2).', 400);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      throw new ConflictError('Provide valid YYYY-MM-DD start and end dates.', 400);
+    }
+    if (startDate >= endDate) {
+      throw new ConflictError('Term end date must be after start date.', 400);
+    }
+
+    if (!Array.isArray(this.state.academicTerms)) this.state.academicTerms = [];
+    const dup = this.state.academicTerms.some(
+      (t) =>
+        t.tenantId === tenantId &&
+        t.academicYearId === year.id &&
+        t.name.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (dup) {
+      throw new ConflictError(
+        `Term "${name}" already exists inside academic year ${year.name}.`,
+        409
+      );
+    }
+
+    const existingTerms = this.state.academicTerms.filter((t) => t.tenantId === tenantId);
+    const makeCurrent = Boolean(input.setAsCurrent) || existingTerms.length === 0;
+    if (makeCurrent) {
+      existingTerms.forEach((t) => {
+        t.isCurrent = false;
+      });
+      (this.state.academicYears || []).forEach((y) => {
+        if (y.tenantId === tenantId) y.isCurrent = y.id === year.id;
+      });
+      tenant.currentTerm = name;
+      tenant.academicYear = year.name;
+    }
+
+    const term: AcademicTerm = {
+      id: `term-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      academicYearId: year.id,
+      name,
+      startDate,
+      endDate,
+      status: 'Open',
+      isCurrent: makeCurrent,
+      createdAt: new Date().toISOString(),
+    };
+    this.state.academicTerms.push(term);
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'ACADEMIC_TERM_CREATED',
+      'AcademicTerm',
+      term.id,
+      `Created term "${term.name}" in ${year.name} (${startDate} to ${endDate}).`,
+      undefined,
+      null,
+      term
+    );
+
+    this.persist();
+    this.syncTenant(tenantId, 'calendar:term-created');
+    return term;
+  }
+
+  setCurrentAcademicTerm(
+    tenantId: string,
+    termId: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): AcademicTerm {
+    const tenant = this.requireTenant(tenantId);
+    const terms = (this.state.academicTerms || []).filter((t) => t.tenantId === tenantId);
+    const target = terms.find((t) => t.id === termId);
+    if (!target) {
+      throw new ConflictError('Academic term not found.', 404);
+    }
+    const year = (this.state.academicYears || []).find(
+      (y) => y.id === target.academicYearId && y.tenantId === tenantId
+    );
+    terms.forEach((t) => {
+      t.isCurrent = t.id === target.id;
+    });
+    if (year) {
+      (this.state.academicYears || []).forEach((y) => {
+        if (y.tenantId === tenantId) y.isCurrent = y.id === year.id;
+      });
+      tenant.academicYear = year.name;
+    }
+    tenant.currentTerm = target.name;
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'TERM_SET_CURRENT',
+      'AcademicTerm',
+      target.id,
+      `Set active term to ${target.name}${year ? ` (${year.name})` : ''}.`
+    );
+
+    this.persist();
+    this.syncTenant(tenantId, 'calendar:term-current-updated');
+    return target;
+  }
+
+  closeAcademicTerm(
+    tenantId: string,
+    termId: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): AcademicTerm {
+    this.requireTenant(tenantId);
+    const target = (this.state.academicTerms || []).find(
+      (t) => t.id === termId && t.tenantId === tenantId
+    );
+    if (!target) {
+      throw new ConflictError('Academic term not found.', 404);
+    }
+    if (target.status === 'Closed') {
+      throw new ConflictError(`Term "${target.name}" is already closed.`, 409);
+    }
+    const actorName = actor.fullName || actor.email;
+    target.status = 'Closed';
+    target.closedAt = new Date().toISOString();
+    target.closedBy = actorName;
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'TERM_CLOSED',
+      'AcademicTerm',
+      target.id,
+      `Closed term "${target.name}". Exams, attendance, and fees for this term are now locked.`,
+      undefined,
+      { status: 'Open' },
+      { status: 'Closed', closedBy: actorName }
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'announcement',
+      `Academic Term Closed: ${target.name}`,
+      `${actorName} closed ${target.name}. Exam marks, attendance, and fee edits for this term are now locked.`,
+      'settings'
+    );
+    this.syncTenant(tenantId, 'calendar:term-closed');
+    return target;
+  }
+
+  reopenAcademicTerm(
+    tenantId: string,
+    termId: string,
+    reason: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): AcademicTerm {
+    this.requireTenant(tenantId);
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Only School Admin can reopen a closed academic term.', 403);
+    }
+    const cleanReason = (reason || '').trim();
+    if (cleanReason.length < 3) {
+      throw new ConflictError('Provide a reason before reopening a closed term.', 400);
+    }
+    const target = (this.state.academicTerms || []).find(
+      (t) => t.id === termId && t.tenantId === tenantId
+    );
+    if (!target) {
+      throw new ConflictError('Academic term not found.', 404);
+    }
+    if (target.status !== 'Closed') {
+      throw new ConflictError(`Term "${target.name}" is already open.`, 400);
+    }
+
+    const actorName = actor.fullName || actor.email;
+    target.status = 'Open';
+    target.reopenedAt = new Date().toISOString();
+    target.reopenedBy = actorName;
+    target.reopenReason = cleanReason;
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'TERM_REOPENED',
+      'AcademicTerm',
+      target.id,
+      `Reopened closed term "${target.name}" by ${actorName}.`,
+      cleanReason,
+      { status: 'Closed' },
+      { status: 'Open', reopenedBy: actorName, reopenReason: cleanReason }
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'announcement',
+      `Academic Term Reopened: ${target.name}`,
+      `${actorName} reopened ${target.name}. Reason: ${cleanReason}`,
+      'settings'
+    );
+    this.syncTenant(tenantId, 'calendar:term-reopened');
+    return target;
+  }
+
+  // =========================================================================
+  // Student Lifecycle Management, Soft Delete & Portal Toggle
+  // =========================================================================
+
+  updateStudentDetails(
+    tenantId: string,
+    studentId: string,
+    patch: {
+      fullName?: string;
+      grade?: string;
+      section?: string;
+      gender?: 'Female' | 'Male' | 'Non-binary';
+      dateOfBirth?: string;
+      studentCode?: string;
+      upi?: string;
+      guardianName?: string;
+      guardianEmail?: string;
+      guardianPhone?: string;
+      enrolledAt?: string;
+    },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): Student {
+    const tenant = this.requireTenant(tenantId);
+    const student = this.state.students.find(
+      (s) => s.id === studentId && s.tenantId === tenantId && !s.deleted
+    );
+    if (!student) {
+      throw new ConflictError('Student record not found.', 404);
+    }
+
+    const beforeSnap = {
+      fullName: student.fullName,
+      grade: student.grade,
+      section: student.section,
+      studentCode: student.studentCode,
+      upi: student.upi,
+      guardianName: student.guardianName,
+      guardianPhone: student.guardianPhone,
+      guardianEmail: student.guardianEmail,
+    };
+
+    if (patch.fullName !== undefined) {
+      const cleaned = patch.fullName.trim();
+      if (cleaned.length < 2) {
+        throw new ConflictError('Learner full name must be at least 2 characters.', 400);
+      }
+      student.fullName = cleaned;
+    }
+    const nextGrade = patch.grade !== undefined && patch.grade.trim() ? patch.grade.trim() : student.grade;
+    if (patch.dateOfBirth !== undefined) {
+      student.dateOfBirth = this.validateStudentDateOfBirth(patch.dateOfBirth, nextGrade);
+    } else if (patch.grade !== undefined && nextGrade !== student.grade) {
+      this.validateStudentDateOfBirth(student.dateOfBirth, nextGrade);
+    }
+    student.grade = nextGrade;
+
+    if (patch.section !== undefined && patch.section.trim()) {
+      student.section = patch.section.trim();
+    }
+    if (patch.gender !== undefined) {
+      if (!['Female', 'Male', 'Non-binary'].includes(patch.gender)) {
+        throw new ConflictError('Gender must be Female, Male, or Non-binary.', 400);
+      }
+      student.gender = patch.gender;
+    }
+    if (patch.studentCode !== undefined) {
+      const nextCode = patch.studentCode.trim().toUpperCase();
+      if (!nextCode) throw new ConflictError('Student admission code cannot be empty.', 400);
+      const dupCode = this.state.students.some(
+        (s) =>
+          s.tenantId === tenantId &&
+          s.id !== student.id &&
+          !s.deleted &&
+          s.studentCode.trim().toUpperCase() === nextCode
+      );
+      if (dupCode) {
+        throw new ConflictError(
+          `Admission number / student code "${nextCode}" is already assigned to another learner in ${tenant.name}.`,
+          409
+        );
+      }
+      student.studentCode = nextCode;
+    }
+    if (patch.upi !== undefined) {
+      const nextUpi = patch.upi.trim().toUpperCase();
+      if (!nextUpi) throw new ConflictError('NEMIS / UPI cannot be empty.', 400);
+      const dupUpi = this.state.students.some(
+        (s) =>
+          s.tenantId === tenantId &&
+          s.id !== student.id &&
+          !s.deleted &&
+          s.upi.trim().toUpperCase() === nextUpi
+      );
+      if (dupUpi) {
+        throw new ConflictError(
+          `NEMIS / UPI "${nextUpi}" is already registered to another learner in ${tenant.name}.`,
+          409
+        );
+      }
+      student.upi = nextUpi;
+    }
+    if (patch.guardianName !== undefined) {
+      const gName = patch.guardianName.trim();
+      if (gName.length < 2) throw new ConflictError('Guardian name must be at least 2 characters.', 400);
+      student.guardianName = gName;
+    }
+    if (patch.guardianPhone !== undefined) {
+      student.guardianPhone = this.validateAndNormalizeKenyanPhone(
+        patch.guardianPhone,
+        'Guardian phone'
+      );
+    }
+    if (patch.guardianEmail !== undefined) {
+      student.guardianEmail = patch.guardianEmail.trim();
+    }
+    if (patch.enrolledAt !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(patch.enrolledAt.trim())) {
+      student.enrolledAt = patch.enrolledAt.trim();
+    }
+
+    // Keep linked display snapshots in sync
+    for (const inv of this.state.invoices) {
+      if (inv.tenantId === tenantId && inv.studentId === student.id) {
+        inv.studentName = student.fullName;
+        inv.studentCode = student.studentCode;
+      }
+    }
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'STUDENT_EDITED',
+      'Student',
+      student.id,
+      `Updated profile for ${student.fullName} (${student.studentCode}).`,
+      undefined,
+      beforeSnap,
+      {
+        fullName: student.fullName,
+        grade: student.grade,
+        section: student.section,
+        studentCode: student.studentCode,
+        upi: student.upi,
+        guardianName: student.guardianName,
+        guardianPhone: student.guardianPhone,
+        guardianEmail: student.guardianEmail,
+      }
+    );
+
+    this.persist();
+    this.syncTenant(tenantId, 'student:updated');
+    return student;
+  }
+
+  transitionStudentStatus(
+    tenantId: string,
+    studentId: string,
+    input: { status: StudentStatus; reason?: string; statusDate?: string },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): Student {
+    const tenant = this.requireTenant(tenantId);
+    const student = this.state.students.find(
+      (s) => s.id === studentId && s.tenantId === tenantId && !s.deleted
+    );
+    if (!student) {
+      throw new ConflictError('Student record not found.', 404);
+    }
+
+    const validStatuses = new Set<StudentStatus>([
+      'Active',
+      'On Leave',
+      'Graduated',
+      'Transferred',
+      'Withdrawn',
+    ]);
+    if (!validStatuses.has(input.status)) {
+      throw new ConflictError('Invalid student lifecycle status.', 400);
+    }
+
+    const reason = (input.reason || '').trim();
+    if (
+      (input.status === 'Transferred' ||
+        input.status === 'Withdrawn' ||
+        input.status === 'Graduated') &&
+      !reason
+    ) {
+      throw new ConflictError(`Provide a reason before marking learner as ${input.status}.`, 400);
+    }
+
+    const rawDate = (input.statusDate || '').trim();
+    const effectiveDate = rawDate
+      ? (() => {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+            throw new ConflictError('Effective date must be YYYY-MM-DD.', 400);
+          }
+          return rawDate;
+        })()
+      : new Date().toISOString().slice(0, 10);
+
+    const exitedStatuses = new Set<StudentStatus>(['Graduated', 'Transferred', 'Withdrawn']);
+    if (
+      (input.status === 'Active' || input.status === 'On Leave') &&
+      exitedStatuses.has(student.status)
+    ) {
+      this.assertLearnerCap(tenant, 1);
+    }
+
+    const prevStatus = student.status;
+    student.status = input.status;
+    student.statusReason = reason || undefined;
+    student.statusDate = effectiveDate;
+
+    const actionMap: Record<StudentStatus, LifecycleAuditAction> = {
+      Transferred: 'STUDENT_TRANSFERRED',
+      Withdrawn: 'STUDENT_WITHDRAWN',
+      Graduated: 'STUDENT_GRADUATED',
+      Active: 'STUDENT_REACTIVATED',
+      'On Leave': 'STUDENT_REACTIVATED',
+    };
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      actionMap[input.status],
+      'Student',
+      student.id,
+      `Moved ${student.fullName} (${student.studentCode}) from ${prevStatus} to ${input.status} effective ${effectiveDate}.`,
+      reason || undefined,
+      { status: prevStatus },
+      { status: input.status, statusDate: effectiveDate, statusReason: reason || undefined }
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'admission',
+      `Learner ${input.status}: ${student.fullName}`,
+      `${student.studentCode} (${student.grade} ${student.section}) marked ${input.status} on ${effectiveDate}.${reason ? ` Reason: ${reason}` : ''}`,
+      'admissions'
+    );
+    this.syncTenant(tenantId, 'student:lifecycle-updated');
+    return student;
+  }
+
+  softDeleteStudent(
+    tenantId: string,
+    studentId: string,
+    reason: string,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): { deleted: true; student: Student } {
+    this.requireTenant(tenantId);
+    const cleanReason = (reason || '').trim();
+    if (cleanReason.length < 3) {
+      throw new ConflictError('Provide a clear audit reason (minimum 3 characters) to archive/delete a student record.', 400);
+    }
+    const student = this.state.students.find(
+      (s) => s.id === studentId && s.tenantId === tenantId
+    );
+    if (!student) {
+      throw new ConflictError('Student record not found.', 404);
+    }
+    if (student.deleted) {
+      throw new ConflictError(`Student "${student.fullName}" has already been archived/deleted.`, 409);
+    }
+
+    const now = new Date().toISOString();
+    const actorName = actor.fullName || actor.email;
+    student.deleted = true;
+    student.deletedAt = now;
+    student.deletedBy = actorName;
+    student.deleteReason = cleanReason;
+
+    // Disable any linked Student portal login account as well
+    if (student.studentUserId) {
+      const linkedUser = (this.state.users || []).find((u) => u.id === student.studentUserId);
+      if (linkedUser) {
+        linkedUser.status = 'Disabled';
+        linkedUser.tokenVersion = (linkedUser.tokenVersion ?? 0) + 1;
+      }
+    }
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'STUDENT_SOFT_DELETED',
+      'Student',
+      student.id,
+      `Soft-deleted ${student.fullName} (${student.studentCode}, ${student.grade} ${student.section}). Historical invoices, attendance, and exam records retained.`,
+      cleanReason,
+      { deleted: false, status: student.status },
+      { deleted: true, deletedAt: now, deletedBy: actorName }
+    );
+
+    this.persist();
+    this.syncTenant(tenantId, 'student:soft-deleted');
+    return { deleted: true, student };
+  }
+
+  // =========================================================================
+  // Year-End Promotion Wizard
+  // =========================================================================
+
+  private resolveNextGrade(tenant: Tenant, currentGrade: string): string | null {
+    const grades = tenant.grades && tenant.grades.length > 0 ? tenant.grades : [...KENYAN_CBC_GRADES];
+    const idx = grades.findIndex((g) => g.trim().toLowerCase() === currentGrade.trim().toLowerCase());
+    if (idx === -1) return null;
+    return idx + 1 < grades.length ? grades[idx + 1] : null;
+  }
+
+  previewYearEndPromotion(
+    tenantId: string,
+    input: { grade: string; section?: string }
+  ): {
+    fromGrade: string;
+    nextGrade: string | null;
+    rows: PromotionPreviewRow[];
+  } {
+    const tenant = this.requireTenant(tenantId);
+    const fromGrade = (input.grade || '').trim();
+    if (!fromGrade) {
+      throw new ConflictError('Select a source grade to preview promotions.', 400);
+    }
+    const sectionFilter =
+      input.section && input.section.trim() && input.section.trim() !== 'All'
+        ? input.section.trim()
+        : null;
+
+    const nextGrade = this.resolveNextGrade(tenant, fromGrade);
+    const defaultAction: PromotionAction = nextGrade ? 'Promote' : 'Graduate';
+
+    const cohortStudents = this.state.students.filter(
+      (s) =>
+        s.tenantId === tenantId &&
+        !s.deleted &&
+        s.status === 'Active' &&
+        s.grade.trim().toLowerCase() === fromGrade.toLowerCase() &&
+        (!sectionFilter || s.section.trim().toLowerCase() === sectionFilter.toLowerCase())
+    );
+
+    const rows: PromotionPreviewRow[] = cohortStudents.map((s) => {
+      const openInvoices = this.state.invoices.filter(
+        (i) =>
+          i.tenantId === tenantId &&
+          i.studentId === s.id &&
+          i.balance > 0 &&
+          !i.carriedForwardToTerm
+      );
+      const outstandingFeeBalance = openInvoices.reduce((sum, i) => sum + i.balance, 0);
+      return {
+        studentId: s.id,
+        studentCode: s.studentCode,
+        fullName: s.fullName,
+        currentGrade: s.grade,
+        currentSection: s.section,
+        defaultAction,
+        nextGrade: nextGrade || 'Graduated',
+        outstandingFeeBalance,
+        creditBalance: Math.max(0, Number(s.creditBalance || 0)),
+      };
+    });
+
+    return { fromGrade, nextGrade, rows };
+  }
+
+  executeYearEndPromotion(
+    tenantId: string,
+    input: {
+      fromGrade: string;
+      items: PromotionExecuteItem[];
+      carryForwardFees?: boolean;
+      fromTerm?: string;
+      toTerm?: string;
+      toTermId?: string;
+      dueDate?: string;
+      statusDate?: string;
+    },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    ip?: string
+  ): PromotionExecuteResult {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(input.items) || input.items.length === 0) {
+      throw new ConflictError('Provide at least one student promotion decision.', 400);
+    }
+
+    let toTermName = (input.toTerm || '').trim();
+    let toTermId = input.toTermId;
+    const fromTermName = (input.fromTerm || '').trim() || tenant.currentTerm;
+    const dueDate =
+      (input.dueDate || '').trim() || addDaysIso(new Date().toISOString().slice(0, 10), 30);
+
+    if (input.carryForwardFees) {
+      if (toTermId) {
+        const resolvedTarget = this.assertTermOpen(tenantId, {
+          termId: toTermId,
+          actionLabel: 'Carrying balances forward during promotion',
+        });
+        if (resolvedTarget) {
+          toTermName = resolvedTarget.name;
+          toTermId = resolvedTarget.id;
+        }
+      } else {
+        if (!toTermName) {
+          throw new ConflictError(
+            'Select or enter a target term when carrying fee balances forward.',
+            400
+          );
+        }
+        const resolvedTarget = this.assertTermOpen(tenantId, {
+          termName: toTermName,
+          actionLabel: `Carrying balances forward to ${toTermName}`,
+        });
+        if (resolvedTarget) {
+          toTermName = resolvedTarget.name;
+          toTermId = resolvedTarget.id;
+        }
+      }
+      if (toTermName.toLowerCase() === fromTermName.toLowerCase() && !toTermId) {
+        throw new ConflictError(
+          'Target carry-forward term must differ from the source term.',
+          400
+        );
+      }
+    }
+
+    const effectiveDate =
+      input.statusDate && /^\d{4}-\d{2}-\d{2}$/.test(input.statusDate.trim())
+        ? input.statusDate.trim()
+        : new Date().toISOString().slice(0, 10);
+
+    let promotedCount = 0;
+    let heldBackCount = 0;
+    let graduatedCount = 0;
+    let carriedForwardCount = 0;
+    let carriedForwardAmount = 0;
+    let skippedCount = 0;
+
+    const actorName = actor.fullName || actor.email;
+    const defaultNextGrade = this.resolveNextGrade(tenant, input.fromGrade || '');
+
+    for (const item of input.items) {
+      const student = this.state.students.find(
+        (s) => s.id === item.studentId && s.tenantId === tenantId && !s.deleted
+      );
+      if (!student || student.status !== 'Active') {
+        skippedCount += 1;
+        continue;
+      }
+
+      if (item.action === 'Graduate') {
+        student.status = 'Graduated';
+        student.statusDate = effectiveDate;
+        student.statusReason = (item.reason || '').trim() || 'Year-end graduation';
+        graduatedCount += 1;
+      } else if (item.action === 'Hold Back') {
+        if (item.targetSection && item.targetSection.trim()) {
+          student.section = item.targetSection.trim();
+        }
+        heldBackCount += 1;
+      } else {
+        const nextGrade =
+          (item.targetGrade || '').trim() || this.resolveNextGrade(tenant, student.grade) || defaultNextGrade;
+        if (!nextGrade) {
+          student.status = 'Graduated';
+          student.statusDate = effectiveDate;
+          student.statusReason = (item.reason || '').trim() || 'Completed final grade — graduated';
+          graduatedCount += 1;
+        } else {
+          student.grade = nextGrade;
+          if (item.targetSection && item.targetSection.trim()) {
+            student.section = item.targetSection.trim();
+          }
+          promotedCount += 1;
+        }
+      }
+
+      if (input.carryForwardFees && student.status === 'Active' && toTermName) {
+        const carried = this.carryForwardSingleStudentBalance(
+          tenant,
+          student,
+          fromTermName,
+          toTermName,
+          toTermId,
+          dueDate,
+          actorName
+        );
+        if (carried) {
+          carriedForwardCount += 1;
+          carriedForwardAmount += carried.carriedArrears;
+        }
+      }
+    }
+
+    const summary = `Year-end promotion from ${input.fromGrade}: ${promotedCount} promoted, ${heldBackCount} held back, ${graduatedCount} graduated${
+      input.carryForwardFees
+        ? `, ${carriedForwardCount} invoice(s) carried forward to ${toTermName} (${tenant.currency} ${carriedForwardAmount.toLocaleString()} arrears)`
+        : ''
+    }.`;
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'YEAR_END_PROMOTION',
+      'PromotionBatch',
+      `promo-${randomUUID().slice(0, 6)}`,
+      summary,
+      undefined,
+      { fromGrade: input.fromGrade, count: input.items.length },
+      { promotedCount, heldBackCount, graduatedCount, carriedForwardCount, carriedForwardAmount }
+    );
+
+    if (input.carryForwardFees && carriedForwardCount > 0) {
+      this.appendFinanceAudit(
+        tenantId,
+        actor,
+        'PROMOTION_CARRY_FORWARD',
+        'PromotionBatch',
+        input.fromGrade,
+        { fromTerm: fromTermName },
+        { toTerm: toTermName, carriedForwardCount, carriedForwardAmount },
+        ip
+      );
+    }
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'admission',
+      `Year-End Promotion Completed (${input.fromGrade})`,
+      summary,
+      'admissions'
+    );
+    this.syncTenant(tenantId, 'student:promotion-executed');
+
+    return {
+      promotedCount,
+      heldBackCount,
+      graduatedCount,
+      carriedForwardCount,
+      carriedForwardAmount,
+      skippedCount,
+    };
+  }
+
+  // =========================================================================
+  // Bulk Import (CSV / Excel) with Dry-Run Preview & Learner Cap Check
+  // =========================================================================
+
+  private normalizeImportDateValue(rawVal: unknown): string {
+    if (typeof rawVal === 'number' && Number.isFinite(rawVal) && rawVal > 2000 && rawVal < 80000) {
+      // Excel serial date (days since 1899-12-30)
+      const utcMs = Math.round((rawVal - 25569) * 86400 * 1000);
+      return new Date(utcMs).toISOString().slice(0, 10);
+    }
+    const str = String(rawVal ?? '').trim();
+    if (!str) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+    const dmy = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/.exec(str);
+    if (dmy) {
+      const dd = dmy[1].padStart(2, '0');
+      const mm = dmy[2].padStart(2, '0');
+      const yyyy = dmy[3];
+      return `${yyyy}-${mm}-${dd}`;
+    }
+    return str;
+  }
+
+  private normalizeImportGender(raw: string): 'Female' | 'Male' | 'Non-binary' | null {
+    const norm = raw.trim().toLowerCase();
+    if (!norm) return 'Female';
+    if (norm === 'f' || norm === 'female') return 'Female';
+    if (norm === 'm' || norm === 'male') return 'Male';
+    if (norm === 'nb' || norm === 'non-binary' || norm === 'nonbinary' || norm === 'other') {
+      return 'Non-binary';
+    }
+    return null;
+  }
+
+  importStudents(
+    tenantId: string,
+    input: {
+      dryRun?: boolean;
+      skipInvalid?: boolean;
+      csvText?: string;
+      fileBase64?: string;
+      fileName?: string;
+      rows?: Array<Record<string, unknown>>;
+    },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): StudentImportResult {
+    const tenant = this.requireTenant(tenantId);
+    const dryRun = input.dryRun !== false;
+
+    let rawRecords: Array<Record<string, unknown>> = [];
+    if (Array.isArray(input.rows)) {
+      rawRecords = input.rows;
+    } else if (typeof input.fileBase64 === 'string' && input.fileBase64.trim()) {
+      const cleanBase64 = input.fileBase64.replace(/^data:[^;]+;base64,/, '').trim();
+      const buf = Buffer.from(cleanBase64, 'base64');
+      const wb = XLSX.read(buf, { type: 'buffer', cellDates: false });
+      const firstSheet = wb.SheetNames[0];
+      if (!firstSheet) {
+        throw new ConflictError('Uploaded workbook contains no readable worksheet.', 400);
+      }
+      rawRecords = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[firstSheet], {
+        defval: '',
+      });
+    } else if (typeof input.csvText === 'string' && input.csvText.trim()) {
+      const wb = XLSX.read(input.csvText, { type: 'string', raw: true });
+      const firstSheet = wb.SheetNames[0];
+      if (!firstSheet) {
+        throw new ConflictError('CSV input contains no readable rows.', 400);
+      }
+      rawRecords = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[firstSheet], {
+        defval: '',
+      });
+    } else {
+      throw new ConflictError('Provide a CSV, Excel file, or parsed rows to import.', 400);
+    }
+
+    if (rawRecords.length === 0) {
+      throw new ConflictError('No student rows found in uploaded file.', 400);
+    }
+    if (rawRecords.length > 2000) {
+      throw new ConflictError('Bulk import supports up to 2,000 rows per batch.', 400);
+    }
+
+    const existingCodes = new Set(
+      this.state.students
+        .filter((s) => s.tenantId === tenantId && !s.deleted)
+        .map((s) => s.studentCode.trim().toUpperCase())
+    );
+    const existingUpis = new Set(
+      this.state.students
+        .filter((s) => s.tenantId === tenantId && !s.deleted)
+        .map((s) => s.upi.trim().toUpperCase())
+    );
+    const seenBatchCodes = new Set<string>();
+    const seenBatchUpis = new Set<string>();
+
+    const pickField = (rec: Record<string, unknown>, aliases: string[]): unknown => {
+      const normalizedKeys = new Map<string, unknown>();
+      for (const [k, v] of Object.entries(rec)) {
+        normalizedKeys.set(k.trim().toLowerCase().replace(/[\s_-]+/g, ''), v);
+      }
+      for (const alias of aliases) {
+        const val = normalizedKeys.get(alias.toLowerCase().replace(/[\s_-]+/g, ''));
+        if (val !== undefined && String(val).trim() !== '') return val;
+      }
+      return '';
+    };
+
+    const allowedGrades = tenant.grades && tenant.grades.length > 0 ? tenant.grades : [...KENYAN_CBC_GRADES];
+    const validations: StudentImportRowValidation[] = [];
+
+    rawRecords.forEach((rec, index) => {
+      const rowNumber = index + 1;
+      const errors: string[] = [];
+
+      const rawStringMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rec)) {
+        rawStringMap[k] = String(v ?? '').trim();
+      }
+
+      const fullName = String(
+        pickField(rec, ['fullName', 'full name', 'studentName', 'student name', 'learnerName', 'name'])
+      ).trim();
+      if (fullName.length < 2) {
+        errors.push('Full name is required (min 2 characters).');
+      }
+
+      const rawGrade = String(pickField(rec, ['grade', 'class', 'form', 'level'])).trim();
+      const matchedGrade = allowedGrades.find(
+        (g) => g.trim().toLowerCase() === rawGrade.toLowerCase()
+      );
+      if (!rawGrade) {
+        errors.push('Grade / class is required.');
+      } else if (!matchedGrade) {
+        errors.push(`Grade "${rawGrade}" is not configured for ${tenant.name}.`);
+      }
+      const finalGrade = matchedGrade || rawGrade || allowedGrades[0] || 'Grade 9';
+
+      const validStreams = getStreamsForGrade(tenant, finalGrade);
+      const rawSection = String(pickField(rec, ['section', 'stream'])).trim();
+      const finalSection =
+        rawSection ||
+        validStreams[0] ||
+        tenant.sections[0] ||
+        'A';
+
+      const rawGender = String(pickField(rec, ['gender', 'sex'])).trim();
+      const gender = this.normalizeImportGender(rawGender);
+      if (!gender) {
+        errors.push(`Invalid gender "${rawGender}" (use Female, Male, or Non-binary).`);
+      }
+
+      const dobRaw = pickField(rec, ['dateOfBirth', 'date of birth', 'dob', 'birthdate']);
+      const normalizedDob = this.normalizeImportDateValue(dobRaw);
+      let validatedDob = normalizedDob;
+      try {
+        validatedDob = this.validateStudentDateOfBirth(normalizedDob, finalGrade);
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : 'Invalid date of birth.');
+      }
+
+      const guardianName = String(
+        pickField(rec, ['guardianName', 'guardian name', 'parentName', 'parent name', 'parent'])
+      ).trim();
+      if (guardianName.length < 2) {
+        errors.push('Guardian / Parent name is required.');
+      }
+
+      const rawPhone = String(
+        pickField(rec, ['guardianPhone', 'guardian phone', 'parentPhone', 'phone', 'mobile'])
+      ).trim();
+      let normalizedPhone = rawPhone;
+      try {
+        normalizedPhone = this.validateAndNormalizeKenyanPhone(rawPhone, 'Guardian phone');
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : 'Invalid Kenyan guardian phone.');
+      }
+
+      const guardianEmail = String(
+        pickField(rec, ['guardianEmail', 'guardian email', 'parentEmail', 'email'])
+      ).trim();
+      if (guardianEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(guardianEmail)) {
+        errors.push(`Invalid guardian email "${guardianEmail}".`);
+      }
+
+      const rawCode = String(
+        pickField(rec, ['studentCode', 'student code', 'admissionNumber', 'admission no', 'adm no', 'code'])
+      )
+        .trim()
+        .toUpperCase();
+      if (rawCode) {
+        if (existingCodes.has(rawCode)) {
+          errors.push(`Student code "${rawCode}" already exists in ${tenant.name}.`);
+        } else if (seenBatchCodes.has(rawCode)) {
+          errors.push(`Duplicate student code "${rawCode}" inside import batch.`);
+        } else {
+          seenBatchCodes.add(rawCode);
+        }
+      }
+
+      const rawUpi = String(pickField(rec, ['upi', 'nemis', 'nemis upi'])).trim().toUpperCase();
+      if (rawUpi) {
+        if (existingUpis.has(rawUpi)) {
+          errors.push(`NEMIS / UPI "${rawUpi}" already exists in ${tenant.name}.`);
+        } else if (seenBatchUpis.has(rawUpi)) {
+          errors.push(`Duplicate NEMIS / UPI "${rawUpi}" inside import batch.`);
+        } else {
+          seenBatchUpis.add(rawUpi);
+        }
+      }
+
+      const enrolledRaw = pickField(rec, ['enrolledAt', 'enrolled at', 'enrolmentDate', 'enrollment date']);
+      const normalizedEnrolled = this.normalizeImportDateValue(enrolledRaw);
+      const enrolledAt =
+        normalizedEnrolled && /^\d{4}-\d{2}-\d{2}$/.test(normalizedEnrolled)
+          ? normalizedEnrolled
+          : new Date().toISOString().slice(0, 10);
+
+      validations.push({
+        rowNumber,
+        raw: rawStringMap,
+        valid: errors.length === 0,
+        errors,
+        ...(errors.length === 0 && gender
+          ? {
+              normalized: {
+                fullName,
+                grade: finalGrade,
+                section: finalSection,
+                gender,
+                dateOfBirth: validatedDob,
+                studentCode: rawCode || 'AUTO',
+                upi: rawUpi || 'AUTO',
+                guardianName,
+                guardianEmail,
+                guardianPhone: normalizedPhone,
+                enrolledAt,
+              },
+            }
+          : {}),
+      });
+    });
+
+    const validRows = validations.filter((v) => v.valid && v.normalized);
+    const errorCount = validations.length - validRows.length;
+    const learnerCap = this.getTenantLearnerCap(tenant);
+    const currentActiveCount = this.countEnrolledLearnersForCap(tenantId);
+    const remainingCapacity = Math.max(0, learnerCap - currentActiveCount);
+    const capExceeded = validRows.length > remainingCapacity;
+
+    if (dryRun) {
+      return {
+        dryRun: true,
+        totalRows: validations.length,
+        validCount: validRows.length,
+        errorCount,
+        importedCount: 0,
+        currentActiveCount,
+        learnerCap,
+        remainingCapacity,
+        capExceeded,
+        rows: validations,
+        createdStudents: [],
+      };
+    }
+
+    if (errorCount > 0 && !input.skipInvalid) {
+      throw new ConflictError(
+        `Bulk import blocked: ${errorCount} row(s) contain validation errors. Fix the errors or enable "Import valid rows only".`,
+        400
+      );
+    }
+    if (validRows.length === 0) {
+      throw new ConflictError('No valid learner rows to import.', 400);
+    }
+    if (capExceeded) {
+      throw new ConflictError(
+        `Learner cap exceeded: attempting to import ${validRows.length} learner(s) with only ${remainingCapacity} slot(s) remaining (${currentActiveCount}/${learnerCap} capacity).`,
+        409
+      );
+    }
+
+    const currentTermEntity = this.resolveTenantTerm(tenantId, { termName: tenant.currentTerm });
+    const createdStudents: Student[] = [];
+    const nowIso = new Date().toISOString();
+
+    for (const row of validRows) {
+      const norm = row.normalized!;
+      const studentCode =
+        norm.studentCode && norm.studentCode !== 'AUTO'
+          ? norm.studentCode
+          : this.nextStudentCode(tenantId);
+      const upi =
+        norm.upi && norm.upi !== 'AUTO' ? norm.upi : this.nextUniqueUpi(tenantId);
+
+      const student: Student = {
+        id: `stu-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        studentCode,
+        upi,
+        fullName: norm.fullName,
+        grade: norm.grade,
+        section: norm.section,
+        guardianName: norm.guardianName,
+        guardianEmail: norm.guardianEmail,
+        guardianPhone: norm.guardianPhone,
+        gender: norm.gender,
+        dateOfBirth: norm.dateOfBirth,
+        enrolledAt: norm.enrolledAt,
+        status: 'Active',
+        creditBalance: 0,
+      };
+      this.state.students.unshift(student);
+      createdStudents.push(student);
+
+      const feeStruct =
+        this.state.feeStructures.find((f) => f.tenantId === tenantId && f.grade === student.grade) ||
+        this.state.feeStructures.find((f) => f.tenantId === tenantId);
+      const totalAmount = feeStruct ? feeStruct.totalFee : 4800;
+
+      const invoice: FeeInvoice = {
+        id: `inv-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        termId: currentTermEntity?.id,
+        invoiceNumber: this.nextInvoiceNumber(tenant),
+        studentId: student.id,
+        studentName: student.fullName,
+        studentCode: student.studentCode,
+        grade: student.grade,
+        term: currentTermEntity?.name || tenant.currentTerm,
+        dueDate: '2026-12-01',
+        totalAmount,
+        paidAmount: 0,
+        balance: totalAmount,
+        status: 'Pending',
+        payments: [],
+        createdAt: nowIso,
+      };
+      this.applySiblingDiscountIfEligible(tenant, student, invoice);
+      this.state.invoices.unshift(invoice);
+    }
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'STUDENT_BULK_IMPORT',
+      'StudentImportBatch',
+      `imp-${randomUUID().slice(0, 6)}`,
+      `Bulk-imported ${createdStudents.length} learner(s) (${errorCount} skipped).`,
+      input.fileName ? `Source: ${input.fileName}` : undefined,
+      null,
+      { importedCount: createdStudents.length, errorCount }
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'admission',
+      `Bulk Student Import Complete (${createdStudents.length})`,
+      `${createdStudents.length} learner(s) enrolled and invoiced for ${currentTermEntity?.name || tenant.currentTerm}.`,
+      'admissions'
+    );
+    this.syncTenant(tenantId, 'student:bulk-imported');
+
+    return {
+      dryRun: false,
+      totalRows: validations.length,
+      validCount: validRows.length,
+      errorCount,
+      importedCount: createdStudents.length,
+      currentActiveCount: currentActiveCount + createdStudents.length,
+      learnerCap,
+      remainingCapacity: Math.max(0, learnerCap - (currentActiveCount + createdStudents.length)),
+      capExceeded: false,
+      rows: validations,
+      createdStudents,
+    };
+  }
+
+  // =========================================================================
+  // Student Portal Toggle & Read-Only Account Provisioning
+  // =========================================================================
+
+  updateTenantStudentPortal(
+    tenantId: string,
+    enabled: boolean,
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): Tenant {
+    const tenant = this.requireTenant(tenantId);
+    const nextEnabled = Boolean(enabled);
+    tenant.studentPortalEnabled = nextEnabled;
+
+    // Immediately invalidate active Student portal sessions if portal is turned off
+    if (!nextEnabled) {
+      (this.state.users || []).forEach((u) => {
+        if (u.tenantId === tenantId && u.role === 'Student') {
+          u.tokenVersion = (u.tokenVersion ?? 0) + 1;
+        }
+      });
+    }
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'announcement',
+      `Student Portal ${nextEnabled ? 'Enabled' : 'Disabled'}`,
+      `${actor.fullName || actor.email} ${nextEnabled ? 'enabled' : 'disabled'} read-only Student Portal logins for ${tenant.name}.`,
+      'settings'
+    );
+    this.syncTenant(tenantId, 'tenant:student-portal-updated');
+    return tenant;
+  }
+
+  async provisionStudentPortalAccount(
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    tenantId: string,
+    studentId: string,
+    input?: { email?: string; resetOneTimePassword?: boolean }
+  ): Promise<{ user: TenantUser; oneTimePassword?: string; student: Student }> {
+    const tenant = this.requireTenant(tenantId);
+    if (!tenant.studentPortalEnabled) {
+      throw new ConflictError(
+        `Student portal logins are disabled for ${tenant.name}. Enable Student Portal in School Settings first.`,
+        403
+      );
+    }
+
+    const student = this.state.students.find(
+      (s) => s.id === studentId && s.tenantId === tenantId && !s.deleted
+    );
+    if (!student) {
+      throw new ConflictError('Student record not found.', 404);
+    }
+    if (student.status === 'Transferred' || student.status === 'Withdrawn') {
+      throw new ConflictError(
+        `Cannot provision a portal account for a ${student.status} learner.`,
+        409
+      );
+    }
+
+    const existing = (this.state.users || []).find(
+      (u) =>
+        u.tenantId === tenantId &&
+        u.role === 'Student' &&
+        (u.studentId === student.id || (student.studentUserId && u.id === student.studentUserId))
+    );
+
+    if (existing) {
+      let oneTimePassword: string | undefined;
+      if (input?.resetOneTimePassword) {
+        oneTimePassword = generateOneTimePassword();
+        existing.passwordHash = await hashPassword(oneTimePassword);
+        existing.mustChangePassword = true;
+        existing.status = 'Active';
+        existing.tokenVersion = (existing.tokenVersion ?? 0) + 1;
+        this.appendLifecycleAudit(
+          tenantId,
+          actor,
+          'STUDENT_PORTAL_PROVISIONED',
+          'Student',
+          student.id,
+          `Reset Student Portal one-time password for ${student.fullName} (${existing.email}).`
+        );
+        this.persist();
+        this.syncTenant(tenantId, 'student:portal-account-reset');
+      }
+      return { user: this.toPublicUser(existing), oneTimePassword, student };
+    }
+
+    const domain = this.resolveTenantEmailDomain(tenant);
+    const rawEmailInput = (input?.email || '').trim().toLowerCase();
+    let finalEmail: string;
+    if (rawEmailInput) {
+      const atIdx = rawEmailInput.indexOf('@');
+      if (atIdx !== -1) {
+        const local = rawEmailInput.slice(0, atIdx);
+        const dom = rawEmailInput.slice(atIdx + 1);
+        this.validateEmailLocalPart(local);
+        if (dom !== domain) {
+          throw new ConflictError(`Student login email must end with "@${domain}".`, 400);
+        }
+        finalEmail = `${local}@${domain}`;
+      } else {
+        this.validateEmailLocalPart(rawEmailInput);
+        finalEmail = `${rawEmailInput}@${domain}`;
+      }
+    } else {
+      const cleanCode = student.studentCode
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '.')
+        .replace(/^\.+|\.+$/g, '');
+      const local = cleanCode.length >= 2 ? cleanCode : `stu.${student.id.slice(-4)}`;
+      finalEmail = `${local}@${domain}`;
+    }
+
+    if ((this.state.users || []).some((u) => u.email.toLowerCase() === finalEmail)) {
+      throw new ConflictError(`An account with email "${finalEmail}" already exists.`, 409);
+    }
+
+    const oneTimePassword = generateOneTimePassword();
+    const created: StoredTenantUser = {
+      id: `usr-${randomUUID().slice(0, 8)}`,
+      tenantId: tenant.id,
+      fullName: student.fullName,
+      email: finalEmail,
+      phone: student.guardianPhone,
+      role: 'Student',
+      studentId: student.id,
+      passwordHash: await hashPassword(oneTimePassword),
+      status: 'Active',
+      mustChangePassword: true,
+      tokenVersion: 0,
+      allowedModules: [...DEFAULT_ROLE_MODULES.Student],
+      createdAt: new Date().toISOString(),
+    };
+
+    if (!Array.isArray(this.state.users)) this.state.users = [];
+    this.state.users.push(created);
+    student.studentUserId = created.id;
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'STUDENT_PORTAL_PROVISIONED',
+      'Student',
+      student.id,
+      `Provisioned read-only Student Portal account (${finalEmail}) for ${student.fullName} (${student.studentCode}).`
+    );
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'announcement',
+      `Student Portal Account Ready: ${student.fullName}`,
+      `Login ${finalEmail} provisioned with one-time password.`,
+      'admissions'
+    );
+    this.syncTenant(tenantId, 'student:portal-provisioned');
+
+    return { user: this.toPublicUser(created), oneTimePassword, student };
   }
 }

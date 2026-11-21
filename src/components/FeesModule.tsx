@@ -8,6 +8,7 @@ import {
   Download,
   FileSpreadsheet,
   Gift,
+  Lock,
   MessageCircle,
   Pencil,
   PenLine,
@@ -95,6 +96,15 @@ export function FeesModule({
     currentRole === 'Super Admin' ||
     currentRole === 'Developer';
   const canSwitchCurrency = currentRole === 'Admin' || currentRole === 'Super Admin';
+  const currentTermEntity = useMemo(() => {
+    const terms = workspace.academicTerms || [];
+    return (
+      terms.find((t) => t.name.toLowerCase() === tenant.currentTerm.toLowerCase()) ||
+      terms.find((t) => t.isCurrent) ||
+      null
+    );
+  }, [workspace.academicTerms, tenant.currentTerm]);
+  const isCurrentTermClosed = currentTermEntity?.status === 'Closed';
 
   const [activeTab, setActiveTab] = useState<'invoices' | 'payments' | 'structures' | 'independent'>(
     'invoices'
@@ -1535,8 +1545,13 @@ export function FeesModule({
             <button
               type="button"
               onClick={() => setShowInvoiceModal(true)}
-              disabled={students.length === 0}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              disabled={students.length === 0 || isCurrentTermClosed}
+              title={
+                isCurrentTermClosed
+                  ? `Term ${currentTermEntity?.name || tenant.currentTerm} is Closed`
+                  : undefined
+              }
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Plus className="h-3.5 w-3.5" />
               Issue Invoice
@@ -1544,6 +1559,18 @@ export function FeesModule({
           )}
         </div>
       </div>
+
+      {isCurrentTermClosed && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
+          <div>
+            <strong>
+              Term Locked ({currentTermEntity?.name || tenant.currentTerm} is Closed):
+            </strong>{' '}
+            New invoices, payments, waivers, credit notes, and fee adjustments for this term are locked. An Admin can reopen the term in <strong>School Settings</strong>, or use <strong>Carry-Forward Term</strong> to roll balances into a new Open term.
+          </div>
+        </div>
+      )}
 
       {/* 4 Financial KPIs */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -1627,8 +1654,8 @@ export function FeesModule({
                       }));
                       setWaiverModalOpen(true);
                     }}
-                    disabled={students.length === 0}
-                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                    disabled={students.length === 0 || isCurrentTermClosed}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                   >
                     <Gift className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                     Waiver / Bursary
@@ -1827,7 +1854,7 @@ export function FeesModule({
                         </td>
                         <td className="px-4 py-3 text-right">
                           <div className="inline-flex items-center gap-2.5">
-                            {canManageFees && inv.balance > 0 && (
+                            {canManageFees && inv.balance > 0 && !isCurrentTermClosed && (
                               <button
                                 type="button"
                                 onClick={() => openPaymentModal(inv)}
@@ -1837,7 +1864,7 @@ export function FeesModule({
                                 Collect
                               </button>
                             )}
-                            {canManageFees && inv.balance > 0 && (
+                            {canManageFees && inv.balance > 0 && !isCurrentTermClosed && (
                               <button
                                 type="button"
                                 onClick={() => {
@@ -2088,7 +2115,7 @@ export function FeesModule({
                     <div className="sm:col-span-2 pt-2">
                       <button
                         type="submit"
-                        disabled={saving || !selectedManualInvoice}
+                        disabled={saving || !selectedManualInvoice || isCurrentTermClosed}
                         className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
                       >
                         <CheckCircle2 className="h-4 w-4" />

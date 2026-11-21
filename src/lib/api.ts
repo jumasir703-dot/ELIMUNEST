@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
+  AcademicTerm,
+  AcademicYear,
   AdminAuditEntry,
   AdmissionApplication,
   AdmissionStage,
@@ -35,6 +37,7 @@ import type {
   ImpersonatorMeta,
   IndependentVotelineItem,
   LeaveOutChit,
+  LifecycleAuditEntry,
   MpesaEnvironment,
   MpesaTransactionLog,
   NonTeachingStaffProfile,
@@ -45,6 +48,9 @@ import type {
   PayrollEntry,
   PayrollStatus,
   PayrollStatutoryRateSchedule,
+  PromotionExecuteItem,
+  PromotionExecuteResult,
+  PromotionPreviewRow,
   PublicSchoolDirectoryItem,
   ReconciliationChannel,
   ReconciliationLine,
@@ -53,6 +59,8 @@ import type {
   StaffAttendanceRecord,
   StaffCategory,
   Student,
+  StudentImportResult,
+  StudentStatus,
   SubjectTimetableConstraint,
   SubscriptionCycle,
   SuperAdminTenantSummary,
@@ -653,6 +661,78 @@ export const saasApi = {
     );
   },
 
+  updateTenantStudentPortal(tenantId: string, enabled: boolean) {
+    return apiRequest<{ tenant: Tenant }>(`/api/tenants/${tenantId}/student-portal`, {
+      method: 'PUT',
+      tenantId,
+      body: JSON.stringify({ enabled }),
+    });
+  },
+
+  getAcademicCalendar(tenantId: string) {
+    return apiRequest<{ academicYears: AcademicYear[]; academicTerms: AcademicTerm[] }>(
+      '/api/academic-calendar',
+      { tenantId }
+    );
+  },
+
+  createAcademicYear(
+    tenantId: string,
+    payload: { name: string; startDate: string; endDate: string; setAsCurrent?: boolean }
+  ) {
+    return apiRequest<{ year: AcademicYear }>('/api/academic-calendar/years', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  createAcademicTerm(
+    tenantId: string,
+    payload: {
+      academicYearId: string;
+      name: string;
+      startDate: string;
+      endDate: string;
+      setAsCurrent?: boolean;
+    }
+  ) {
+    return apiRequest<{ term: AcademicTerm }>('/api/academic-calendar/terms', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  setCurrentAcademicTerm(tenantId: string, termId: string) {
+    return apiRequest<{ term: AcademicTerm }>(`/api/academic-calendar/terms/${termId}/set-current`, {
+      method: 'POST',
+      tenantId,
+    });
+  },
+
+  closeAcademicTerm(tenantId: string, termId: string) {
+    return apiRequest<{ term: AcademicTerm }>(`/api/academic-calendar/terms/${termId}/close`, {
+      method: 'POST',
+      tenantId,
+    });
+  },
+
+  reopenAcademicTerm(tenantId: string, termId: string, reason: string) {
+    return apiRequest<{ term: AcademicTerm }>(`/api/academic-calendar/terms/${termId}/reopen`, {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  getStudentLifecycleAuditLogs(tenantId: string, limit = 200) {
+    return apiRequest<{ logs: LifecycleAuditEntry[] }>(
+      `/api/students/audit-logs?limit=${encodeURIComponent(String(limit))}`,
+      { tenantId }
+    );
+  },
+
   enrollStudent(
     tenantId: string,
     payload: {
@@ -664,6 +744,7 @@ export const saasApi = {
       grade: string;
       section: string;
       guardianName: string;
+      guardianEmail?: string;
       guardianPhone: string;
       enrolledAt?: string;
     }
@@ -673,6 +754,115 @@ export const saasApi = {
       tenantId,
       body: JSON.stringify(payload),
     });
+  },
+
+  updateStudentDetails(
+    tenantId: string,
+    studentId: string,
+    patch: {
+      fullName?: string;
+      grade?: string;
+      section?: string;
+      gender?: 'Female' | 'Male' | 'Non-binary';
+      dateOfBirth?: string;
+      studentCode?: string;
+      upi?: string;
+      guardianName?: string;
+      guardianEmail?: string;
+      guardianPhone?: string;
+      enrolledAt?: string;
+    }
+  ) {
+    return apiRequest<{ student: Student }>(`/api/students/${studentId}`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify(patch),
+    });
+  },
+
+  transitionStudentStatus(
+    tenantId: string,
+    studentId: string,
+    payload: { status: StudentStatus; reason?: string; statusDate?: string }
+  ) {
+    return apiRequest<{ student: Student }>(`/api/students/${studentId}/lifecycle`, {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  softDeleteStudent(tenantId: string, studentId: string, reason: string) {
+    return apiRequest<{ deleted: true; student: Student }>(`/api/students/${studentId}`, {
+      method: 'DELETE',
+      tenantId,
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  previewYearEndPromotion(tenantId: string, payload: { grade: string; section?: string }) {
+    return apiRequest<{
+      fromGrade: string;
+      nextGrade: string | null;
+      rows: PromotionPreviewRow[];
+    }>('/api/students/promotions/preview', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  executeYearEndPromotion(
+    tenantId: string,
+    payload: {
+      fromGrade: string;
+      items: PromotionExecuteItem[];
+      carryForwardFees?: boolean;
+      fromTerm?: string;
+      toTerm?: string;
+      toTermId?: string;
+      dueDate?: string;
+      statusDate?: string;
+    }
+  ) {
+    return apiRequest<PromotionExecuteResult>('/api/students/promotions/execute', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  importStudentsBulk(
+    tenantId: string,
+    payload: {
+      dryRun?: boolean;
+      skipInvalid?: boolean;
+      csvText?: string;
+      fileBase64?: string;
+      fileName?: string;
+      rows?: Array<Record<string, unknown>>;
+    }
+  ) {
+    return apiRequest<StudentImportResult>('/api/students/import', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  provisionStudentPortalAccount(
+    tenantId: string,
+    studentId: string,
+    payload?: { email?: string; resetOneTimePassword?: boolean }
+  ) {
+    return apiRequest<{ user: TenantUser; oneTimePassword?: string; student: Student }>(
+      `/api/students/${studentId}/portal-account`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload || {}),
+      }
+    );
   },
 
   createAdmission(

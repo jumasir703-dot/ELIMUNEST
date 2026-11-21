@@ -24,8 +24,11 @@ export function CommunicationsModule({
   onNavigate,
 }: CommunicationsModuleProps) {
   const { tenant, announcements, messages, notifications } = workspace;
+  const isReadOnlyViewer = currentRole === 'Parent' || currentRole === 'Student';
 
-  const [activeChannel, setActiveChannel] = useState(CHANNELS[0]);
+  const [activeChannel, setActiveChannel] = useState(
+    isReadOnlyViewer ? 'Parent Liaison' : CHANNELS[0]
+  );
   const [messageText, setMessageText] = useState('');
   const [sendingMsg, setSendingMsg] = useState(false);
 
@@ -116,77 +119,79 @@ export function CommunicationsModule({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Announcements Composer & Feed */}
         <section className="space-y-6 lg:col-span-6">
-          <form
-            onSubmit={handlePublishAnnouncement}
-            className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"
-          >
-            <div className="flex items-center gap-2">
-              <Megaphone className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-              <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                Publish Tenant Announcement
-              </h2>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              <input
-                required
-                type="text"
-                value={annForm.title}
-                onChange={(e) => setAnnForm({ ...annForm, title: e.target.value })}
-                placeholder="Announcement headline..."
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              />
-              <textarea
-                required
-                rows={3}
-                value={annForm.body}
-                onChange={(e) => setAnnForm({ ...annForm, body: e.target.value })}
-                placeholder="Message details for students, faculty, or guardians..."
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              />
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                <div className="flex items-center gap-2">
-                  <select
-                    value={annForm.audience}
-                    onChange={(e) =>
-                      setAnnForm({
-                        ...annForm,
-                        audience: e.target.value as Announcement['audience'],
-                      })
-                    }
-                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    <option value="All School">All School</option>
-                    <option value="Teachers Only">Teachers Only</option>
-                    <option value="Parents & Guardians">Parents & Guardians</option>
-                    <option value="Students">Students</option>
-                  </select>
-                  <select
-                    value={annForm.priority}
-                    onChange={(e) =>
-                      setAnnForm({
-                        ...annForm,
-                        priority: e.target.value as Announcement['priority'],
-                      })
-                    }
-                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    <option value="Normal">Normal Priority</option>
-                    <option value="Urgent">Urgent Priority</option>
-                  </select>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={publishingAnn}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                >
-                  <Send className="h-3.5 w-3.5" />
-                  {publishingAnn ? 'Broadcasting...' : 'Broadcast Now'}
-                </button>
+          {!isReadOnlyViewer && (
+            <form
+              onSubmit={handlePublishAnnouncement}
+              className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"
+            >
+              <div className="flex items-center gap-2">
+                <Megaphone className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Publish Tenant Announcement
+                </h2>
               </div>
-            </div>
-          </form>
+
+              <div className="mt-4 space-y-3">
+                <input
+                  required
+                  type="text"
+                  value={annForm.title}
+                  onChange={(e) => setAnnForm({ ...annForm, title: e.target.value })}
+                  placeholder="Announcement headline..."
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+                <textarea
+                  required
+                  rows={3}
+                  value={annForm.body}
+                  onChange={(e) => setAnnForm({ ...annForm, body: e.target.value })}
+                  placeholder="Message details for students, faculty, or guardians..."
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={annForm.audience}
+                      onChange={(e) =>
+                        setAnnForm({
+                          ...annForm,
+                          audience: e.target.value as Announcement['audience'],
+                        })
+                      }
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      <option value="All School">All School</option>
+                      <option value="Teachers Only">Teachers Only</option>
+                      <option value="Parents & Guardians">Parents & Guardians</option>
+                      <option value="Students">Students</option>
+                    </select>
+                    <select
+                      value={annForm.priority}
+                      onChange={(e) =>
+                        setAnnForm({
+                          ...annForm,
+                          priority: e.target.value as Announcement['priority'],
+                        })
+                      }
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      <option value="Normal">Normal Priority</option>
+                      <option value="Urgent">Urgent Priority</option>
+                    </select>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={publishingAnn}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    {publishingAnn ? 'Broadcasting...' : 'Broadcast Now'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          )}
 
           <div className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
             <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
@@ -271,26 +276,28 @@ export function CommunicationsModule({
               )}
             </div>
 
-            <form
-              onSubmit={handleSendMessage}
-              className="flex items-center gap-2 border-t border-slate-200 p-3 dark:border-slate-800"
-            >
-              <input
-                type="text"
-                value={messageText}
-                onChange={(e) => setMessageText(e.target.value)}
-                placeholder={`Message ${activeChannel}...`}
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              />
-              <button
-                type="submit"
-                disabled={sendingMsg || !messageText.trim()}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+            {!isReadOnlyViewer && (
+              <form
+                onSubmit={handleSendMessage}
+                className="flex items-center gap-2 border-t border-slate-200 p-3 dark:border-slate-800"
               >
-                <Send className="h-3.5 w-3.5" />
-                Send
-              </button>
-            </form>
+                <input
+                  type="text"
+                  value={messageText}
+                  onChange={(e) => setMessageText(e.target.value)}
+                  placeholder={`Message ${activeChannel}...`}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+                <button
+                  type="submit"
+                  disabled={sendingMsg || !messageText.trim()}
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  Send
+                </button>
+              </form>
+            )}
           </div>
 
           {/* Live System Event Notification Log */}

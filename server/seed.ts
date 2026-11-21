@@ -8,6 +8,8 @@ import {
   KENYAN_BELL_SCHEDULE,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
+  type AcademicTerm,
+  type AcademicYear,
   type AdminAuditEntry,
   type AdmissionApplication,
   type Announcement,
@@ -27,6 +29,7 @@ import {
   type FinanceAuditEntry,
   type IndependentVotelineItem,
   type LeaveOutChit,
+  type LifecycleAuditEntry,
   type MpesaTransactionLog,
   type NonTeachingStaffProfile,
   type NotificationItem,
@@ -226,6 +229,8 @@ export async function buildSeedUsers(): Promise<{
 export interface DatabaseState {
   tenants: Tenant[];
   users: StoredTenantUser[];
+  academicYears?: AcademicYear[];
+  academicTerms?: AcademicTerm[];
   mpesaWebhookHashes?: Record<string, string>;
   mpesaTransactions?: MpesaTransactionLog[];
   students: Student[];
@@ -260,6 +265,7 @@ export interface DatabaseState {
   whatsappDispatches: WhatsAppDispatchRecord[];
   notifications: NotificationItem[];
   adminAuditLogs: AdminAuditEntry[];
+  lifecycleAuditLogs?: LifecycleAuditEntry[];
 }
 
 export const DEFAULT_STATUTORY_RATE_SCHEDULES: PayrollStatutoryRateSchedule[] = [
@@ -789,6 +795,8 @@ export function createEmptyDatabase(): DatabaseState {
   return {
     tenants: [],
     users: [],
+    academicYears: [],
+    academicTerms: [],
     mpesaWebhookHashes: {},
     mpesaTransactions: [],
     students: [],
@@ -826,6 +834,7 @@ export function createEmptyDatabase(): DatabaseState {
     whatsappDispatches: [],
     notifications: [],
     adminAuditLogs: [],
+    lifecycleAuditLogs: [],
   };
 }
 
@@ -2399,11 +2408,149 @@ export async function createSeedDatabase(options?: {
 
   const { users, devCredentials } = await buildSeedUsers();
 
+  const academicYears: AcademicYear[] = [
+    {
+      id: 'ay-oak-2026',
+      tenantId: 'tenant-oakridge',
+      name: '2026–2027',
+      startDate: '2026-09-01',
+      endDate: '2027-07-31',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'ay-west-2026',
+      tenantId: 'tenant-westfield',
+      name: '2026–2027',
+      startDate: '2026-09-01',
+      endDate: '2027-06-30',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'ay-sj-2026',
+      tenantId: 'tenant-stjude',
+      name: '2026–2027',
+      startDate: '2026-09-01',
+      endDate: '2027-07-20',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+  ];
+
+  const academicTerms: AcademicTerm[] = [
+    {
+      id: 'term-oak-1',
+      tenantId: 'tenant-oakridge',
+      academicYearId: 'ay-oak-2026',
+      name: 'Term 1',
+      startDate: '2026-09-01',
+      endDate: '2026-12-15',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'term-oak-2',
+      tenantId: 'tenant-oakridge',
+      academicYearId: 'ay-oak-2026',
+      name: 'Term 2',
+      startDate: '2027-01-05',
+      endDate: '2027-04-10',
+      status: 'Open',
+      isCurrent: false,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'term-oak-3',
+      tenantId: 'tenant-oakridge',
+      academicYearId: 'ay-oak-2026',
+      name: 'Term 3',
+      startDate: '2027-05-03',
+      endDate: '2027-07-31',
+      status: 'Open',
+      isCurrent: false,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'term-west-1',
+      tenantId: 'tenant-westfield',
+      academicYearId: 'ay-west-2026',
+      name: 'Term 1',
+      startDate: '2026-09-01',
+      endDate: '2026-12-18',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'term-west-2',
+      tenantId: 'tenant-westfield',
+      academicYearId: 'ay-west-2026',
+      name: 'Term 2',
+      startDate: '2027-01-12',
+      endDate: '2027-05-25',
+      status: 'Open',
+      isCurrent: false,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'term-sj-1',
+      tenantId: 'tenant-stjude',
+      academicYearId: 'ay-sj-2026',
+      name: 'Term 1',
+      startDate: '2026-09-01',
+      endDate: '2026-12-16',
+      status: 'Open',
+      isCurrent: true,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+    {
+      id: 'term-sj-2',
+      tenantId: 'tenant-stjude',
+      academicYearId: 'ay-sj-2026',
+      name: 'Term 2',
+      startDate: '2027-01-11',
+      endDate: '2027-04-02',
+      status: 'Open',
+      isCurrent: false,
+      createdAt: '2026-08-15T08:00:00Z',
+    },
+  ];
+
+  const defaultTermByTenant: Record<string, { termId: string; yearId: string }> = {
+    'tenant-oakridge': { termId: 'term-oak-1', yearId: 'ay-oak-2026' },
+    'tenant-westfield': { termId: 'term-west-1', yearId: 'ay-west-2026' },
+    'tenant-stjude': { termId: 'term-sj-1', yearId: 'ay-sj-2026' },
+  };
+
+  for (const r of attendance) {
+    r.termId = defaultTermByTenant[r.tenantId]?.termId;
+  }
+  for (const c of examCycles) {
+    const link = defaultTermByTenant[c.tenantId];
+    if (link) {
+      c.termId = link.termId;
+      c.academicYearId = link.yearId;
+    }
+  }
+  for (const fs of feeStructures) {
+    fs.termId = defaultTermByTenant[fs.tenantId]?.termId;
+  }
+  for (const inv of invoices) {
+    inv.termId = defaultTermByTenant[inv.tenantId]?.termId;
+  }
+
   return {
     devCredentials,
     state: {
       tenants,
       users,
+      academicYears,
+      academicTerms,
       mpesaWebhookHashes: {
         'tenant-oakridge': hashWebhook(oakWebhookSecret),
         'tenant-westfield': hashWebhook(westWebhookSecret),
@@ -2443,6 +2590,7 @@ export async function createSeedDatabase(options?: {
         {
           id: 'ivl-oak-1',
           tenantId: 'tenant-oakridge',
+          termId: 'term-oak-1',
           studentId: 'stu-oak-1',
           studentName: 'Wanjiku Kamau',
           studentCode: 'ADM-2601',
@@ -2463,6 +2611,7 @@ export async function createSeedDatabase(options?: {
         {
           id: 'ivl-oak-2',
           tenantId: 'tenant-oakridge',
+          termId: 'term-oak-1',
           studentId: 'stu-oak-2',
           studentName: 'Brian Ochieng',
           studentCode: 'ADM-2602',
@@ -2523,6 +2672,7 @@ export async function createSeedDatabase(options?: {
       whatsappDispatches: [],
       notifications,
       adminAuditLogs: [],
+      lifecycleAuditLogs: [],
     },
   };
 }
