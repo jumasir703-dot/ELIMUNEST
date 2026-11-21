@@ -12,6 +12,7 @@ import type {
 
 export interface WaiverFormState {
   studentId: string;
+  invoiceId: string;
   kind: FeeWaiverKind;
   mode: FeeWaiverMode;
   value: string;

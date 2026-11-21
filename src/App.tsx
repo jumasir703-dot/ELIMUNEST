@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -24,17 +24,39 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
-import { AnalyticsDashboard } from './components/AnalyticsDashboard';
-import { AdmissionsModule } from './components/AdmissionsModule';
-import { AttendanceModule } from './components/AttendanceModule';
 import { AuthPortal } from './components/AuthPortal';
-import { CommunicationsModule } from './components/CommunicationsModule';
-import { DeveloperPanel, type DevRouteSection } from './components/DeveloperPanel';
-import { ExamsModule } from './components/ExamsModule';
-import { FinanceModule } from './components/FinanceModule';
-import { SettingsModule } from './components/SettingsModule';
-import { SuperAdminModule } from './components/SuperAdminModule';
-import { TimetableModule } from './components/TimetableModule';
+import type { DevRouteSection } from './components/DeveloperPanel';
+
+const AnalyticsDashboard = lazy(() =>
+  import('./components/AnalyticsDashboard').then((m) => ({ default: m.AnalyticsDashboard }))
+);
+const AdmissionsModule = lazy(() =>
+  import('./components/AdmissionsModule').then((m) => ({ default: m.AdmissionsModule }))
+);
+const AttendanceModule = lazy(() =>
+  import('./components/AttendanceModule').then((m) => ({ default: m.AttendanceModule }))
+);
+const CommunicationsModule = lazy(() =>
+  import('./components/CommunicationsModule').then((m) => ({ default: m.CommunicationsModule }))
+);
+const DeveloperPanel = lazy(() =>
+  import('./components/DeveloperPanel').then((m) => ({ default: m.DeveloperPanel }))
+);
+const ExamsModule = lazy(() =>
+  import('./components/ExamsModule').then((m) => ({ default: m.ExamsModule }))
+);
+const FinanceModule = lazy(() =>
+  import('./components/FinanceModule').then((m) => ({ default: m.FinanceModule }))
+);
+const SettingsModule = lazy(() =>
+  import('./components/SettingsModule').then((m) => ({ default: m.SettingsModule }))
+);
+const SuperAdminModule = lazy(() =>
+  import('./components/SuperAdminModule').then((m) => ({ default: m.SuperAdminModule }))
+);
+const TimetableModule = lazy(() =>
+  import('./components/TimetableModule').then((m) => ({ default: m.TimetableModule }))
+);
 import {
   isDeveloperRoleClient,
   saasApi,
@@ -616,21 +638,29 @@ export default function App() {
   if (routeInfo.isDevRoute) {
     return (
       <>
-        <DeveloperPanel
-          section={routeInfo.devSection}
-          onSelectSection={(sec) =>
-            navigatePath(sec === 'telemetry' ? '/dev/telemetry' : `/dev/${sec}`)
+        <Suspense
+          fallback={
+            <div className="flex min-h-screen items-center justify-center bg-slate-950 text-xs text-slate-400">
+              Loading Developer Console...
+            </div>
           }
-          onExitToSchoolPortal={() => navigatePath('/')}
-          authSession={authSession}
-          onAuthenticated={handleAuthenticated}
-          onImpersonationStarted={handleImpersonationStarted}
-          onExitImpersonation={handleExitImpersonation}
-          onSignOut={handleSignOut}
-          darkMode={darkMode}
-          onToggleDarkMode={() => setDarkMode((d) => !d)}
-          onNotify={pushToast}
-        />
+        >
+          <DeveloperPanel
+            section={routeInfo.devSection}
+            onSelectSection={(sec) =>
+              navigatePath(sec === 'telemetry' ? '/dev/telemetry' : `/dev/${sec}`)
+            }
+            onExitToSchoolPortal={() => navigatePath('/')}
+            authSession={authSession}
+            onAuthenticated={handleAuthenticated}
+            onImpersonationStarted={handleImpersonationStarted}
+            onExitImpersonation={handleExitImpersonation}
+            onSignOut={handleSignOut}
+            darkMode={darkMode}
+            onToggleDarkMode={() => setDarkMode((d) => !d)}
+            onNotify={pushToast}
+          />
+        </Suspense>
         {toasts.length > 0 && (
           <div className="fixed bottom-5 right-5 z-50 flex max-w-sm flex-col gap-2 no-print">
             {toasts.map((t) => (
@@ -1024,91 +1054,99 @@ export default function App() {
             </div>
           ) : workspace ? (
             <div key={workspace.tenant.id}>
-              {activeModule === 'analytics' && effectiveModules.includes('analytics') && (
-                <AnalyticsDashboard workspace={workspace} onNavigate={handleNavigate} />
-              )}
-              {activeModule === 'admissions' && effectiveModules.includes('admissions') && (
-                <AdmissionsModule
-                  workspace={workspace}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
-              {activeModule === 'timetable' && effectiveModules.includes('timetable') && (
-                <TimetableModule
-                  workspace={workspace}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
-              {activeModule === 'attendance' && effectiveModules.includes('attendance') && (
-                <AttendanceModule
-                  workspace={workspace}
-                  currentRole={currentRole}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
-              {activeModule === 'exams' && effectiveModules.includes('exams') && (
-                <ExamsModule
-                  workspace={workspace}
-                  currentRole={currentRole}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
-              {activeModule === 'fees' && effectiveModules.includes('fees') && (
-                <FinanceModule
-                  workspace={workspace}
-                  currentRole={currentRole}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
-              {activeModule === 'communications' && effectiveModules.includes('communications') && (
-                <CommunicationsModule
-                  workspace={workspace}
-                  currentRole={currentRole}
-                  wsConnected={wsConnected}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                  onNavigate={handleNavigate}
-                />
-              )}
-              {activeModule === 'settings' && effectiveModules.includes('settings') && (
-                <SettingsModule
-                  workspace={workspace}
-                  currentRole={currentRole}
-                  currentUserId={authSession.user.id}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onSwitchTenant={(newId) => {
-                    if (isPlatformSuperAdmin) {
-                      setTenantId(newId);
-                      setActiveModule('analytics');
-                    }
-                  }}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
-              {activeModule === 'super-admin' && canAccessSuperAdmin && (
-                <SuperAdminModule
-                  workspace={workspace}
-                  currentRole={currentRole}
-                  onRefresh={() => loadWorkspace(tenantId, true)}
-                  onPreviewBrandingChange={setPreviewBrandingOverride}
-                  onSwitchTenant={(newId, targetModule) => {
-                    if (isPlatformSuperAdmin || newId === workspace.tenant.id) {
-                      setTenantId(newId);
-                      if (targetModule) {
-                        handleNavigate(targetModule);
-                      } else {
+              <Suspense
+                fallback={
+                  <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
+                    Loading workspace module...
+                  </div>
+                }
+              >
+                {activeModule === 'analytics' && effectiveModules.includes('analytics') && (
+                  <AnalyticsDashboard workspace={workspace} onNavigate={handleNavigate} />
+                )}
+                {activeModule === 'admissions' && effectiveModules.includes('admissions') && (
+                  <AdmissionsModule
+                    workspace={workspace}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'timetable' && effectiveModules.includes('timetable') && (
+                  <TimetableModule
+                    workspace={workspace}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'attendance' && effectiveModules.includes('attendance') && (
+                  <AttendanceModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'exams' && effectiveModules.includes('exams') && (
+                  <ExamsModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'fees' && effectiveModules.includes('fees') && (
+                  <FinanceModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'communications' && effectiveModules.includes('communications') && (
+                  <CommunicationsModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    wsConnected={wsConnected}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                    onNavigate={handleNavigate}
+                  />
+                )}
+                {activeModule === 'settings' && effectiveModules.includes('settings') && (
+                  <SettingsModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    currentUserId={authSession.user.id}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onSwitchTenant={(newId) => {
+                      if (isPlatformSuperAdmin) {
+                        setTenantId(newId);
                         setActiveModule('analytics');
                       }
-                    }
-                  }}
-                  onNotify={(msg, tone) => pushToast(msg, tone)}
-                />
-              )}
+                    }}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'super-admin' && canAccessSuperAdmin && (
+                  <SuperAdminModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onPreviewBrandingChange={setPreviewBrandingOverride}
+                    onSwitchTenant={(newId, targetModule) => {
+                      if (isPlatformSuperAdmin || newId === workspace.tenant.id) {
+                        setTenantId(newId);
+                        if (targetModule) {
+                          handleNavigate(targetModule);
+                        } else {
+                          setActiveModule('analytics');
+                        }
+                      }
+                    }}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+              </Suspense>
             </div>
           ) : null}
         </main>

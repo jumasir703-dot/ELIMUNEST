@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Save } from 'lucide-react';
 import { saasApi } from '../../lib/api';
 import {
-  KENYAN_BELL_SCHEDULE,
+  getTenantLessonRows,
   type DayOfWeek,
   type TenantWorkspaceData,
 } from '../../shared/types';
@@ -14,12 +14,12 @@ interface Props {
 }
 
 const DAYS: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
-const LESSON_ROWS = KENYAN_BELL_SCHEDULE.filter((r) => r.kind === 'lesson');
-const PERIODS = LESSON_ROWS.map((r) => r.period as number);
 const key = (d: DayOfWeek, p: number) => `${d}|${p}`;
 
 export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Props) {
   const { tenant } = workspace;
+  const lessonRows = useMemo(() => getTenantLessonRows(tenant), [tenant]);
+  const periods = useMemo(() => lessonRows.map((r) => r.period as number), [lessonRows]);
   const [teacherId, setTeacherId] = useState(tenant.teachers[0]?.id || '');
   const teacher = tenant.teachers.find((t) => t.id === teacherId);
   const [blocked, setBlocked] = useState<Set<string>>(new Set());
@@ -27,9 +27,16 @@ export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Pro
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setBlocked(new Set((teacher?.unavailable || []).map((u) => key(u.day, u.period))));
+    const valid = new Set(periods);
+    setBlocked(
+      new Set(
+        (teacher?.unavailable || [])
+          .filter((u) => valid.has(u.period))
+          .map((u) => key(u.day, u.period))
+      )
+    );
     setMaxPerDay(teacher?.maxLessonsPerDay || 0);
-  }, [teacher?.id, teacher?.unavailable, teacher?.maxLessonsPerDay]);
+  }, [teacher?.id, teacher?.unavailable, teacher?.maxLessonsPerDay, periods]);
 
   const toggle = (d: DayOfWeek, p: number) =>
     setBlocked((prev) => {
@@ -66,7 +73,7 @@ export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Pro
     }
   }
 
-  const available = DAYS.length * PERIODS.length - blocked.size;
+  const available = DAYS.length * periods.length - blocked.size;
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
@@ -97,7 +104,7 @@ export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Pro
             <input
               type="number"
               min={0}
-              max={PERIODS.length}
+              max={periods.length}
               value={maxPerDay}
               onChange={(e) => setMaxPerDay(Number(e.target.value))}
               placeholder="No limit"
@@ -122,7 +129,7 @@ export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Pro
               {DAYS.map((d) => (
                 <th key={d}>
                   <button
-                    onClick={() => toggleMany(PERIODS.map((p) => [d, p]))}
+                    onClick={() => toggleMany(periods.map((p) => [d, p]))}
                     className="w-full rounded-md bg-slate-100 px-2 py-1.5 font-medium text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
                   >
                     {d}
@@ -132,7 +139,7 @@ export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Pro
             </tr>
           </thead>
           <tbody>
-            {LESSON_ROWS.map((row) => (
+            {lessonRows.map((row) => (
               <tr key={row.period}>
                 <th className="pr-1 text-left">
                   <button
@@ -170,7 +177,7 @@ export function TeacherAvailabilityPanel({ workspace, onRefresh, onNotify }: Pro
         </table>
       </div>
       <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-        {available} of {DAYS.length * PERIODS.length} weekly slots available{maxPerDay > 0 ? `, max ${maxPerDay} lessons per day` : ''}.
+        {available} of {DAYS.length * periods.length} weekly slots available{maxPerDay > 0 ? `, max ${maxPerDay} lessons per day` : ''}.
       </p>
     </div>
   );

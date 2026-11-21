@@ -10,6 +10,7 @@ import type {
   AttendanceRecord,
   AttendanceStatus,
   AuthSessionInfo,
+  BellScheduleRow,
   BudgetAllocation,
   CbcClusterId,
   CreditNoteRecord,
@@ -38,6 +39,7 @@ import type {
   MpesaTransactionLog,
   NonTeachingStaffProfile,
   OnboardingChecklist,
+  OptionalSubjectGroup,
   PayeBand,
   PaymentMethod,
   PayrollEntry,
@@ -51,6 +53,7 @@ import type {
   StaffAttendanceRecord,
   StaffCategory,
   Student,
+  SubjectTimetableConstraint,
   SubscriptionCycle,
   SuperAdminTenantSummary,
   TeacherClassAssignment,
@@ -840,6 +843,43 @@ export const saasApi = {
   solveTimetable(tenantId: string, payload: { grades?: string[]; assignRooms?: boolean; seed?: number }) {
     return apiRequest<TimetableSolveResult>('/api/timetable/solve', {
       method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  saveTimetableDaySchedule(
+    tenantId: string,
+    payload: {
+      bellSchedule: BellScheduleRow[];
+      dayOpeningNote?: string;
+      dayClosingNote?: string;
+    }
+  ) {
+    return apiRequest<{
+      bellSchedule: BellScheduleRow[];
+      dayOpeningNote?: string;
+      dayClosingNote?: string;
+    }>('/api/timetable/day-schedule', {
+      method: 'PUT',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  saveSubjectTimetableConfig(
+    tenantId: string,
+    payload: {
+      subjectConstraints?: SubjectTimetableConstraint[];
+      optionalSubjectGroups?: OptionalSubjectGroup[];
+      syncLessons?: boolean;
+    }
+  ) {
+    return apiRequest<{
+      subjectConstraints: SubjectTimetableConstraint[];
+      optionalSubjectGroups: OptionalSubjectGroup[];
+    }>('/api/timetable/subject-constraints', {
+      method: 'PUT',
       tenantId,
       body: JSON.stringify(payload),
     });

@@ -15,11 +15,11 @@ import {
 import type {
   FeeStructure,
   IndependentVotelineItem,
-  SchoolTenant,
+  Tenant,
 } from '../../shared/types';
 
 interface PrintableFeeStructureModalProps {
-  tenant: SchoolTenant;
+  tenant: Tenant;
   structure: FeeStructure;
   independentVotelines: IndependentVotelineItem[];
   copiedStructureId: string | null;

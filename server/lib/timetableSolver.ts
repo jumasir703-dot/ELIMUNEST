@@ -1,16 +1,21 @@
 /**
- * aSc-style timetable solver.
+ * Timetable constraint solver.
  *
  * Inputs are "lesson cards" (class + subject + teacher + periods per week, optionally some of them
- * as double periods), teacher availability, rooms and already-locked lessons. The solver places
- * every lesson block on a (day, period) grid with these HARD rules:
- *   - a class, a teacher and a room can only be in one place at a time
+ * as double periods, time window restrictions, and optional parallel subject group IDs),
+ * teacher availability, rooms, custom bell schedule periods, and already-locked lessons.
+ *
+ * Hard rules:
+ *   - a teacher and a room can only be in one place at a time
+ *   - a class can only have one lesson at a time, EXCEPT lessons sharing the same optionalGroupId
+ *     (which are taught in parallel during the same class slot)
  *   - teachers are never scheduled in their unavailable slots, nor above their max lessons per day
  *   - double periods never cross a break (they start on a configured "double start" period)
+ *   - lessons respect subject time window restrictions (allowedPeriods from notBefore/notAfter)
  *   - a subject appears at most `maxPerDay` times per class per day (relaxed once if needed)
- * and optimises SOFT preferences: spread a subject across the week, balanced days, few gaps for
- * classes and teachers. It runs several randomised attempts with a one-step "eject and re-place"
- * repair and returns the best result plus a reason for everything it could not place.
+ *
+ * Soft preferences: parallel optional subjects align on the same slots, subjects spread across the
+ * week, balanced days, few gaps for classes and teachers.
  *
  * Pure and deterministic for a given seed: no I/O, safe to unit-test.
  */
@@ -30,6 +35,10 @@ export interface SolverLesson {
   room?: string;
   /** Max periods of this subject per class per day. Default: ceil(periodsPerWeek / days). */
   maxPerDay?: number;
+  /** Allowed period numbers for this subject/lesson (computed from notBeforeTime/notAfterTime). */
+  allowedPeriods?: number[];
+  /** Optional subject group identifier; lessons with the same (class, optionalGroupId) share slots. */
+  optionalGroupId?: string;
 }
 
 export interface SolverPlacement {
@@ -101,7 +110,6 @@ interface Placed {
   locked: boolean;
 }
 
-// small deterministic PRNG (mulberry32)
 function makeRng(seed: number) {
   let a = seed >>> 0;
   return () => {
@@ -116,16 +124,19 @@ function makeRng(seed: number) {
 const classKey = (l: { grade: string; section: string }) => `${l.grade}::${l.section}`;
 
 class Attempt {
-  private classBusy = new Map<string, Placed>(); // `${class}|${day}|${period}`
+  private classBusy = new Map<string, Placed[]>(); // `${class}|${day}|${period}`
   private teacherBusy = new Map<string, Placed>();
   private roomBusy = new Map<string, Placed>();
   private teacherDayCount = new Map<string, number>();
   private subjectDayCount = new Map<string, number>(); // `${class}|${subject}|${day}`
-  private classDayPeriods = new Map<string, Set<number>>(); // `${class}|${day}`
+  private classDayPeriods = new Map<string, Map<number, number>>(); // `${class}|${day}` -> period -> count
   private teacherDayPeriods = new Map<string, Set<number>>();
+  private groupSlots = new Map<string, Map<string, number>>(); // `${class}|${groupId}` -> `${day}|${period}` -> count
   placed: Placed[] = [];
   private unavailable = new Map<string, Set<string>>();
+  private allowedPeriodSets = new Map<string, Set<number>>();
   private periodIndex = new Map<number, number>();
+  private groupCap = new Map<string, number>(); // `${class}|${groupId}` -> max periodsPerWeek
 
   constructor(
     private input: SolverInput,
@@ -136,6 +147,15 @@ class Attempt {
     for (const [tid, c] of Object.entries(input.teachers)) {
       this.unavailable.set(tid, new Set((c.unavailable || []).map((u) => `${u.day}|${u.period}`)));
     }
+    for (const l of input.lessons) {
+      if (l.allowedPeriods) {
+        this.allowedPeriodSets.set(l.id, new Set(l.allowedPeriods));
+      }
+      if (l.optionalGroupId) {
+        const gk = `${classKey(l)}|${l.optionalGroupId}`;
+        this.groupCap.set(gk, Math.max(this.groupCap.get(gk) || 0, l.periodsPerWeek));
+      }
+    }
   }
 
   private covers(start: number, length: 1 | 2): number[] | null {
@@ -145,7 +165,7 @@ class Attempt {
     return [start, this.input.periods[idx + 1]];
   }
 
-  /** Returns null when the spot is free, otherwise the reason (and optionally the blocker). */
+  /** Returns null when the spot is free, otherwise the reason (and optionally a movable blocker). */
   private check(
     block: Block,
     day: SolverDay,
@@ -157,6 +177,14 @@ class Attempt {
     if (block.length === 2 && !this.input.doubleStarts.includes(start)) {
       return { reason: 'no double-period slot available' };
     }
+
+    const allowed = this.allowedPeriodSets.get(block.lesson.id);
+    if (allowed) {
+      for (const p of ps) {
+        if (!allowed.has(p)) return { reason: 'subject time window restricted' };
+      }
+    }
+
     const ck = classKey(block.lesson);
     const tid = block.lesson.teacherId;
     const tc = this.input.teachers[tid] || {};
@@ -167,24 +195,65 @@ class Attempt {
     }
     if (tc.maxPerDay !== undefined) {
       const used = this.teacherDayCount.get(`${tid}|${day}`) || 0;
-      const own = ignore && ignore.block.lesson.teacherId === tid && ignore.day === day ? ignore.block.length : 0;
-      if (used - own + ps.length > tc.maxPerDay) return { reason: "teacher's daily maximum reached" };
+      const own =
+        ignore && ignore.block.lesson.teacherId === tid && ignore.day === day
+          ? ignore.block.length
+          : 0;
+      if (used - own + ps.length > tc.maxPerDay) {
+        return { reason: "teacher's daily maximum reached" };
+      }
     }
     for (const p of ps) {
       const t = this.teacherBusy.get(`${tid}|${day}|${p}`);
       if (t && t !== ignore) return { reason: 'teacher is already teaching', blocker: t };
     }
+
+    const optGroup = block.lesson.optionalGroupId;
     for (const p of ps) {
-      const c = this.classBusy.get(`${ck}|${day}|${p}`);
-      if (c && c !== ignore) return { reason: 'class already has a lesson', blocker: c };
+      const existing = (this.classBusy.get(`${ck}|${day}|${p}`) || []).filter((x) => x !== ignore);
+      if (existing.length > 0) {
+        const incompatible = existing.find(
+          (x) =>
+            !optGroup ||
+            x.block.lesson.optionalGroupId !== optGroup ||
+            x.block.lesson.subject.toLowerCase() === block.lesson.subject.toLowerCase()
+        );
+        if (incompatible) {
+          return { reason: 'class already has a lesson', blocker: incompatible };
+        }
+      }
     }
+
+    // Keep parallel optional subjects aligned within the group's weekly slot budget
+    if (optGroup) {
+      const gk = `${ck}|${optGroup}`;
+      const cap = this.groupCap.get(gk) || block.lesson.periodsPerWeek;
+      const slotMap = this.groupSlots.get(gk);
+      const currentDistinct = slotMap ? slotMap.size : 0;
+      let newSlotsOpened = 0;
+      for (const p of ps) {
+        const sk = `${day}|${p}`;
+        if (!slotMap?.has(sk)) {
+          newSlotsOpened += 1;
+        }
+      }
+      if (currentDistinct + newSlotsOpened > cap) {
+        return { reason: 'optional subject group must share parallel slots' };
+      }
+    }
+
     const sub = this.subjectDayCount.get(`${ck}|${block.lesson.subject}|${day}`) || 0;
     const ownSub =
-      ignore && classKey(ignore.block.lesson) === ck && ignore.block.lesson.subject === block.lesson.subject && ignore.day === day
+      ignore &&
+      classKey(ignore.block.lesson) === ck &&
+      ignore.block.lesson.subject === block.lesson.subject &&
+      ignore.day === day
         ? ignore.block.length
         : 0;
     const cap = Math.max(block.maxPerDay + this.relaxCap, block.length);
-    if (sub - ownSub + ps.length > cap) return { reason: 'subject limit per day reached' };
+    if (sub - ownSub + ps.length > cap) {
+      return { reason: 'subject limit per day reached' };
+    }
 
     return null;
   }
@@ -207,7 +276,7 @@ class Attempt {
     return null;
   }
 
-  private gapsAfter(periods: Set<number> | undefined, add: number[]): number {
+  private gapsAfter(periods: Iterable<number> | undefined, add: number[]): number {
     const all = new Set([...(periods || []), ...add]);
     if (all.size === 0) return 0;
     const idx = [...all].map((p) => this.periodIndex.get(p) ?? 0).sort((a, b) => a - b);
@@ -219,14 +288,25 @@ class Attempt {
     const ck = classKey(block.lesson);
     const tid = block.lesson.teacherId;
     const sameSubject = this.subjectDayCount.get(`${ck}|${block.lesson.subject}|${day}`) || 0;
-    const classPeriods = this.classDayPeriods.get(`${ck}|${day}`);
+    const classPeriodMap = this.classDayPeriods.get(`${ck}|${day}`);
     const teacherPeriods = this.teacherDayPeriods.get(`${tid}|${day}`);
     let s = 0;
     s += sameSubject * 6; // spread a subject over the week
-    s += (classPeriods?.size || 0) * 0.9; // balance class days
-    s += this.gapsAfter(classPeriods, ps) * 4; // avoid class gaps
+    s += (classPeriodMap?.size || 0) * 0.9; // balance class days
+    s += this.gapsAfter(classPeriodMap?.keys(), ps) * 4; // avoid class gaps
     s += this.gapsAfter(teacherPeriods, ps) * 1.5; // avoid teacher gaps
     s += (this.teacherDayCount.get(`${tid}|${day}`) || 0) * 0.4; // balance teacher days
+
+    // Strongly reward aligning optional subjects onto slots already opened by their parallel group
+    if (block.lesson.optionalGroupId) {
+      const slotMap = this.groupSlots.get(`${ck}|${block.lesson.optionalGroupId}`);
+      for (const p of ps) {
+        if (slotMap?.has(`${day}|${p}`)) {
+          s -= 50;
+        }
+      }
+    }
+
     s += this.rng() * 1.5; // jitter between attempts
     return s;
   }
@@ -237,11 +317,26 @@ class Attempt {
     const ck = classKey(block.lesson);
     const tid = block.lesson.teacherId;
     for (const p of ps) {
-      this.classBusy.set(`${ck}|${day}|${p}`, pl);
+      const cKey = `${ck}|${day}|${p}`;
+      const list = this.classBusy.get(cKey) || [];
+      list.push(pl);
+      this.classBusy.set(cKey, list);
+
       this.teacherBusy.set(`${tid}|${day}|${p}`, pl);
       if (room) this.roomBusy.set(`${room}|${day}|${p}`, pl);
-      this.addTo(this.classDayPeriods, `${ck}|${day}`, p);
+
+      let cDayMap = this.classDayPeriods.get(`${ck}|${day}`);
+      if (!cDayMap) this.classDayPeriods.set(`${ck}|${day}`, (cDayMap = new Map()));
+      cDayMap.set(p, (cDayMap.get(p) || 0) + 1);
+
       this.addTo(this.teacherDayPeriods, `${tid}|${day}`, p);
+
+      if (block.lesson.optionalGroupId) {
+        const gk = `${ck}|${block.lesson.optionalGroupId}`;
+        let gMap = this.groupSlots.get(gk);
+        if (!gMap) this.groupSlots.set(gk, (gMap = new Map()));
+        gMap.set(`${day}|${p}`, (gMap.get(`${day}|${p}`) || 0) + 1);
+      }
     }
     this.teacherDayCount.set(`${tid}|${day}`, (this.teacherDayCount.get(`${tid}|${day}`) || 0) + ps.length);
     const sk = `${ck}|${block.lesson.subject}|${day}`;
@@ -261,11 +356,33 @@ class Attempt {
     const ck = classKey(pl.block.lesson);
     const tid = pl.block.lesson.teacherId;
     for (const p of ps) {
-      this.classBusy.delete(`${ck}|${pl.day}|${p}`);
+      const cKey = `${ck}|${pl.day}|${p}`;
+      const filtered = (this.classBusy.get(cKey) || []).filter((x) => x !== pl);
+      if (filtered.length > 0) this.classBusy.set(cKey, filtered);
+      else this.classBusy.delete(cKey);
+
       this.teacherBusy.delete(`${tid}|${pl.day}|${p}`);
       if (pl.room) this.roomBusy.delete(`${pl.room}|${pl.day}|${p}`);
-      this.classDayPeriods.get(`${ck}|${pl.day}`)?.delete(p);
+
+      const cDayMap = this.classDayPeriods.get(`${ck}|${pl.day}`);
+      if (cDayMap) {
+        const prev = cDayMap.get(p) || 0;
+        if (prev <= 1) cDayMap.delete(p);
+        else cDayMap.set(p, prev - 1);
+      }
+
       this.teacherDayPeriods.get(`${tid}|${pl.day}`)?.delete(p);
+
+      if (pl.block.lesson.optionalGroupId) {
+        const gk = `${ck}|${pl.block.lesson.optionalGroupId}`;
+        const gMap = this.groupSlots.get(gk);
+        if (gMap) {
+          const sk = `${pl.day}|${p}`;
+          const prev = gMap.get(sk) || 0;
+          if (prev <= 1) gMap.delete(sk);
+          else gMap.set(sk, prev - 1);
+        }
+      }
     }
     this.teacherDayCount.set(`${tid}|${pl.day}`, (this.teacherDayCount.get(`${tid}|${pl.day}`) || 0) - ps.length);
     const sk = `${ck}|${pl.block.lesson.subject}|${pl.day}`;
@@ -305,7 +422,6 @@ class Attempt {
         const blocker = fail.blocker;
         const old = { day: blocker.day, start: blocker.start, room: blocker.room };
         this.remove(blocker);
-        // Does the target spot become free once the blocker is gone?
         if (this.check(block, day, start)) {
           this.add(blocker.block, old.day, old.start, old.room, false);
           continue;
@@ -318,7 +434,6 @@ class Attempt {
         }
         this.add(block, day, start, room, false);
         if (this.tryPlace(blocker.block, { day: old.day, start: old.start })) return true;
-        // blocker could not move: undo
         const mine = this.placed[this.placed.length - 1];
         this.remove(mine);
         this.add(blocker.block, old.day, old.start, old.room, false);
@@ -376,11 +491,37 @@ function precheck(input: SolverInput): string[] {
   const warnings: string[] = [];
   const slotsPerWeek = input.days.length * input.periods.length;
   const classLoad = new Map<string, number>();
+  const classOptGroups = new Map<string, Map<string, number>>();
   const teacherLoad = new Map<string, number>();
+
   for (const l of input.lessons) {
-    classLoad.set(classKey(l), (classLoad.get(classKey(l)) || 0) + l.periodsPerWeek);
+    const ck = classKey(l);
+    if (l.optionalGroupId) {
+      let gMap = classOptGroups.get(ck);
+      if (!gMap) classOptGroups.set(ck, (gMap = new Map()));
+      gMap.set(l.optionalGroupId, Math.max(gMap.get(l.optionalGroupId) || 0, l.periodsPerWeek));
+    } else {
+      classLoad.set(ck, (classLoad.get(ck) || 0) + l.periodsPerWeek);
+    }
     teacherLoad.set(l.teacherId, (teacherLoad.get(l.teacherId) || 0) + l.periodsPerWeek);
+
+    if (l.allowedPeriods) {
+      const allowedWeekly = input.days.length * l.allowedPeriods.length;
+      if (l.periodsPerWeek > allowedWeekly) {
+        warnings.push(
+          `${l.grade} · Stream ${l.section} ${l.subject} needs ${l.periodsPerWeek} periods/week, but its time restriction only allows ${allowedWeekly} slots/week.`
+        );
+      }
+    }
   }
+  for (const [ck, gMap] of classOptGroups) {
+    let sum = classLoad.get(ck) || 0;
+    gMap.forEach((v) => {
+      sum += v;
+    });
+    classLoad.set(ck, sum);
+  }
+
   classLoad.forEach((n, k) => {
     if (n > slotsPerWeek) {
       warnings.push(`${k.replace('::', ' · Stream ')} has ${n} lessons per week but only ${slotsPerWeek} time slots.`);
@@ -403,7 +544,6 @@ export function solveTimetable(input: SolverInput): SolverResult {
   const attemptsMax = Math.max(1, input.attempts ?? 24);
   const deadline = Date.now() + (input.timeBudgetMs ?? 2500);
 
-  // Locked lessons count towards each lesson's weekly total.
   const lockedPeriods = new Map<string, number>();
   const lockedByKey = new Map<string, SolverPlacement[]>();
   for (const p of input.locked || []) {
@@ -455,9 +595,11 @@ export function solveTimetable(input: SolverInput): SolverResult {
     run++;
     const rng = makeRng((input.seed ?? 1) * 7919 + a * 104729);
     const blocks = buildBlocks(input.lessons, input.days.length, lockedPeriods);
-    // hardest first: doubles, then busiest / most restricted teachers, then random
+    // Hardest first: doubles, restricted time windows, optional group members, busiest/restricted teachers
     const hardness = (b: Block) =>
       (b.length === 2 ? 1000 : 0) +
+      (b.lesson.allowedPeriods ? (input.periods.length - b.lesson.allowedPeriods.length) * 40 : 0) +
+      (b.lesson.optionalGroupId ? 250 : 0) +
       (teacherLoad.get(b.lesson.teacherId) || 0) * 3 +
       (input.teachers[b.lesson.teacherId]?.unavailable?.length || 0) * 2 +
       (b.lesson.room ? 5 : 0);
@@ -466,7 +608,6 @@ export function solveTimetable(input: SolverInput): SolverResult {
 
     let result = runPass(blocks, rng, 0);
     if (result.remaining > 0) {
-      // second chance with the per-day subject cap relaxed by one
       const relaxed = runPass(blocks, rng, 1);
       if (relaxed.remaining < result.remaining) result = relaxed;
     }
@@ -477,7 +618,7 @@ export function solveTimetable(input: SolverInput): SolverResult {
   const final = best!;
   const placements: SolverPlacement[] = [];
   for (const pl of final.attempt.placed) {
-    if (pl.locked) continue; // locked / fixed slots already exist; only report new placements
+    if (pl.locked) continue;
     const ps = pl.block.length === 2 ? secondPeriod(input, pl.start) : null;
     const base = {
       lessonId: pl.block.lesson.id,

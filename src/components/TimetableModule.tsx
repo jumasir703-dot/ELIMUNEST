@@ -15,21 +15,30 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import { DaySchedulePanel } from './timetable/DaySchedulePanel';
 import { LessonCardsPanel } from './timetable/LessonCardsPanel';
 import { SolveDialog } from './timetable/SolveDialog';
+import { SubjectConstraintsPanel } from './timetable/SubjectConstraintsPanel';
 import { TeacherAvailabilityPanel } from './timetable/TeacherAvailabilityPanel';
-import { PERIOD_LABELS } from '../lib/format';
 import {
+  areSubjectsInSameOptionalGroup,
   CLASS_TEACHER_SUBJECT_TOKEN,
+  DEFAULT_DAY_CLOSING_NOTE,
+  DEFAULT_DAY_OPENING_NOTE,
+  findOptionalGroupForSubject,
   getClusterForGrade,
   getLessonsPerWeekForSubject,
   getStreamsForGrade,
   getSubjectsForGrade,
   getSubjectsForLevel,
+  getTenantBellSchedule,
+  getTenantLessonRows,
+  getTenantPeriodTimes,
   isSingleTeacherGrade,
-  KENYAN_BELL_SCHEDULE,
+  isSlotWithinSubjectTimeWindow,
   KENYAN_CBC_CLUSTERS,
   KENYAN_CBC_LEVEL_SUBJECTS,
+  resolveSubjectConstraint,
   type CbcClusterDefinition,
   type CbcClusterId,
   type DayOfWeek,
@@ -52,16 +61,21 @@ interface EditableSubjectRow {
 }
 
 const DAYS: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
-const PERIODS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableModuleProps) {
   const { tenant, timetable } = workspace;
+  const bellSchedule = useMemo(() => getTenantBellSchedule(tenant), [tenant]);
+  const lessonRows = useMemo(() => getTenantLessonRows(tenant), [tenant]);
+  const periodTimes = useMemo(() => getTenantPeriodTimes(tenant), [tenant]);
+  const weeklySlotsCap = Math.max(1, lessonRows.length * 5);
+
   const defaultGrade = tenant.grades.includes('Grade 9')
     ? 'Grade 9'
     : tenant.grades[0] || 'Grade 9';
   const defaultStreams = getStreamsForGrade(tenant, defaultGrade);
 
   const [activeTab, setActiveTab] = useState<'grid' | 'lessons' | 'constraints' | 'teachers'>('grid');
+  const [constraintSection, setConstraintSection] = useState<'subjects' | 'schedule' | 'teachers'>('subjects');
   const [solveOpen, setSolveOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'grade' | 'teacher' | 'room'>('grade');
   const [selectedGrade, setSelectedGrade] = useState<string>(defaultGrade);
@@ -292,10 +306,10 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
     const clusters = Array.from(
       new Set(genTargetGrades.map((g) => getClusterForGrade(g)))
     );
-    if (clusters.length === 0) return `${Math.min(40, totalConfiguredLessons)} lessons / week`;
+    if (clusters.length === 0) return `${Math.min(weeklySlotsCap, totalConfiguredLessons)} lessons / week`;
     const totals = clusters.map((cid) =>
       Math.min(
-        40,
+        weeklySlotsCap,
         getSubjectsForLevel(tenant, cid).reduce(
           (sum, sub) => sum + getLessonsPerWeekForSubject(tenant, sub, cid),
           0
@@ -305,7 +319,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
     const min = Math.min(...totals);
     const max = Math.max(...totals);
     return min === max ? `${min} lessons / week` : `${min}–${max} lessons / week by level`;
-  }, [genTargetGrades, tenant, totalConfiguredLessons]);
+  }, [genTargetGrades, tenant, totalConfiguredLessons, weeklySlotsCap]);
 
   const uncoveredSubjects = useMemo(
     () =>
@@ -317,11 +331,41 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
 
   // Live conflict checker before saving a manual slot
   const liveConflict = useMemo(() => {
+    const times = periodTimes[slotForm.period];
+    if (!times) {
+      return `Lesson ${slotForm.period} is not configured in this school's bell schedule.`;
+    }
+    const subRule = resolveSubjectConstraint(tenant, slotForm.grade, slotForm.subject);
+    const winCheck = isSlotWithinSubjectTimeWindow(times, subRule);
+    if (!winCheck.ok) {
+      return `${slotForm.subject}: ${winCheck.reason}`;
+    }
+
+    const teacher = tenant.teachers.find((t) => t.id === slotForm.teacherId);
+    if (teacher) {
+      if ((teacher.unavailable || []).some((u) => u.day === slotForm.day && u.period === slotForm.period)) {
+        return `${teacher.name} is marked unavailable on ${slotForm.day} Lesson ${slotForm.period}.`;
+      }
+      if (teacher.maxLessonsPerDay) {
+        const dayLoad = timetable.filter(
+          (s) => s.teacherId === teacher.id && s.day === slotForm.day && s.id !== editingSlotId
+        ).length;
+        if (dayLoad >= teacher.maxLessonsPerDay) {
+          return `${teacher.name} already has ${dayLoad} lesson(s) on ${slotForm.day} (daily limit ${teacher.maxLessonsPerDay}).`;
+        }
+      }
+    }
+
     const others = timetable.filter(
       (s) => s.day === slotForm.day && s.period === slotForm.period && s.id !== editingSlotId
     );
-    const classClash = others.find(
+    const classSlots = others.filter(
       (s) => s.grade === slotForm.grade && s.section === slotForm.section
+    );
+    const classClash = classSlots.find(
+      (s) =>
+        s.subject.trim().toLowerCase() === slotForm.subject.trim().toLowerCase() ||
+        !areSubjectsInSameOptionalGroup(tenant, slotForm.grade, s.subject, slotForm.subject)
     );
     if (classClash) {
       return `${slotForm.grade} Stream ${slotForm.section} already has ${classClash.subject} in Lesson ${slotForm.period}.`;
@@ -335,7 +379,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
       return `${slotForm.room} is already occupied by ${roomClash.grade} Stream ${roomClash.section} (${roomClash.subject}).`;
     }
     return null;
-  }, [timetable, slotForm, editingSlotId]);
+  }, [timetable, slotForm, editingSlotId, periodTimes, tenant]);
 
   const filteredSlots = useMemo(() => {
     if (viewMode === 'grade') {
@@ -858,10 +902,10 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-            Kenyan School Timetable
+            School Timetable
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            8-lesson Kenyan bell schedule (08:00 – 15:20 with breaks), teacher–class & subject allocation, custom subjects, and clash-free generation.
+            {lessonRows.length}-lesson daily schedule ({lessonRows[0]?.startTime || '08:00'} – {lessonRows[lessonRows.length - 1]?.endTime || '15:20'}), subject constraints & optional groups, teacher allocation, and clash-free generation.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -1034,11 +1078,12 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
             </div>
           </div>
 
-          {/* Kenyan Weekly Timetable Grid */}
+          {/* Weekly Timetable Grid */}
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
               <span className="font-medium text-slate-700 dark:text-slate-300">
-                07:30 – 08:00 Morning Assembly / Pre-Lesson Prep
+                {(tenant.dayOpeningNote !== undefined ? tenant.dayOpeningNote : DEFAULT_DAY_OPENING_NOTE) ||
+                  `${lessonRows.length}-Period Daily Timetable`}
               </span>
               <span className="flex items-center gap-3">
                 <button
@@ -1074,11 +1119,11 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {KENYAN_BELL_SCHEDULE.map((row, rowIdx) => {
+                  {bellSchedule.map((row, rowIdx) => {
                     if (row.kind === 'break') {
                       return (
                         <tr
-                          key={`break-${rowIdx}`}
+                          key={`break-${row.id || rowIdx}`}
                           className="bg-amber-50/50 dark:bg-amber-950/20"
                         >
                           <td className="border-r border-slate-200 px-4 py-2 dark:border-slate-800">
@@ -1111,44 +1156,80 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                           </p>
                         </td>
                         {DAYS.map((day) => {
-                          const slot = filteredSlots.find(
+                          const cellSlots = filteredSlots.filter(
                             (s) => s.day === day && s.period === period
                           );
+                          const hasOptionalInCell =
+                            viewMode === 'grade' &&
+                            cellSlots.some((s) =>
+                              Boolean(findOptionalGroupForSubject(tenant, s.grade, s.subject))
+                            );
                           return (
                             <td
                               key={day}
                               className="border-r border-slate-200 p-2 align-top last:border-r-0 dark:border-slate-800"
                             >
-                              {slot ? (
-                                <div className="relative">
-                                <button
-                                  onClick={() => openEdit(slot)}
-                                  className="w-full rounded-lg border border-slate-200 bg-slate-50/80 p-2.5 text-left transition-colors hover:border-blue-400 hover:bg-blue-50/50 dark:border-slate-700/80 dark:bg-slate-800/70 dark:hover:border-blue-500 dark:hover:bg-slate-800"
-                                >
-                                  <p className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
-                                    {slot.subject}
-                                  </p>
-                                  <p className="mt-1 truncate text-[11px] text-slate-600 dark:text-slate-400">
-                                    {viewMode === 'grade'
-                                      ? slot.teacherName
-                                      : `${slot.grade} · Stream ${slot.section}`}
-                                  </p>
-                                  <p className="mt-0.5 font-mono text-[11px] text-blue-700 dark:text-blue-400">
-                                    {slot.room}
-                                  </p>
-                                </button>
-                                <button
-                                  onClick={() => setLocked([slot.id], !slot.locked)}
-                                  aria-label={slot.locked ? 'Unlock lesson' : 'Lock lesson in place'}
-                                  title={slot.locked ? 'Locked: the solver will not move this lesson' : 'Lock this lesson in place'}
-                                  className={`absolute top-1.5 right-1.5 rounded p-1 ${
-                                    slot.locked
-                                      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300'
-                                      : 'text-slate-300 hover:bg-slate-200 hover:text-slate-600 dark:text-slate-600 dark:hover:bg-slate-700'
-                                  }`}
-                                >
-                                  {slot.locked ? <Lock className="h-3 w-3" /> : <LockOpen className="h-3 w-3" />}
-                                </button>
+                              {cellSlots.length > 0 ? (
+                                <div className="space-y-1.5">
+                                  {cellSlots.map((slot) => {
+                                    const optGroup = findOptionalGroupForSubject(
+                                      tenant,
+                                      slot.grade,
+                                      slot.subject
+                                    );
+                                    return (
+                                      <div key={slot.id} className="relative">
+                                        <button
+                                          onClick={() => openEdit(slot)}
+                                          className={`w-full rounded-lg border p-2.5 text-left transition-colors ${
+                                            optGroup
+                                              ? 'border-emerald-200 bg-emerald-50/50 hover:border-emerald-400 dark:border-emerald-900/60 dark:bg-emerald-950/25 dark:hover:border-emerald-600'
+                                              : 'border-slate-200 bg-slate-50/80 hover:border-blue-400 hover:bg-blue-50/50 dark:border-slate-700/80 dark:bg-slate-800/70 dark:hover:border-blue-500 dark:hover:bg-slate-800'
+                                          }`}
+                                        >
+                                          <p className="truncate pr-5 text-xs font-semibold text-slate-900 dark:text-slate-100">
+                                            {slot.subject}
+                                          </p>
+                                          <p className="mt-1 truncate text-[11px] text-slate-600 dark:text-slate-400">
+                                            {viewMode === 'grade'
+                                              ? slot.teacherName
+                                              : `${slot.grade} · Stream ${slot.section}`}
+                                          </p>
+                                          <div className="mt-0.5 flex items-center justify-between gap-1">
+                                            <span className="truncate font-mono text-[11px] text-blue-700 dark:text-blue-400">
+                                              {slot.room}
+                                            </span>
+                                            {optGroup && (
+                                              <span className="shrink-0 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                                                {optGroup.name}
+                                              </span>
+                                            )}
+                                          </div>
+                                        </button>
+                                        <button
+                                          onClick={() => setLocked([slot.id], !slot.locked)}
+                                          aria-label={slot.locked ? 'Unlock lesson' : 'Lock lesson in place'}
+                                          title={slot.locked ? 'Locked: the solver will not move this lesson' : 'Lock this lesson in place'}
+                                          className={`absolute top-1.5 right-1.5 rounded p-1 ${
+                                            slot.locked
+                                              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300'
+                                              : 'text-slate-300 hover:bg-slate-200 hover:text-slate-600 dark:text-slate-600 dark:hover:bg-slate-700'
+                                          }`}
+                                        >
+                                          {slot.locked ? <Lock className="h-3 w-3" /> : <LockOpen className="h-3 w-3" />}
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                  {hasOptionalInCell && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openCreateAt(day, period)}
+                                      className="w-full rounded border border-dashed border-emerald-300/70 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-50/70 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-950/30"
+                                    >
+                                      + Add Parallel Option
+                                    </button>
+                                  )}
                                 </div>
                               ) : (
                                 <button
@@ -1167,15 +1248,48 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                 </tbody>
               </table>
             </div>
-            <div className="border-t border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
-              15:20 – 16:00 Co-Curricular Activities, Games, Clubs & Remedial Study
-            </div>
+            {(tenant.dayClosingNote !== undefined ? tenant.dayClosingNote : DEFAULT_DAY_CLOSING_NOTE) && (
+              <div className="border-t border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
+                {tenant.dayClosingNote !== undefined ? tenant.dayClosingNote : DEFAULT_DAY_CLOSING_NOTE}
+              </div>
+            )}
           </div>
         </>
       ) : activeTab === 'lessons' ? (
         <LessonCardsPanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
       ) : activeTab === 'constraints' ? (
-        <TeacherAvailabilityPanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-white p-1.5 dark:border-slate-800 dark:bg-slate-900">
+            {(
+              [
+                { id: 'subjects', label: 'Subject Rules & Optional Groups' },
+                { id: 'schedule', label: 'School Day Schedule & Bell Times' },
+                { id: 'teachers', label: 'Teacher Availability & Daily Caps' },
+              ] as const
+            ).map((sub) => (
+              <button
+                key={sub.id}
+                type="button"
+                onClick={() => setConstraintSection(sub.id)}
+                className={`rounded-lg px-3.5 py-2 text-xs font-medium transition-colors ${
+                  constraintSection === sub.id
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200'
+                }`}
+              >
+                {sub.label}
+              </button>
+            ))}
+          </div>
+
+          {constraintSection === 'subjects' ? (
+            <SubjectConstraintsPanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
+          ) : constraintSection === 'schedule' ? (
+            <DaySchedulePanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
+          ) : (
+            <TeacherAvailabilityPanel workspace={workspace} onRefresh={onRefresh} onNotify={onNotify} />
+          )}
+        </div>
       ) : (
         /* Teachers, Contacts, Class & Subject Allocation Section */
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -1842,9 +1956,9 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                   <span className="font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
                     {subjectRows.length} subjects · {modalTotalSubjectLessons} lessons/week
                   </span>
-                  {modalTotalSubjectLessons > 40 && (
+                  {modalTotalSubjectLessons > weeklySlotsCap && (
                     <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
-                      Exceeds 40 weekly timetable periods; first 40 interleaved lessons will fit.
+                      Exceeds {weeklySlotsCap} weekly timetable periods; first {weeklySlotsCap} interleaved lessons will fit (optional groups run in parallel).
                     </p>
                   )}
                 </div>
@@ -1870,7 +1984,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
         </div>
       )}
 
-      {/* Generate Kenyan Timetable Modal */}
+      {/* Generate Timetable Modal */}
       {solveOpen && (
         <SolveDialog
           workspace={workspace}
@@ -1886,7 +2000,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
-                  Generate Kenyan School Timetable
+                  Generate School Timetable
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                   Select CBC clusters, custom grades, or a specific stream. Pre-School & Lower Primary automatically assign 1 teacher for all subjects per stream.
@@ -2069,7 +2183,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
               <div>
                 <div className="flex items-center justify-between">
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                    Weekly Lessons per Stream (Max 40)
+                    Weekly Lessons per Stream (Max {weeklySlotsCap})
                   </label>
                   <button
                     type="button"
@@ -2098,7 +2212,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                   <option value={29}>29 lessons / week cap (Lower Primary Grade 1–3)</option>
                   <option value={34}>34 lessons / week cap (Upper Primary Grade 4–6)</option>
                   <option value={39}>39 lessons / week cap (Junior School Grade 7–9)</option>
-                  <option value={40}>40 lessons / week cap (Senior School / Full 8-Lesson Week)</option>
+                  <option value={weeklySlotsCap}>{weeklySlotsCap} lessons / week cap (Full {lessonRows.length}-Lesson Week)</option>
                 </select>
               </div>
 
@@ -2141,7 +2255,7 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
           <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
-                {editingSlotId ? 'Edit Scheduled Lesson' : 'Schedule Kenyan Timetable Lesson'}
+                {editingSlotId ? 'Edit Scheduled Lesson' : 'Schedule Timetable Lesson'}
               </h2>
               <button
                 onClick={() => setModalOpen(false)}
@@ -2185,9 +2299,9 @@ export function TimetableModule({ workspace, onRefresh, onNotify }: TimetableMod
                   onChange={(e) => setSlotForm({ ...slotForm, period: Number(e.target.value) })}
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                 >
-                  {PERIODS.map((p) => (
-                    <option key={p} value={p}>
-                      {PERIOD_LABELS[p].label} ({PERIOD_LABELS[p].time})
+                  {lessonRows.map((row) => (
+                    <option key={row.period} value={row.period}>
+                      {row.label} ({row.time})
                     </option>
                   ))}
                 </select>

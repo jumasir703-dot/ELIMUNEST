@@ -308,7 +308,8 @@ export function computeMeanGradeFromPoints(
   };
 }
 
-export interface KenyanBellRow {
+export interface BellScheduleRow {
+  id?: string;
   kind: 'lesson' | 'break';
   period?: number;
   label: string;
@@ -317,19 +318,92 @@ export interface KenyanBellRow {
   endTime: string;
 }
 
-export const KENYAN_BELL_SCHEDULE: KenyanBellRow[] = [
-  { kind: 'lesson', period: 1, label: 'Lesson 1', time: '08:00 – 08:40', startTime: '08:00', endTime: '08:40' },
-  { kind: 'lesson', period: 2, label: 'Lesson 2', time: '08:40 – 09:20', startTime: '08:40', endTime: '09:20' },
-  { kind: 'break', label: 'Short Break', time: '09:20 – 09:30', startTime: '09:20', endTime: '09:30' },
-  { kind: 'lesson', period: 3, label: 'Lesson 3', time: '09:30 – 10:10', startTime: '09:30', endTime: '10:10' },
-  { kind: 'lesson', period: 4, label: 'Lesson 4', time: '10:10 – 10:50', startTime: '10:10', endTime: '10:50' },
-  { kind: 'break', label: 'Tea Break', time: '10:50 – 11:20', startTime: '10:50', endTime: '11:20' },
-  { kind: 'lesson', period: 5, label: 'Lesson 5', time: '11:20 – 12:00', startTime: '11:20', endTime: '12:00' },
-  { kind: 'lesson', period: 6, label: 'Lesson 6', time: '12:00 – 12:40', startTime: '12:00', endTime: '12:40' },
-  { kind: 'break', label: 'Lunch Break', time: '12:40 – 14:00', startTime: '12:40', endTime: '14:00' },
-  { kind: 'lesson', period: 7, label: 'Lesson 7', time: '14:00 – 14:40', startTime: '14:00', endTime: '14:40' },
-  { kind: 'lesson', period: 8, label: 'Lesson 8', time: '14:40 – 15:20', startTime: '14:40', endTime: '15:20' },
+export type KenyanBellRow = BellScheduleRow;
+
+export const DEFAULT_DAY_OPENING_NOTE = '07:30 – 08:00 Morning Assembly / Pre-Lesson Prep';
+export const DEFAULT_DAY_CLOSING_NOTE = '15:20 – 16:00 Co-Curricular Activities, Games, Clubs & Remedial Study';
+
+export const KENYAN_BELL_SCHEDULE: BellScheduleRow[] = [
+  { id: 'row-1', kind: 'lesson', period: 1, label: 'Lesson 1', time: '08:00 – 08:40', startTime: '08:00', endTime: '08:40' },
+  { id: 'row-2', kind: 'lesson', period: 2, label: 'Lesson 2', time: '08:40 – 09:20', startTime: '08:40', endTime: '09:20' },
+  { id: 'row-b1', kind: 'break', label: 'Short Break', time: '09:20 – 09:30', startTime: '09:20', endTime: '09:30' },
+  { id: 'row-3', kind: 'lesson', period: 3, label: 'Lesson 3', time: '09:30 – 10:10', startTime: '09:30', endTime: '10:10' },
+  { id: 'row-4', kind: 'lesson', period: 4, label: 'Lesson 4', time: '10:10 – 10:50', startTime: '10:10', endTime: '10:50' },
+  { id: 'row-b2', kind: 'break', label: 'Tea Break', time: '10:50 – 11:20', startTime: '10:50', endTime: '11:20' },
+  { id: 'row-5', kind: 'lesson', period: 5, label: 'Lesson 5', time: '11:20 – 12:00', startTime: '11:20', endTime: '12:00' },
+  { id: 'row-6', kind: 'lesson', period: 6, label: 'Lesson 6', time: '12:00 – 12:40', startTime: '12:00', endTime: '12:40' },
+  { id: 'row-b3', kind: 'break', label: 'Lunch Break', time: '12:40 – 14:00', startTime: '12:40', endTime: '14:00' },
+  { id: 'row-7', kind: 'lesson', period: 7, label: 'Lesson 7', time: '14:00 – 14:40', startTime: '14:00', endTime: '14:40' },
+  { id: 'row-8', kind: 'lesson', period: 8, label: 'Lesson 8', time: '14:40 – 15:20', startTime: '14:40', endTime: '15:20' },
 ];
+
+export function normalizeBellSchedule(rows?: BellScheduleRow[] | null): BellScheduleRow[] {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return KENYAN_BELL_SCHEDULE.map((r) => ({ ...r }));
+  }
+  let nextPeriod = 1;
+  return rows.map((row, idx) => {
+    const startTime = (row.startTime || '08:00').trim();
+    const endTime = (row.endTime || '08:40').trim();
+    const kind: 'lesson' | 'break' = row.kind === 'break' ? 'break' : 'lesson';
+    const period = kind === 'lesson' ? nextPeriod++ : undefined;
+    const defaultLabel = kind === 'lesson' ? `Lesson ${period}` : 'Break';
+    return {
+      id: row.id || `bell-${idx + 1}`,
+      kind,
+      ...(period !== undefined ? { period } : {}),
+      label: (row.label || '').trim() || defaultLabel,
+      startTime,
+      endTime,
+      time: `${startTime} – ${endTime}`,
+    };
+  });
+}
+
+export function getTenantBellSchedule(
+  tenant?: Pick<Tenant, 'bellSchedule'> | null
+): BellScheduleRow[] {
+  if (tenant?.bellSchedule && tenant.bellSchedule.length > 0) {
+    return normalizeBellSchedule(tenant.bellSchedule);
+  }
+  return normalizeBellSchedule(KENYAN_BELL_SCHEDULE);
+}
+
+export function getTenantLessonRows(
+  tenant?: Pick<Tenant, 'bellSchedule'> | null
+): BellScheduleRow[] {
+  return getTenantBellSchedule(tenant).filter(
+    (r) => r.kind === 'lesson' && r.period !== undefined
+  );
+}
+
+export function getTenantPeriodTimes(
+  tenant?: Pick<Tenant, 'bellSchedule'> | null
+): Record<number, { startTime: string; endTime: string; label: string; time: string }> {
+  return Object.fromEntries(
+    getTenantLessonRows(tenant).map((r) => [
+      r.period as number,
+      {
+        startTime: r.startTime,
+        endTime: r.endTime,
+        label: r.label,
+        time: r.time,
+      },
+    ])
+  );
+}
+
+export function getDoubleStartPeriodsFromSchedule(schedule: BellScheduleRow[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < schedule.length - 1; i += 1) {
+    const cur = schedule[i];
+    const nxt = schedule[i + 1];
+    if (cur.kind === 'lesson' && cur.period !== undefined && nxt.kind === 'lesson') {
+      out.push(cur.period);
+    }
+  }
+  return out;
+}
 
 export type UserRole =
   | 'Developer'
@@ -666,8 +740,18 @@ export interface Tenant {
   subjectWeeklyLessons?: Record<string, number>;
   levelSubjects?: Partial<Record<CbcClusterId, string[]>>;
   levelSubjectWeeklyLessons?: Partial<Record<CbcClusterId, Record<string, number>>>;
-  /** aSc-style lesson cards: who teaches what to which class, how many periods a week. */
+  /** Lesson cards: who teaches what to which class, how many periods a week. */
   timetableLessons?: TimetableLesson[];
+  /** Custom daily bell schedule (lesson periods and breaks) configured by the school. */
+  bellSchedule?: BellScheduleRow[];
+  /** Optional morning assembly / prep banner displayed above the timetable grid. */
+  dayOpeningNote?: string;
+  /** Optional afternoon / co-curricular banner displayed below the timetable grid. */
+  dayClosingNote?: string;
+  /** Subject-level scheduling rules (double allocations, not-before/not-after times, rooms). */
+  subjectConstraints?: SubjectTimetableConstraint[];
+  /** Parallel optional/elective subject groups taught simultaneously for a class. */
+  optionalSubjectGroups?: OptionalSubjectGroup[];
   rooms: string[];
   teachers: TeacherProfile[];
   nonTeachingStaff?: NonTeachingStaffProfile[];
@@ -1109,7 +1193,115 @@ export interface TimetableSlot {
   locked?: boolean;
 }
 
-/** A lesson card (aSc term): one subject taught to one class by one teacher, N periods a week. */
+/** Subject-level timetable constraint (double allocations, time bounds, daily limits). */
+export interface SubjectTimetableConstraint {
+  id: string;
+  subject: string;
+  /** 'All Grades' (or omitted) applies school-wide unless overridden for a specific grade. */
+  grade?: string;
+  /** Number of 2-period blocks per week for this subject. */
+  doubleLessons?: number;
+  /** Earliest allowed start time (HH:MM). Slot startTime must be >= notBeforeTime. */
+  notBeforeTime?: string;
+  /** Latest allowed end time (HH:MM). Slot endTime must be <= notAfterTime. */
+  notAfterTime?: string;
+  /** Max periods of this subject per day for a class. */
+  maxPerDay?: number;
+  /** Preferred or dedicated room for this subject. */
+  preferredRoom?: string;
+}
+
+/** Optional / elective subject block: subjects scheduled simultaneously in parallel for a class. */
+export interface OptionalSubjectGroup {
+  id: string;
+  name: string;
+  /** 'All Grades' (or omitted) applies school-wide, or restrict to one grade. */
+  grade?: string;
+  /** Parallel subjects taught during the same periods (e.g. ['CRE', 'IRE', 'HRE']). */
+  subjects: string[];
+}
+
+export function resolveSubjectConstraint(
+  tenant: Pick<Tenant, 'subjectConstraints'> | null | undefined,
+  grade: string,
+  subject: string
+): SubjectTimetableConstraint | undefined {
+  const list = tenant?.subjectConstraints || [];
+  const subNorm = subject.trim().toLowerCase();
+  const gradeNorm = grade.trim().toLowerCase();
+  const exact = list.find(
+    (c) =>
+      c.subject.trim().toLowerCase() === subNorm &&
+      Boolean(c.grade) &&
+      c.grade!.trim().toLowerCase() !== 'all grades' &&
+      c.grade!.trim().toLowerCase() === gradeNorm
+  );
+  if (exact) return exact;
+  return list.find(
+    (c) =>
+      c.subject.trim().toLowerCase() === subNorm &&
+      (!c.grade || c.grade.trim().toLowerCase() === 'all grades')
+  );
+}
+
+export function findOptionalGroupForSubject(
+  tenant: Pick<Tenant, 'optionalSubjectGroups'> | null | undefined,
+  grade: string,
+  subject: string
+): OptionalSubjectGroup | undefined {
+  const groups = tenant?.optionalSubjectGroups || [];
+  const subNorm = subject.trim().toLowerCase();
+  const gradeNorm = grade.trim().toLowerCase();
+  const exact = groups.find(
+    (g) =>
+      Boolean(g.grade) &&
+      g.grade!.trim().toLowerCase() !== 'all grades' &&
+      g.grade!.trim().toLowerCase() === gradeNorm &&
+      g.subjects.some((s) => s.trim().toLowerCase() === subNorm)
+  );
+  if (exact) return exact;
+  return groups.find(
+    (g) =>
+      (!g.grade || g.grade.trim().toLowerCase() === 'all grades') &&
+      g.subjects.some((s) => s.trim().toLowerCase() === subNorm)
+  );
+}
+
+export function areSubjectsInSameOptionalGroup(
+  tenant: Pick<Tenant, 'optionalSubjectGroups'> | null | undefined,
+  grade: string,
+  subjectA: string,
+  subjectB: string
+): boolean {
+  const a = subjectA.trim().toLowerCase();
+  const b = subjectB.trim().toLowerCase();
+  if (!a || !b || a === b) return false;
+  const grpA = findOptionalGroupForSubject(tenant, grade, subjectA);
+  const grpB = findOptionalGroupForSubject(tenant, grade, subjectB);
+  return Boolean(grpA && grpB && grpA.id === grpB.id);
+}
+
+export function isSlotWithinSubjectTimeWindow(
+  slot: { startTime: string; endTime: string },
+  constraint?: { notBeforeTime?: string; notAfterTime?: string } | null
+): { ok: boolean; reason?: string } {
+  if (!constraint) return { ok: true };
+  if (constraint.notBeforeTime && slot.startTime < constraint.notBeforeTime) {
+    return {
+      ok: false,
+      reason: `Cannot appear before ${constraint.notBeforeTime} (slot starts at ${slot.startTime}).`,
+    };
+  }
+  if (constraint.notAfterTime && slot.endTime > constraint.notAfterTime) {
+    return {
+      ok: false,
+      reason: `Cannot appear after ${constraint.notAfterTime} (slot ends at ${slot.endTime}).`,
+    };
+  }
+  return { ok: true };
+}
+
+/** A lesson card: one subject taught to one class by one teacher, N periods a week. */
 export interface TimetableLesson {
   id: string;
   grade: string;
@@ -1123,6 +1315,12 @@ export interface TimetableLesson {
   room?: string;
   /** Max periods of this subject per day for this class (optional). */
   maxPerDay?: number;
+  /** Earliest allowed start time (HH:MM, optional). */
+  notBeforeTime?: string;
+  /** Latest allowed end time (HH:MM, optional). */
+  notAfterTime?: string;
+  /** Optional parallel group ID (optional). */
+  optionalGroupId?: string;
 }
 
 export interface TimetableSolveResult {

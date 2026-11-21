@@ -178,4 +178,105 @@ describe('timetable solver', () => {
     verify(input, r.placements);
     expect(r.placements.every((p) => p.room !== '')).toBe(true);
   });
+
+  it('enforces subject allowedPeriods (notBefore / notAfter time windows) including doubles', () => {
+    const lessons: SolverLesson[] = [
+      {
+        id: 'lab-sci',
+        grade: 'Grade 8',
+        section: 'A',
+        subject: 'Integrated Science',
+        teacherId: 't0',
+        periodsPerWeek: 4,
+        doubleLessons: 1,
+        allowedPeriods: [1, 2, 3, 4], // Morning only (not after lunch)
+      },
+      {
+        id: 'games',
+        grade: 'Grade 8',
+        section: 'A',
+        subject: 'PE & Games',
+        teacherId: 't1',
+        periodsPerWeek: 3,
+        allowedPeriods: [7, 8], // Afternoon only
+      },
+    ];
+    const input = base(lessons);
+    const r = solveTimetable(input);
+    expect(r.unplaced).toEqual([]);
+    verify(input, r.placements);
+    const sci = r.placements.filter((p) => p.lessonId === 'lab-sci');
+    const games = r.placements.filter((p) => p.lessonId === 'games');
+    expect(sci.every((p) => [1, 2, 3, 4].includes(p.period))).toBe(true);
+    expect(games.every((p) => [7, 8].includes(p.period))).toBe(true);
+  });
+
+  it('schedules optional subject groups in parallel on the same class slots without clashes', () => {
+    const lessons: SolverLesson[] = [
+      // 37 regular periods + 3 parallel optional subjects (counted once = 40 class slots total)
+      { id: 'eng', grade: 'Grade 8', section: 'A', subject: 'English', teacherId: 't0', periodsPerWeek: 7 },
+      { id: 'mat', grade: 'Grade 8', section: 'A', subject: 'Mathematics', teacherId: 't1', periodsPerWeek: 7 },
+      { id: 'kis', grade: 'Grade 8', section: 'A', subject: 'Kiswahili', teacherId: 't2', periodsPerWeek: 7 },
+      { id: 'sci', grade: 'Grade 8', section: 'A', subject: 'Science', teacherId: 't3', periodsPerWeek: 8 },
+      { id: 'soc', grade: 'Grade 8', section: 'A', subject: 'Social', teacherId: 't4', periodsPerWeek: 8 },
+      { id: 'cre', grade: 'Grade 8', section: 'A', subject: 'CRE', teacherId: 't5', periodsPerWeek: 3, optionalGroupId: 'opt-rel' },
+      { id: 'ire', grade: 'Grade 8', section: 'A', subject: 'IRE', teacherId: 't6', periodsPerWeek: 3, optionalGroupId: 'opt-rel' },
+      { id: 'hre', grade: 'Grade 8', section: 'A', subject: 'HRE', teacherId: 't7', periodsPerWeek: 3, optionalGroupId: 'opt-rel' },
+    ];
+    const input = {
+      ...base(lessons),
+      rooms: ['R1', 'R2', 'R3', 'R4'],
+    };
+    const r = solveTimetable(input);
+    expect(r.unplaced).toEqual([]);
+    expect(r.warnings).toEqual([]);
+    expect(r.placements.length).toBe(37 + 9);
+
+    // Every teacher & room still has zero clashes
+    const tch = new Set<string>();
+    const rm = new Set<string>();
+    for (const p of r.placements) {
+      const tk = `${p.teacherId}|${p.day}|${p.period}`;
+      const rk = `${p.room}|${p.day}|${p.period}`;
+      expect(tch.has(tk)).toBe(false);
+      expect(rm.has(rk)).toBe(false);
+      tch.add(tk);
+      rm.add(rk);
+    }
+
+    // All three optional subjects share the exact same 3 (day, period) class slots
+    const slotKey = (p: SolverPlacement) => `${p.day}|${p.period}`;
+    const creSlots = new Set(r.placements.filter((p) => p.lessonId === 'cre').map(slotKey));
+    const ireSlots = new Set(r.placements.filter((p) => p.lessonId === 'ire').map(slotKey));
+    const hreSlots = new Set(r.placements.filter((p) => p.lessonId === 'hre').map(slotKey));
+    expect(creSlots.size).toBe(3);
+    expect(ireSlots).toEqual(creSlots);
+    expect(hreSlots).toEqual(creSlots);
+  });
+
+  it('respects custom period layout and custom doubleStarts', () => {
+    const lessons: SolverLesson[] = [
+      { id: 'chem', grade: 'Grade 10', section: 'A', subject: 'Chemistry', teacherId: 't0', periodsPerWeek: 4, doubleLessons: 2 },
+    ];
+    const input: SolverInput = {
+      lessons,
+      days: DAYS,
+      periods: [1, 2, 3, 4, 5, 6],
+      doubleStarts: [1, 4], // breaks after P2 and P3, and after P5
+      rooms: ['Lab 1'],
+      teachers: {},
+      seed: 11,
+    };
+    const r = solveTimetable(input);
+    expect(r.unplaced).toEqual([]);
+    const byDay = new Map<string, number[]>();
+    r.placements.forEach((p) => byDay.set(p.day, [...(byDay.get(p.day) || []), p.period]));
+    const pairs = [...byDay.values()].filter((ps) => ps.length === 2);
+    expect(pairs.length).toBe(2);
+    for (const pair of pairs) {
+      const sorted = [...pair].sort((a, b) => a - b);
+      expect([1, 4]).toContain(sorted[0]);
+      expect(sorted[1]).toBe(sorted[0] + 1);
+    }
+  });
 });

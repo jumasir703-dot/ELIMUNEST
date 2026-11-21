@@ -146,4 +146,130 @@ describe('timetable: lesson cards -> constraints -> solver (through TenantStore)
     expect(after?.locked).toBe(true);
     expect(after?.subject).toBe(lockedSlot.subject);
   });
+
+  it('enforces subject time windows, double allocations, and optional parallel groups through TenantStore', () => {
+    store.addTeacher(tenantId, { name: 'CRE Specialist', subjects: ['CRE'] });
+    store.addTeacher(tenantId, { name: 'IRE Specialist', subjects: ['IRE'] });
+    const t = store.exportDatabaseState().state.tenants.find((x) => x.id === tenantId)!;
+    const creT = t.teachers.find((x) => x.name === 'CRE Specialist')!;
+    const ireT = t.teachers.find((x) => x.name === 'IRE Specialist')!;
+
+    store.setSubjectTimetableConfig(tenantId, {
+      subjectConstraints: [
+        {
+          id: 'rule-sci-am',
+          subject: 'Integrated Science',
+          grade: 'Grade 7',
+          doubleLessons: 1,
+          notBeforeTime: '08:40',
+          notAfterTime: '12:40',
+        },
+      ],
+      optionalSubjectGroups: [
+        {
+          id: 'opt-rel',
+          name: 'Religious Ed Block',
+          grade: 'Grade 7',
+          subjects: ['CRE', 'IRE'],
+        },
+      ],
+      syncLessons: true,
+    });
+
+    // Manual edit before notBeforeTime (08:00 < 08:40) is rejected
+    const sciT = t.teachers.find((x) => x.subjects.includes('Integrated Science'))!;
+    expect(() =>
+      store.upsertTimetableSlot(tenantId, {
+        grade: 'Grade 7',
+        section: 'Y',
+        subject: 'Integrated Science',
+        teacherId: sciT.id,
+        day: 'Wednesday',
+        period: 1,
+        room: 'Lab Y',
+      })
+    ).toThrow(/Cannot appear before 08:40/i);
+
+    // Parallel manual scheduling for optional group subjects in same (day, period) is permitted
+    store.upsertTimetableSlot(tenantId, {
+      grade: 'Grade 7',
+      section: 'Y',
+      subject: 'CRE',
+      teacherId: creT.id,
+      day: 'Thursday',
+      period: 4,
+      room: 'Room C1',
+    });
+    const parallelSlot = store.upsertTimetableSlot(tenantId, {
+      grade: 'Grade 7',
+      section: 'Y',
+      subject: 'IRE',
+      teacherId: ireT.id,
+      day: 'Thursday',
+      period: 4,
+      room: 'Room I1',
+    });
+    expect(parallelSlot.subject).toBe('IRE');
+
+    // Non-grouped subject in that same occupied slot still clashes
+    expect(() =>
+      store.upsertTimetableSlot(tenantId, {
+        grade: 'Grade 7',
+        section: 'Y',
+        subject: 'Integrated Science',
+        teacherId: sciT.id,
+        day: 'Thursday',
+        period: 4,
+        room: 'Lab Y2',
+      })
+    ).toThrow(/Class Conflict/i);
+  });
+
+  it('allows each tenant to customize their daily bell schedule and slot times', () => {
+    const customSchedule = [
+      { kind: 'lesson' as const, label: 'Morning Block 1', startTime: '07:45', endTime: '08:30', time: '07:45 – 08:30' },
+      { kind: 'lesson' as const, label: 'Morning Block 2', startTime: '08:30', endTime: '09:15', time: '08:30 – 09:15' },
+      { kind: 'break' as const, label: 'Tea Break', startTime: '09:15', endTime: '09:45', time: '09:15 – 09:45' },
+      { kind: 'lesson' as const, label: 'Midday Block 3', startTime: '09:45', endTime: '10:30', time: '09:45 – 10:30' },
+      { kind: 'lesson' as const, label: 'Midday Block 4', startTime: '10:30', endTime: '11:15', time: '10:30 – 11:15' },
+    ];
+    const saved = store.setTimetableDaySchedule(tenantId, {
+      bellSchedule: customSchedule,
+      dayOpeningNote: '07:30 Morning Devotion',
+      dayClosingNote: '11:30 Clubs',
+    });
+    expect(saved.bellSchedule.filter((r) => r.kind === 'lesson')).toHaveLength(4);
+    expect(saved.dayOpeningNote).toBe('07:30 Morning Devotion');
+
+    const { teacher: customTeacher } = store.addTeacher(tenantId, {
+      name: 'Custom Schedule Teacher',
+      subjects: ['Mathematics'],
+    });
+
+    // Period 5 no longer exists in this custom 4-period schedule
+    expect(() =>
+      store.upsertTimetableSlot(tenantId, {
+        grade: 'Grade 7',
+        section: 'W',
+        subject: 'Mathematics',
+        teacherId: customTeacher.id,
+        day: 'Monday',
+        period: 5,
+        room: 'Room W1',
+      })
+    ).toThrow(/does not exist in this school's daily bell schedule/i);
+
+    // Period 1 adopts the tenant's custom 07:45 - 08:30 timestamps
+    const customSlot = store.upsertTimetableSlot(tenantId, {
+      grade: 'Grade 7',
+      section: 'W',
+      subject: 'Mathematics',
+      teacherId: customTeacher.id,
+      day: 'Monday',
+      period: 1,
+      room: 'Room W1',
+    });
+    expect(customSlot.startTime).toBe('07:45');
+    expect(customSlot.endTime).toBe('08:30');
+  });
 });

@@ -45,7 +45,7 @@ function resolveServerPort(): number {
 
 const PORT = resolveServerPort();
 const IS_PROD = process.env.NODE_ENV === 'production';
-const IS_TEST = process.env.NODE_ENV === 'test';
+const IS_TEST = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
 // On Vercel the app runs as a serverless function: no listen(), no WebSockets,
 // and static files are served by Vercel itself.
 const IS_VERCEL = Boolean(process.env.VERCEL);
@@ -1149,6 +1149,24 @@ app.post('/api/timetable/solve', ...timetableAdminGuard, (req: AuthenticatedRequ
   try {
     const tenantId = getTenantId(req);
     res.json(store.solveTimetableFromLessons(tenantId, req.body || {}));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/timetable/day-schedule', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json(store.setTimetableDaySchedule(tenantId, req.body || {}));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/timetable/subject-constraints', ...timetableAdminGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json(store.setSubjectTimetableConfig(tenantId, req.body || {}));
   } catch (err) {
     next(err);
   }
