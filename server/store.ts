@@ -333,6 +333,49 @@ export class TenantStore {
   async ensureHydrated(): Promise<void> {
     await this.hydrateFromKvIfConfigured();
     await this.ensureDeveloperAccount();
+    await this.ensureAccountRecovery();
+  }
+
+  private recoveryPromise: Promise<void> | null = null;
+
+  /**
+   * Break-glass recovery for whoever controls the hosting environment.
+   * If RECOVERY_PASSWORD is set (and meets the password policy), the account named by RECOVERY_EMAIL
+   * (default: developer@elimunest.platform) is given that password as a ONE-TIME password: a change is
+   * forced at next sign-in, every existing session is revoked, and any sign-in lockout is cleared.
+   * Remove RECOVERY_PASSWORD after you have signed in, otherwise it is re-applied on every restart.
+   */
+  private ensureAccountRecovery(): Promise<void> {
+    if (!this.recoveryPromise) {
+      this.recoveryPromise = this.applyAccountRecovery();
+    }
+    return this.recoveryPromise;
+  }
+
+  private async applyAccountRecovery(): Promise<void> {
+    const password = (process.env.RECOVERY_PASSWORD || '').trim();
+    if (!password) return;
+    const policyErr = validatePasswordStrength(password);
+    if (policyErr) {
+      console.warn(`[elimuNest] RECOVERY_PASSWORD ignored: ${policyErr}`);
+      return;
+    }
+    const email = (process.env.RECOVERY_EMAIL || DEVELOPER_EMAIL).trim().toLowerCase();
+    const target = (this.state.users || []).find((u) => u.email.toLowerCase() === email);
+    if (!target) {
+      console.warn(`[elimuNest] RECOVERY skipped: no account found for ${email}.`);
+      return;
+    }
+    target.passwordHash = await hashPassword(password);
+    target.mustChangePassword = true;
+    target.tokenVersion = (target.tokenVersion ?? 0) + 1;
+    this.loginAttempts.delete(email);
+    this.persist();
+    await this.flushRemotePersist();
+    console.warn(
+      `[elimuNest] RECOVERY: password for ${email} was reset to the value of RECOVERY_PASSWORD (change required at sign-in). Remove RECOVERY_PASSWORD once you are in.` +
+        (target.status !== 'Active' ? ` Note: this account status is "${target.status}" and sign-in will still be refused.` : '')
+    );
   }
 
   /** Creates developer@elimunest.platform if missing. Never overwrites an existing account/password. */
