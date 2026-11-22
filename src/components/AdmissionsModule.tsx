@@ -9,6 +9,7 @@ import {
   FileSpreadsheet,
   GraduationCap,
   History,
+  Link2,
   KeyRound,
   Pencil,
   Plus,
@@ -19,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import { ParentLinksModal } from './ParentLinksModal';
 import {
   getStreamsForGrade,
   KENYAN_CBC_GRADES,
@@ -160,6 +162,7 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
 
   // Lifecycle Audit Trail Drawer/Modal
   const [showAuditModal, setShowAuditModal] = useState(false);
+  const [showParentLinks, setShowParentLinks] = useState(false);
 
   const modalGradeStreams = useMemo(
     () => getStreamsForGrade(tenant, formState.grade),
@@ -704,6 +707,14 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowParentLinks(true)}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <Link2 className="h-3.5 w-3.5" />
+            Parent Links
+          </button>
           <button
             type="button"
             onClick={() => setShowAuditModal(true)}
@@ -1795,6 +1806,15 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
       )}
 
       {/* Lifecycle Audit Trail Modal */}
+      {showParentLinks && (
+        <ParentLinksModal
+          workspace={workspace}
+          onClose={() => setShowParentLinks(false)}
+          onRefresh={onRefresh}
+          onNotify={onNotify}
+        />
+      )}
+
       {showAuditModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-800 dark:bg-slate-900">

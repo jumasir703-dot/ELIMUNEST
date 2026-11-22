@@ -2,17 +2,21 @@ import { useMemo, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import type { TenantWorkspaceData, UserRole } from '../shared/types';
+import { LinkChildCard } from './LinkChildCard';
 
 interface AnalyticsDashboardProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
   onNavigate: (module: string) => void;
+  /** Reload the workspace (used after a parent links another child). */
+  onRefresh?: () => Promise<void> | void;
 }
 
 export function AnalyticsDashboard({
   workspace,
   currentRole = 'Admin',
   onNavigate,
+  onRefresh,
 }: AnalyticsDashboardProps) {
   const [attendanceFilterGrade, setAttendanceFilterGrade] = useState<string>('All');
   const [hoveredBarIdx, setHoveredBarIdx] = useState<number | null>(null);
@@ -133,6 +137,16 @@ export function AnalyticsDashboard({
 
   return (
     <div className="space-y-8">
+      {currentRole === 'Parent' && (
+        <LinkChildCard
+          tenantId={workspace.tenant.id}
+          linkedCount={workspace.students.length}
+          onLinked={async () => {
+            await onRefresh?.();
+          }}
+        />
+      )}
+
       {/* Header Summary */}
       <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
         <div>
