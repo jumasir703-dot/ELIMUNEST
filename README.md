@@ -32,6 +32,10 @@ Sample data is only loaded when **no database exists yet**, so it can never over
 | `true` | loads samples | loads samples |
 | `false` | starts empty | starts empty |
 
+### Signing in to the sample schools
+
+Each time the samples are loaded, every sample account gets a new random one-time password, printed in the server log. That is awkward on Vercel, where the samples reload on every cold start. Set `SEED_DEMO_PASSWORD` (10+ characters, letters and digits) and all sample accounts use it instead, e.g. `helena.vance@oakridge.ac.ke` for Oakridge. They still ask for a password change on first login. The Developer account keeps its own `DEVELOPER_BOOTSTRAP_PASSWORD`.
+
 ## Data commands
 
 ```bash

@@ -48,6 +48,7 @@ import {
   generateOneTimePassword,
   hashPassword,
   resolveDeveloperBootstrapPassword,
+  resolveSeedDemoPassword,
 } from './middleware/adminAuth.ts';
 
 export function buildDefaultNonTeachingStaff(
@@ -293,11 +294,12 @@ export async function buildSeedUsers(): Promise<{
 
   const devCredentials: DevSeedCredential[] = [];
   const users: StoredTenantUser[] = [];
+  const fixedDemoPassword = resolveSeedDemoPassword();
   for (const spec of specs) {
     const pw =
       spec.role === 'Developer'
         ? resolveDeveloperBootstrapPassword().password
-        : generateOneTimePassword();
+        : fixedDemoPassword ?? generateOneTimePassword();
     const passwordHash = await hashPassword(pw);
     devCredentials.push({ email: spec.email, role: spec.role, password: pw });
     users.push({

@@ -80,6 +80,24 @@ export function generateOneTimePassword(): string {
   return `Otp1-${randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
+/**
+ * Optional fixed password for the SAMPLE-school accounts (not the Developer account).
+ * Set SEED_DEMO_PASSWORD in the hosting dashboard so the sample logins stay the same
+ * every time the sample data is loaded (e.g. after each Vercel cold start).
+ * Ignored if it fails the password policy. Accounts still require a password
+ * change on first login.
+ */
+export function resolveSeedDemoPassword(): string | null {
+  const fromEnv = (process.env.SEED_DEMO_PASSWORD || '').trim();
+  if (!fromEnv) return null;
+  const err = validatePasswordStrength(fromEnv);
+  if (err) {
+    console.warn(`[elimuNest] SEED_DEMO_PASSWORD ignored: ${err}`);
+    return null;
+  }
+  return fromEnv;
+}
+
 export const DEVELOPER_EMAIL = 'developer@elimunest.platform';
 
 /**
