@@ -412,7 +412,8 @@ export type UserRole =
   | 'Registrar'
   | 'Teacher'
   | 'Bursar'
-  | 'Parent';
+  | 'Parent'
+  | 'Student';
 
 export type TenantModulePermission =
   | 'analytics'
@@ -448,6 +449,7 @@ export const DEFAULT_ROLE_MODULES: Record<UserRole, TenantModulePermission[]> = 
   Teacher: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
   Bursar: ['analytics', 'fees', 'communications'],
   Parent: ['analytics', 'exams', 'fees', 'communications'],
+  Student: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
 };
 
 export function getEffectiveUserModules(
@@ -718,8 +720,6 @@ export interface Tenant {
   curriculum: string;
   academicYear: string;
   currentTerm: string;
-  /** Academic calendar. When empty, no term locking applies. */
-  terms?: AcademicTerm[];
   currency: CurrencyCode;
   plan: TenantPlan;
   status?: TenantStatus;
@@ -762,6 +762,8 @@ export interface Tenant {
     percentage: number;
     minSiblings?: number;
   };
+  /** Optional per-tenant toggle allowing read-only Student portal logins. */
+  studentPortalEnabled?: boolean;
   createdAt: string;
 }
 
@@ -773,6 +775,8 @@ export interface TenantUser {
   phone?: string;
   role: UserRole;
   status: 'Active' | 'Disabled';
+  /** Links a Student-role account directly to a Student record in the tenant. */
+  studentId?: string;
   mustChangePassword?: boolean;
   tokenVersion?: number;
   allowedModules?: TenantModulePermission[];
@@ -1129,6 +1133,40 @@ export interface TeacherProfile {
   maxLessonsPerDay?: number;
 }
 
+export type CalendarEntityStatus = 'Open' | 'Closed';
+
+export interface AcademicYear {
+  id: string;
+  tenantId: string;
+  name: string; // e.g. '2026' or '2026–2027'
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  status: CalendarEntityStatus;
+  isCurrent: boolean;
+  createdAt: string;
+  closedAt?: string;
+  closedBy?: string;
+}
+
+export interface AcademicTerm {
+  id: string;
+  tenantId: string;
+  academicYearId: string;
+  name: string; // e.g. 'Term 1'
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  status: CalendarEntityStatus;
+  isCurrent: boolean;
+  createdAt: string;
+  closedAt?: string;
+  closedBy?: string;
+  reopenedAt?: string;
+  reopenedBy?: string;
+  reopenReason?: string;
+}
+
+export type StudentStatus = 'Active' | 'On Leave' | 'Graduated' | 'Transferred' | 'Withdrawn';
+
 export interface Student {
   id: string;
   tenantId: string;
@@ -1138,6 +1176,7 @@ export interface Student {
   grade: string;
   section: string;
   parentUserId?: string;
+  studentUserId?: string;
   guardianName: string;
   guardianEmail: string;
   guardianPhone: string;
@@ -1145,97 +1184,111 @@ export interface Student {
   dateOfBirth: string;
   enrolledAt: string;
   status: StudentStatus;
-  /** Why the learner left / changed status (required for Transferred and Withdrawn). */
   statusReason?: string;
-  statusChangedAt?: string;
-  /** Date the learner left the school (Graduated / Transferred / Withdrawn). */
-  exitDate?: string;
+  statusDate?: string;
+  deleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  deleteReason?: string;
   creditBalance?: number;
-  /** Audit trail of edits, status changes and promotions. */
-  history?: StudentHistoryEntry[];
 }
 
-/** Learners are never hard-deleted: Withdrawn / Transferred keep the record and its audit trail. */
-export type StudentStatus = 'Active' | 'On Leave' | 'Graduated' | 'Transferred' | 'Withdrawn';
+export type LifecycleAuditAction =
+  | 'STUDENT_ENROLLED'
+  | 'STUDENT_EDITED'
+  | 'STUDENT_TRANSFERRED'
+  | 'STUDENT_WITHDRAWN'
+  | 'STUDENT_GRADUATED'
+  | 'STUDENT_REACTIVATED'
+  | 'STUDENT_SOFT_DELETED'
+  | 'STUDENT_BULK_IMPORT'
+  | 'YEAR_END_PROMOTION'
+  | 'STUDENT_PORTAL_PROVISIONED'
+  | 'ACADEMIC_YEAR_CREATED'
+  | 'ACADEMIC_TERM_CREATED'
+  | 'TERM_CLOSED'
+  | 'TERM_REOPENED'
+  | 'TERM_SET_CURRENT';
 
-/** Statuses that occupy a seat against the tenant's learner cap. */
-export const COUNTED_STUDENT_STATUSES: ReadonlyArray<StudentStatus> = ['Active', 'On Leave'];
-
-export interface StudentHistoryEntry {
-  at: string;
-  by: string;
-  kind: 'edit' | 'status' | 'promotion' | 'import';
+export interface LifecycleAuditEntry {
+  id: string;
+  tenantId: string;
+  timestamp: string;
+  actorUserId: string;
+  who: string;
+  role: UserRole;
+  action: LifecycleAuditAction;
+  entity: 'Student' | 'AcademicYear' | 'AcademicTerm' | 'PromotionBatch' | 'StudentImportBatch';
+  entityId: string;
   summary: string;
+  reason?: string;
+  before?: unknown;
+  after?: unknown;
+}
+
+export type PromotionAction = 'Promote' | 'Hold Back' | 'Graduate';
+
+export interface PromotionPreviewRow {
+  studentId: string;
+  studentCode: string;
+  fullName: string;
+  currentGrade: string;
+  currentSection: string;
+  defaultAction: PromotionAction;
+  nextGrade: string;
+  outstandingFeeBalance: number;
+  creditBalance: number;
+}
+
+export interface PromotionExecuteItem {
+  studentId: string;
+  action: PromotionAction;
+  targetGrade?: string;
+  targetSection?: string;
   reason?: string;
 }
 
-export type AcademicTermStatus = 'Open' | 'Closed';
-
-export interface AcademicTerm {
-  id: string;
-  academicYear: string;
-  name: string;
-  startDate: string; // YYYY-MM-DD
-  endDate: string; // YYYY-MM-DD
-  status: AcademicTermStatus;
-  closedAt?: string;
-  closedBy?: string;
-  reopenedAt?: string;
-  reopenedBy?: string;
-  reopenReason?: string;
+export interface PromotionExecuteResult {
+  promotedCount: number;
+  heldBackCount: number;
+  graduatedCount: number;
+  carriedForwardCount: number;
+  carriedForwardAmount: number;
+  skippedCount: number;
 }
 
-export type PromotionAction = 'promote' | 'repeat' | 'graduate' | 'transfer' | 'withdraw';
-
-export interface PromotionPreviewItem {
-  studentId: string;
-  fullName: string;
-  studentCode: string;
-  action: PromotionAction;
-  fromGrade: string;
-  fromSection: string;
-  toGrade?: string;
-  toSection?: string;
-  outstandingBalance: number;
-}
-
-export interface PromotionResult {
-  dryRun: boolean;
-  applied: boolean;
-  fromGrade: string;
-  /** Next grade in the school's ordering, or null when fromGrade is the final grade. */
-  toGrade: string | null;
-  counts: Record<PromotionAction, number>;
-  totalOutstandingBalance: number;
-  items: PromotionPreviewItem[];
-}
-
-export interface StudentImportRow {
-  fullName: string;
-  dateOfBirth: string;
-  gender: string;
-  grade: string;
-  section?: string;
-  guardianName: string;
-  guardianPhone: string;
-  guardianEmail?: string;
-  studentCode?: string;
-  upi?: string;
-}
-
-export interface StudentImportRowResult {
-  row: number;
-  ok: boolean;
-  studentCode?: string;
-  error?: string;
+export interface StudentImportRowValidation {
+  rowNumber: number;
+  raw: Record<string, string>;
+  valid: boolean;
+  errors: string[];
+  normalized?: {
+    fullName: string;
+    grade: string;
+    section: string;
+    gender: 'Female' | 'Male' | 'Non-binary';
+    dateOfBirth: string;
+    studentCode: string;
+    upi: string;
+    guardianName: string;
+    guardianEmail: string;
+    guardianPhone: string;
+    enrolledAt: string;
+  };
 }
 
 export interface StudentImportResult {
   dryRun: boolean;
-  total: number;
-  accepted: number;
-  rejected: number;
-  results: StudentImportRowResult[];
+  totalRows: number;
+  validCount: number;
+  errorCount: number;
+  importedCount: number;
+  currentActiveCount: number;
+  learnerCap: number;
+  remainingCapacity: number;
+  capExceeded: boolean;
+  rows: StudentImportRowValidation[];
+  createdStudents: Student[];
 }
 
 export interface OnboardingChecklist {
@@ -1435,6 +1488,7 @@ export interface TimetableSolveResult {
 export interface AttendanceRecord {
   id: string;
   tenantId: string;
+  termId?: string;
   date: string; // YYYY-MM-DD
   grade: string;
   section: string;
@@ -1466,6 +1520,7 @@ export interface StaffAttendanceRecord {
 export interface LeaveOutChit {
   id: string;
   tenantId: string;
+  termId?: string;
   studentId: string;
   studentName: string;
   studentCode: string;
@@ -1498,6 +1553,8 @@ export function isDateInLeaveChit(
 export interface ExamCycle {
   id: string;
   tenantId: string;
+  academicYearId?: string;
+  termId?: string;
   title: string;
   term: string;
   startDate: string;
@@ -1543,6 +1600,7 @@ export interface FeeVoteline {
 export interface FeeStructure {
   id: string;
   tenantId: string;
+  termId?: string;
   grade: string;
   term: string;
   votelines: FeeVoteline[];
@@ -1574,6 +1632,7 @@ export interface PaymentRecord {
 export interface FeeInvoice {
   id: string;
   tenantId: string;
+  termId?: string;
   invoiceNumber: string;
   studentId: string;
   studentName: string;
@@ -1615,6 +1674,7 @@ export type FeeWaiverMode = 'Percentage' | 'Fixed';
 export interface FeeWaiverRecord {
   id: string;
   tenantId: string;
+  termId?: string;
   studentId: string;
   studentName: string;
   studentCode: string;
@@ -1653,6 +1713,7 @@ export interface IndependentVotelinePayment {
 export interface IndependentVotelineItem {
   id: string;
   tenantId: string;
+  termId?: string;
   studentId: string;
   studentName: string;
   studentCode: string;
@@ -1979,7 +2040,11 @@ export interface WhatsAppDispatchRecord {
 export interface TenantWorkspaceData {
   tenant: Tenant;
   tenants: Tenant[];
+  academicYears?: AcademicYear[];
+  academicTerms?: AcademicTerm[];
   students: Student[];
+  archivedStudentsCount?: number;
+  lifecycleAuditLogs?: LifecycleAuditEntry[];
   admissions: AdmissionApplication[];
   timetable: TimetableSlot[];
   attendance: AttendanceRecord[];

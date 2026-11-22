@@ -1,18 +1,26 @@
 import { useMemo, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { formatCurrency, formatDateShort } from '../lib/format';
-import type { TenantWorkspaceData } from '../shared/types';
+import type { TenantWorkspaceData, UserRole } from '../shared/types';
 
 interface AnalyticsDashboardProps {
   workspace: TenantWorkspaceData;
+  currentRole?: UserRole;
   onNavigate: (module: string) => void;
 }
 
-export function AnalyticsDashboard({ workspace, onNavigate }: AnalyticsDashboardProps) {
+export function AnalyticsDashboard({
+  workspace,
+  currentRole = 'Admin',
+  onNavigate,
+}: AnalyticsDashboardProps) {
   const [attendanceFilterGrade, setAttendanceFilterGrade] = useState<string>('All');
   const [hoveredBarIdx, setHoveredBarIdx] = useState<number | null>(null);
 
-  const { tenant, students, admissions, attendance, examResults, invoices, timetable } = workspace;
+  const isStudentRole = currentRole === 'Student';
+  const { tenant, students, admissions, attendance, examResults, invoices, timetable, announcements } =
+    workspace;
+  const studentProfile = isStudentRole ? students[0] || null : null;
 
   const stats = useMemo(() => {
     const activeStudents = students.filter((s) => s.status === 'Active').length;
@@ -129,62 +137,102 @@ export function AnalyticsDashboard({ workspace, onNavigate }: AnalyticsDashboard
       <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-            Executive Analytics
+            {isStudentRole ? 'Student Portal Overview' : 'Executive Analytics'}
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            {tenant.name} · {tenant.academicYear} · {tenant.currentTerm} · {tenant.curriculum}
+            {isStudentRole && studentProfile
+              ? `${studentProfile.fullName} (${studentProfile.studentCode}) · ${studentProfile.grade} Stream ${studentProfile.section} · ${tenant.academicYear} · ${tenant.currentTerm}`
+              : `${tenant.name} · ${tenant.academicYear} · ${tenant.currentTerm} · ${tenant.curriculum}`}
           </p>
         </div>
         <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
-          <span>Tenant Plan: {tenant.plan}</span>
-          <span aria-hidden="true">·</span>
-          <span className="tabular-nums">{tenant.teachers.length} Faculty</span>
-          <span aria-hidden="true">·</span>
-          <span className="tabular-nums">{tenant.rooms.length} Rooms</span>
+          {isStudentRole ? (
+            <span className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 font-medium text-blue-700 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300">
+              Read-Only Student Portal
+            </span>
+          ) : (
+            <>
+              <span>Tenant Plan: {tenant.plan}</span>
+              <span aria-hidden="true">·</span>
+              <span className="tabular-nums">{tenant.teachers.length} Faculty</span>
+              <span aria-hidden="true">·</span>
+              <span className="tabular-nums">{tenant.rooms.length} Rooms</span>
+            </>
+          )}
         </div>
       </div>
 
       {/* 4-Column KPI Strip */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Enrolled Students</p>
-          <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
-            {stats.activeStudents}
-          </p>
-          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
-            {stats.pendingAdmissions} applications in pipeline
-          </p>
-        </div>
+        {isStudentRole ? (
+          <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Enrolled Class</p>
+            <p className="mt-2 font-mono text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+              {studentProfile ? `${studentProfile.grade} · ${studentProfile.section}` : '—'}
+            </p>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
+              Status: {studentProfile?.status || 'Active'} · {studentProfile?.studentCode || '—'}
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Enrolled Students</p>
+            <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
+              {stats.activeStudents}
+            </p>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
+              {stats.pendingAdmissions} applications in pipeline
+            </p>
+          </div>
+        )}
 
         <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Term Attendance Rate</p>
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            {isStudentRole ? 'My Attendance Rate' : 'Term Attendance Rate'}
+          </p>
           <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
             {stats.attendanceRate}%
           </p>
           <p className="mt-2 text-xs text-emerald-700 dark:text-emerald-400 tabular-nums">
-            Nominal threshold ≥ 92.0%
+            {isStudentRole
+              ? `${attendance.length} roll-call record(s) logged`
+              : 'Nominal threshold ≥ 92.0%'}
           </p>
         </div>
 
-        <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Fee Collection</p>
-          <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
-            {stats.collectionRate}%
-          </p>
-          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
-            {formatCurrency(stats.totalCollected, tenant.currency)} of{' '}
-            {formatCurrency(stats.totalBilled, tenant.currency)} billed
-          </p>
-        </div>
+        {isStudentRole ? (
+          <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Weekly Timetable</p>
+            <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
+              {timetable.length}
+            </p>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
+              Scheduled lessons for your class
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Fee Collection</p>
+            <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
+              {stats.collectionRate}%
+            </p>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
+              {formatCurrency(stats.totalCollected, tenant.currency)} of{' '}
+              {formatCurrency(stats.totalBilled, tenant.currency)} billed
+            </p>
+          </div>
+        )}
 
         <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Mean Exam Score</p>
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            {isStudentRole ? 'Published Mean Score' : 'Mean Exam Score'}
+          </p>
           <p className="mt-2 font-mono text-3xl font-semibold tracking-tight text-slate-900 tabular-nums dark:text-slate-100">
             {stats.avgScore}
             <span className="text-base font-normal text-slate-400"> / 100</span>
           </p>
           <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 tabular-nums">
-            Across {examResults.length} recorded assessments
+            Across {examResults.length} {isStudentRole ? 'published' : 'recorded'} assessments
           </p>
         </div>
       </div>
@@ -356,134 +404,172 @@ export function AnalyticsDashboard({ workspace, onNavigate }: AnalyticsDashboard
             )}
           </div>
 
-          <div className="mt-7 border-t border-slate-100 pt-5 dark:border-slate-800">
-            <div className="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300">
-              <span>Tuition Ledger Health</span>
-              <button
-                onClick={() => onNavigate('fees')}
-                className="text-blue-600 hover:underline dark:text-blue-400"
-              >
-                View Ledger
-              </button>
+          {!isStudentRole && (
+            <div className="mt-7 border-t border-slate-100 pt-5 dark:border-slate-800">
+              <div className="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300">
+                <span>Tuition Ledger Health</span>
+                <button
+                  onClick={() => onNavigate('fees')}
+                  className="text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  View Ledger
+                </button>
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
+                <div>
+                  <p className="text-slate-500 dark:text-slate-400">Settled</p>
+                  <p className="mt-0.5 font-mono font-semibold text-emerald-700 tabular-nums dark:text-emerald-400">
+                    {formatCurrency(feeBreakdown.paid + feeBreakdown.partial, tenant.currency)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 dark:text-slate-400">Pending</p>
+                  <p className="mt-0.5 font-mono font-semibold text-amber-700 tabular-nums dark:text-amber-400">
+                    {formatCurrency(feeBreakdown.pending, tenant.currency)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 dark:text-slate-400">Overdue</p>
+                  <p className="mt-0.5 font-mono font-semibold text-red-700 tabular-nums dark:text-red-400">
+                    {formatCurrency(feeBreakdown.overdue, tenant.currency)}
+                  </p>
+                </div>
+              </div>
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
-              <div>
-                <p className="text-slate-500 dark:text-slate-400">Settled</p>
-                <p className="mt-0.5 font-mono font-semibold text-emerald-700 tabular-nums dark:text-emerald-400">
-                  {formatCurrency(feeBreakdown.paid + feeBreakdown.partial, tenant.currency)}
-                </p>
-              </div>
-              <div>
-                <p className="text-slate-500 dark:text-slate-400">Pending</p>
-                <p className="mt-0.5 font-mono font-semibold text-amber-700 tabular-nums dark:text-amber-400">
-                  {formatCurrency(feeBreakdown.pending, tenant.currency)}
-                </p>
-              </div>
-              <div>
-                <p className="text-slate-500 dark:text-slate-400">Overdue</p>
-                <p className="mt-0.5 font-mono font-semibold text-red-700 tabular-nums dark:text-red-400">
-                  {formatCurrency(feeBreakdown.overdue, tenant.currency)}
-                </p>
-              </div>
-            </div>
-          </div>
+          )}
         </section>
       </div>
 
       {/* Operational Queues (Whitespace + Hairline Dividers, Zero Nested Cards) */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Admissions Queue */}
-        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              Admissions Queue
-            </h2>
-            <button
-              onClick={() => onNavigate('admissions')}
-              className="inline-flex items-center gap-1 whitespace-nowrap shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-            >
-              Manage <ArrowRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
-            {actionQueue.readyAdmissions.length === 0 ? (
-              <p className="py-6 text-xs text-slate-500 dark:text-slate-400">
-                No applicants currently awaiting interview or enrollment.
-              </p>
-            ) : (
-              actionQueue.readyAdmissions.map((adm) => (
-                <div key={adm.id} className="flex items-center justify-between py-3">
-                  <div className="min-w-0 pr-3">
+      <div className={`grid grid-cols-1 gap-6 ${isStudentRole ? 'lg:grid-cols-2' : 'lg:grid-cols-3'}`}>
+        {isStudentRole ? (
+          <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                School Announcements
+              </h2>
+              <button
+                onClick={() => onNavigate('communications')}
+                className="inline-flex items-center gap-1 whitespace-nowrap shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Read All <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
+              {announcements.length === 0 ? (
+                <p className="py-6 text-xs text-slate-500 dark:text-slate-400">
+                  No announcements posted for students yet.
+                </p>
+              ) : (
+                announcements.slice(0, 3).map((ann) => (
+                  <div key={ann.id} className="py-3">
                     <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
-                      {adm.studentName}
+                      {ann.title}
                     </p>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                      {adm.applicationCode} · {adm.targetGrade} {adm.assignedSection}
+                    <p className="mt-0.5 line-clamp-2 text-xs text-slate-500 dark:text-slate-400">
+                      {ann.body}
                     </p>
                   </div>
-                  <span
-                    className={`whitespace-nowrap shrink-0 text-xs font-medium ${
-                      adm.stage === 'Approved'
-                        ? 'text-emerald-700 dark:text-emerald-400'
-                        : 'text-blue-700 dark:text-blue-400'
-                    }`}
-                  >
-                    {adm.stage}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
+                ))
+              )}
+            </div>
+          </section>
+        ) : (
+          <>
+            {/* Admissions Queue */}
+            <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  Admissions Queue
+                </h2>
+                <button
+                  onClick={() => onNavigate('admissions')}
+                  className="inline-flex items-center gap-1 whitespace-nowrap shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Manage <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
+                {actionQueue.readyAdmissions.length === 0 ? (
+                  <p className="py-6 text-xs text-slate-500 dark:text-slate-400">
+                    No applicants currently awaiting interview or enrollment.
+                  </p>
+                ) : (
+                  actionQueue.readyAdmissions.map((adm) => (
+                    <div key={adm.id} className="flex items-center justify-between py-3">
+                      <div className="min-w-0 pr-3">
+                        <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                          {adm.studentName}
+                        </p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          {adm.applicationCode} · {adm.targetGrade} {adm.assignedSection}
+                        </p>
+                      </div>
+                      <span
+                        className={`whitespace-nowrap shrink-0 text-xs font-medium ${
+                          adm.stage === 'Approved'
+                            ? 'text-emerald-700 dark:text-emerald-400'
+                            : 'text-blue-700 dark:text-blue-400'
+                        }`}
+                      >
+                        {adm.stage}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
 
-        {/* Fee Follow-up */}
-        <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              Fee Accounts Requiring Attention
-            </h2>
-            <button
-              onClick={() => onNavigate('fees')}
-              className="inline-flex items-center gap-1 whitespace-nowrap shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-            >
-              Collect <ArrowRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
-            {actionQueue.overdueInvoices.length === 0 ? (
-              <p className="py-6 text-xs text-slate-500 dark:text-slate-400">
-                All student fee invoices are settled or partial.
-              </p>
-            ) : (
-              actionQueue.overdueInvoices.map((inv) => (
-                <div key={inv.id} className="flex items-center justify-between py-3">
-                  <div className="min-w-0 pr-3">
-                    <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
-                      {inv.studentName}
-                    </p>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                      {inv.invoiceNumber} · Due {formatDateShort(inv.dueDate)}
-                    </p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className="font-mono text-sm font-semibold text-slate-900 tabular-nums dark:text-slate-100">
-                      {formatCurrency(inv.balance, tenant.currency)}
-                    </p>
-                    <p
-                      className={`text-xs font-medium ${
-                        inv.status === 'Overdue'
-                          ? 'text-red-700 dark:text-red-400'
-                          : 'text-amber-700 dark:text-amber-400'
-                      }`}
-                    >
-                      {inv.status}
-                    </p>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
+            {/* Fee Follow-up */}
+            <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  Fee Accounts Requiring Attention
+                </h2>
+                <button
+                  onClick={() => onNavigate('fees')}
+                  className="inline-flex items-center gap-1 whitespace-nowrap shrink-0 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Collect <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
+                {actionQueue.overdueInvoices.length === 0 ? (
+                  <p className="py-6 text-xs text-slate-500 dark:text-slate-400">
+                    All student fee invoices are settled or partial.
+                  </p>
+                ) : (
+                  actionQueue.overdueInvoices.map((inv) => (
+                    <div key={inv.id} className="flex items-center justify-between py-3">
+                      <div className="min-w-0 pr-3">
+                        <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                          {inv.studentName}
+                        </p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                          {inv.invoiceNumber} · Due {formatDateShort(inv.dueDate)}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="font-mono text-sm font-semibold text-slate-900 tabular-nums dark:text-slate-100">
+                          {formatCurrency(inv.balance, tenant.currency)}
+                        </p>
+                        <p
+                          className={`text-xs font-medium ${
+                            inv.status === 'Overdue'
+                              ? 'text-red-700 dark:text-red-400'
+                              : 'text-amber-700 dark:text-amber-400'
+                          }`}
+                        >
+                          {inv.status}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </>
+        )}
 
         {/* Active Schedule Preview */}
         <section className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">

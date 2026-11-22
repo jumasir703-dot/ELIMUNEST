@@ -130,7 +130,7 @@ export function ExamsModule({
   const [queueSelectedStudentId, setQueueSelectedStudentId] = useState<string | null>(null);
   const isAdminRole =
     currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
-  const isParentRole = currentRole === 'Parent';
+  const isParentRole = currentRole === 'Parent' || currentRole === 'Student';
 
   const [showCycleModal, setShowCycleModal] = useState(false);
   const [showUnlockModal, setShowUnlockModal] = useState(false);
@@ -184,6 +184,26 @@ export function ExamsModule({
     () => orderedCycles.find((c) => c.id === selectedCycleId) || orderedCycles[0] || null,
     [orderedCycles, selectedCycleId]
   );
+
+  const activeCycleTerm = useMemo(() => {
+    const terms = workspace.academicTerms || [];
+    if (!activeCycle) {
+      return (
+        terms.find(
+          (t) => t.isCurrent || t.name.toLowerCase() === tenant.currentTerm.toLowerCase()
+        ) || null
+      );
+    }
+    return (
+      terms.find(
+        (t) =>
+          (activeCycle.termId && t.id === activeCycle.termId) ||
+          t.name.toLowerCase() === activeCycle.term.toLowerCase()
+      ) || null
+    );
+  }, [activeCycle, workspace.academicTerms, tenant.currentTerm]);
+
+  const isCycleTermClosed = activeCycleTerm?.status === 'Closed';
 
   const previousCycle = useMemo(() => {
     if (!activeCycle) return null;
@@ -433,6 +453,13 @@ export function ExamsModule({
     resultStatus: ExamResultStatus = 'Scored'
   ) {
     if (!activeCycle || isAllSubjectsMode || isParentRole) return;
+    if (isCycleTermClosed) {
+      onNotify(
+        `Term "${activeCycleTerm?.name || activeCycle.term}" is Closed. Reopen the term in School Settings before editing marks.`,
+        'error'
+      );
+      return;
+    }
     if (activeCycle.status === 'Published') {
       onNotify(
         `Exam cycle "${activeCycle.title}" is Published and locked. An Admin must unlock it first.`,
@@ -922,7 +949,13 @@ export function ExamsModule({
           {activeTab !== 'entry' && activeCycle && isAdminRole && activeCycle.status !== 'Published' && (
             <button
               onClick={handlePublishCycle}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700"
+              disabled={isCycleTermClosed}
+              title={
+                isCycleTermClosed
+                  ? `Term ${activeCycleTerm?.name || activeCycle.term} is Closed`
+                  : undefined
+              }
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
               Publish Results
@@ -931,11 +964,17 @@ export function ExamsModule({
           {activeTab !== 'entry' && activeCycle && isAdminRole && activeCycle.status === 'Published' && (
             <button
               type="button"
+              disabled={isCycleTermClosed}
+              title={
+                isCycleTermClosed
+                  ? `Reopen ${activeCycleTerm?.name || activeCycle.term} in School Settings first`
+                  : undefined
+              }
               onClick={() => {
                 setUnlockReason('');
                 setShowUnlockModal(true);
               }}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950/70"
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950/70"
             >
               <Unlock className="h-3.5 w-3.5" />
               Unlock Cycle
@@ -943,6 +982,18 @@ export function ExamsModule({
           )}
         </div>
       </div>
+
+      {isCycleTermClosed && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
+          <div>
+            <strong>
+              Term Locked ({activeCycleTerm?.name || activeCycle?.term || tenant.currentTerm} is Closed):
+            </strong>{' '}
+            Exam score edits, publishing, and cycle unlocks for this term are locked. A School Admin can reopen the term in <strong>School Settings → Academic Calendar</strong>.
+          </div>
+        </div>
+      )}
 
       {activeTab === 'entry' ? (
         <ExamResultsEntryPanel
@@ -1357,7 +1408,8 @@ export function ExamsModule({
                 ) : (
                   singleSubjectRows.map((row) => {
                     const key = `${row.student.id}:${effectiveSubject}`;
-                    const cycleLocked = activeCycle?.status === 'Published' || isParentRole;
+                    const cycleLocked =
+                      activeCycle?.status === 'Published' || isCycleTermClosed || isParentRole;
                     const inputVal =
                       draftScores[key] !== undefined
                         ? draftScores[key]

@@ -193,7 +193,26 @@ export function ExamResultsEntryPanel({
     );
   }, [examCycles, selectedExamType]);
 
-  const isCycleLocked = matchedCycle?.status === 'Published';
+  const matchedCycleTerm = useMemo(() => {
+    const terms = workspace.academicTerms || [];
+    if (matchedCycle) {
+      return (
+        terms.find(
+          (t) =>
+            (matchedCycle.termId && t.id === matchedCycle.termId) ||
+            t.name.toLowerCase() === matchedCycle.term.toLowerCase()
+        ) || null
+      );
+    }
+    return (
+      terms.find(
+        (t) => t.isCurrent || t.name.toLowerCase() === tenant.currentTerm.toLowerCase()
+      ) || null
+    );
+  }, [workspace.academicTerms, matchedCycle, tenant.currentTerm]);
+
+  const isTermClosed = matchedCycleTerm?.status === 'Closed';
+  const isCycleLocked = matchedCycle?.status === 'Published' || isTermClosed;
 
   const effectiveTeacherId = useMemo(() => {
     if (selectedTeacherId === '__ADMIN__' && isAdminRole) {
@@ -772,7 +791,9 @@ export function ExamResultsEntryPanel({
   async function handleSaveAllResults() {
     if (isCycleLocked) {
       onNotify(
-        `Exam cycle "${matchedCycle?.title}" is Published and locked. An Admin must unlock it first.`,
+        isTermClosed
+          ? `Term "${matchedCycleTerm?.name || tenant.currentTerm}" is Closed. Reopen the term in School Settings before saving marks.`
+          : `Exam cycle "${matchedCycle?.title}" is Published and locked. An Admin must unlock it first.`,
         'error'
       );
       return;
@@ -1029,7 +1050,18 @@ export function ExamResultsEntryPanel({
           <div className="mt-3 flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
             <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
             <div>
-              <strong>{matchedCycle?.title} is Published and locked.</strong> Mark editing and Excel imports are disabled. An Admin must unlock this exam cycle with an audit reason on the <em>Results &amp; Merit List</em> tab before marks can be changed.
+              {isTermClosed ? (
+                <>
+                  <strong>
+                    Term {matchedCycleTerm?.name || tenant.currentTerm} is Closed.
+                  </strong>{' '}
+                  Mark editing and Excel imports for this term are locked until a School Admin reopens the term in <em>School Settings → Academic Calendar</em>.
+                </>
+              ) : (
+                <>
+                  <strong>{matchedCycle?.title} is Published and locked.</strong> Mark editing and Excel imports are disabled. An Admin must unlock this exam cycle with an audit reason on the <em>Results &amp; Merit List</em> tab before marks can be changed.
+                </>
+              )}
             </div>
           </div>
         )}

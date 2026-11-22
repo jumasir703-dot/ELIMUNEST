@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   Building2,
+  Calendar,
   Check,
+  CheckCircle2,
   Copy,
+  GraduationCap,
   KeyRound,
   Lock,
+  LockOpen,
   Plus,
   ShieldCheck,
   UserPlus,
   Users,
+  X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
 import {
@@ -18,6 +23,7 @@ import {
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
   suggestNameEmailLocalPart,
+  type AcademicTerm,
   type CurrencyCode,
   type TenantModulePermission,
   type TenantUser,
@@ -138,6 +144,36 @@ export function SettingsModule({
   const [newRoom, setNewRoom] = useState('');
   const [newSubject, setNewSubject] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Academic Calendar & Student Portal State
+  const academicYears = workspace.academicYears || [];
+  const academicTerms = workspace.academicTerms || [];
+  const [newYearForm, setNewYearForm] = useState({
+    name: `${new Date().getFullYear() + 1}`,
+    startDate: `${new Date().getFullYear() + 1}-01-05`,
+    endDate: `${new Date().getFullYear() + 1}-11-30`,
+    setAsCurrent: false,
+  });
+  const [newTermForm, setNewTermForm] = useState({
+    academicYearId: academicYears.find((y) => y.isCurrent)?.id || academicYears[0]?.id || '',
+    name: 'Term 2',
+    startDate: `${new Date().getFullYear()}-05-04`,
+    endDate: `${new Date().getFullYear()}-08-07`,
+    setAsCurrent: false,
+  });
+  const [calendarSaving, setCalendarSaving] = useState(false);
+  const [reopenTermTarget, setReopenTermTarget] = useState<AcademicTerm | null>(null);
+  const [reopenReason, setReopenReason] = useState('');
+  const [togglingPortal, setTogglingPortal] = useState(false);
+
+  useEffect(() => {
+    if (!newTermForm.academicYearId && academicYears.length > 0) {
+      setNewTermForm((prev) => ({
+        ...prev,
+        academicYearId: academicYears.find((y) => y.isCurrent)?.id || academicYears[0].id,
+      }));
+    }
+  }, [academicYears, newTermForm.academicYearId]);
 
   const [provisionForm, setProvisionForm] = useState({
     name: '',
@@ -322,6 +358,100 @@ export function SettingsModule({
       onNotify(err instanceof Error ? err.message : 'Unable to update access rights.', 'error');
     } finally {
       setSavingUserAccess(false);
+    }
+  }
+
+  async function handleToggleStudentPortal() {
+    setTogglingPortal(true);
+    try {
+      const nextState = !tenant.studentPortalEnabled;
+      await saasApi.updateTenantStudentPortal(tenant.id, nextState);
+      await onRefresh();
+      onNotify(
+        nextState
+          ? `Student Portal enabled for ${tenant.name}. You can now issue student logins in Admissions.`
+          : `Student Portal disabled for ${tenant.name}. Active student sessions were signed out.`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to update Student Portal setting.', 'error');
+    } finally {
+      setTogglingPortal(false);
+    }
+  }
+
+  async function handleCreateAcademicYear(e: React.FormEvent) {
+    e.preventDefault();
+    setCalendarSaving(true);
+    try {
+      const { year } = await saasApi.createAcademicYear(tenant.id, newYearForm);
+      setNewTermForm((prev) => ({ ...prev, academicYearId: year.id }));
+      await onRefresh();
+      onNotify(`Academic year "${year.name}" created.`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to create academic year.', 'error');
+    } finally {
+      setCalendarSaving(false);
+    }
+  }
+
+  async function handleCreateAcademicTerm(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newTermForm.academicYearId) {
+      onNotify('Create or select an Academic Year first.', 'error');
+      return;
+    }
+    setCalendarSaving(true);
+    try {
+      const { term } = await saasApi.createAcademicTerm(tenant.id, newTermForm);
+      await onRefresh();
+      onNotify(`Academic term "${term.name}" added.`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to create academic term.', 'error');
+    } finally {
+      setCalendarSaving(false);
+    }
+  }
+
+  async function handleSetCurrentTerm(term: AcademicTerm) {
+    setCalendarSaving(true);
+    try {
+      await saasApi.setCurrentAcademicTerm(tenant.id, term.id);
+      await onRefresh();
+      onNotify(`Active term switched to "${term.name}".`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to set active term.', 'error');
+    } finally {
+      setCalendarSaving(false);
+    }
+  }
+
+  async function handleCloseTerm(term: AcademicTerm) {
+    setCalendarSaving(true);
+    try {
+      await saasApi.closeAcademicTerm(tenant.id, term.id);
+      await onRefresh();
+      onNotify(`Closed "${term.name}". Exams, attendance, and fee edits for this term are now locked.`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to close term.', 'error');
+    } finally {
+      setCalendarSaving(false);
+    }
+  }
+
+  async function handleConfirmReopenTerm(e: React.FormEvent) {
+    e.preventDefault();
+    if (!reopenTermTarget) return;
+    setCalendarSaving(true);
+    try {
+      await saasApi.reopenAcademicTerm(tenant.id, reopenTermTarget.id, reopenReason);
+      await onRefresh();
+      onNotify(`Reopened "${reopenTermTarget.name}" (audit log recorded).`);
+      setReopenTermTarget(null);
+      setReopenReason('');
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to reopen term.', 'error');
+    } finally {
+      setCalendarSaving(false);
     }
   }
 
@@ -1102,6 +1232,378 @@ export function SettingsModule({
           )}
         </div>
       </div>
+
+      {/* Academic Years & Terms Calendar + Student Portal Section */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        {/* Academic Calendar & Term Lock Controls */}
+        <div className="rounded-xl border border-slate-200 bg-white p-6 lg:col-span-8 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <Calendar className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Academic Years & Terms Calendar
+                </h2>
+              </div>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Link invoices, exam cycles, and attendance registers to formal school terms. Closing a term locks all exam scores, attendance marks, and fee adjustments for that term.
+              </p>
+            </div>
+            <span className="font-mono text-xs text-slate-600 dark:text-slate-300">
+              Current: {tenant.academicYear} · {tenant.currentTerm}
+            </span>
+          </div>
+
+          <div className="mt-5 space-y-4">
+            {academicYears.length === 0 ? (
+              <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-950">
+                No academic years configured yet. Create your first academic year below.
+              </p>
+            ) : (
+              academicYears.map((yr) => {
+                const yearTerms = academicTerms.filter((t) => t.academicYearId === yr.id);
+                return (
+                  <div
+                    key={yr.id}
+                    className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-950/50"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                          {yr.name}
+                        </span>
+                        {yr.isCurrent && (
+                          <span className="rounded bg-blue-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                            Current Year
+                          </span>
+                        )}
+                        <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                          {yr.startDate} → {yr.endDate}
+                        </span>
+                      </div>
+                      <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                        {yearTerms.length} {yearTerms.length === 1 ? 'term' : 'terms'}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
+                      {yearTerms.length === 0 ? (
+                        <div className="px-3 py-2.5 text-xs text-slate-500">
+                          No terms added under {yr.name} yet.
+                        </div>
+                      ) : (
+                        yearTerms.map((term) => {
+                          const isClosed = term.status === 'Closed';
+                          return (
+                            <div
+                              key={term.id}
+                              className="flex flex-col gap-2 px-3.5 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                                    {term.name}
+                                  </span>
+                                  {term.isCurrent && (
+                                    <span className="inline-flex items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                                      <CheckCircle2 className="h-3 w-3" />
+                                      Current
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                                      isClosed
+                                        ? 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300'
+                                        : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                                    }`}
+                                  >
+                                    {isClosed ? <Lock className="h-2.5 w-2.5" /> : null}
+                                    {term.status}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                  {term.startDate} to {term.endDate}
+                                  {isClosed && term.closedBy ? ` · Locked by ${term.closedBy}` : ''}
+                                  {!isClosed && term.reopenedBy
+                                    ? ` · Reopened by ${term.reopenedBy}${term.reopenReason ? ` (${term.reopenReason})` : ''}`
+                                    : ''}
+                                </p>
+                              </div>
+
+                              {canMutateTenant && (
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  {!term.isCurrent && (
+                                    <button
+                                      type="button"
+                                      disabled={calendarSaving}
+                                      onClick={() => handleSetCurrentTerm(term)}
+                                      className="rounded border border-slate-200 px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                                    >
+                                      Set Current
+                                    </button>
+                                  )}
+                                  {isClosed ? (
+                                    <button
+                                      type="button"
+                                      disabled={calendarSaving}
+                                      onClick={() => {
+                                        setReopenTermTarget(term);
+                                        setReopenReason('');
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                    >
+                                      <LockOpen className="h-3 w-3" />
+                                      Reopen Term
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={calendarSaving}
+                                      onClick={() => handleCloseTerm(term)}
+                                      className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
+                                    >
+                                      <Lock className="h-3 w-3" />
+                                      Close &amp; Lock
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {canMutateTenant && (
+            <div className="mt-5 grid grid-cols-1 gap-4 border-t border-slate-100 pt-5 sm:grid-cols-2 dark:border-slate-800">
+              <form
+                onSubmit={handleCreateAcademicYear}
+                className="space-y-2.5 rounded-lg border border-slate-200 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-950/40"
+              >
+                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  Add Academic Year
+                </div>
+                <input
+                  type="text"
+                  required
+                  value={newYearForm.name}
+                  onChange={(e) => setNewYearForm({ ...newYearForm, name: e.target.value })}
+                  placeholder="e.g. 2027"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    required
+                    value={newYearForm.startDate}
+                    onChange={(e) => setNewYearForm({ ...newYearForm, startDate: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                  <input
+                    type="date"
+                    required
+                    value={newYearForm.endDate}
+                    onChange={(e) => setNewYearForm({ ...newYearForm, endDate: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={newYearForm.setAsCurrent}
+                    onChange={(e) =>
+                      setNewYearForm({ ...newYearForm, setAsCurrent: e.target.checked })
+                    }
+                    className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                  />
+                  Set as current academic year
+                </label>
+                <button
+                  type="submit"
+                  disabled={calendarSaving}
+                  className="w-full rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
+                >
+                  + Create Academic Year
+                </button>
+              </form>
+
+              <form
+                onSubmit={handleCreateAcademicTerm}
+                className="space-y-2.5 rounded-lg border border-slate-200 bg-slate-50/60 p-3.5 dark:border-slate-800 dark:bg-slate-950/40"
+              >
+                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  Add Term to Academic Year
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={newTermForm.academicYearId}
+                    onChange={(e) =>
+                      setNewTermForm({ ...newTermForm, academicYearId: e.target.value })
+                    }
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  >
+                    {academicYears.map((y) => (
+                      <option key={y.id} value={y.id}>
+                        {y.name}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    required
+                    value={newTermForm.name}
+                    onChange={(e) => setNewTermForm({ ...newTermForm, name: e.target.value })}
+                    placeholder="Term 2"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    required
+                    value={newTermForm.startDate}
+                    onChange={(e) => setNewTermForm({ ...newTermForm, startDate: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                  <input
+                    type="date"
+                    required
+                    value={newTermForm.endDate}
+                    onChange={(e) => setNewTermForm({ ...newTermForm, endDate: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={newTermForm.setAsCurrent}
+                    onChange={(e) =>
+                      setNewTermForm({ ...newTermForm, setAsCurrent: e.target.checked })
+                    }
+                    className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                  />
+                  Set as current term immediately
+                </label>
+                <button
+                  type="submit"
+                  disabled={calendarSaving || academicYears.length === 0}
+                  className="w-full rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  + Add Academic Term
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+
+        {/* Optional Student Portal Setting */}
+        <div className="rounded-xl border border-slate-200 bg-white p-6 lg:col-span-4 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex items-center gap-2">
+            <GraduationCap className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+              Student Read-Only Portal
+            </h2>
+          </div>
+          <p className="mt-1.5 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+            Optionally allow enrolled learners at {tenant.name} to sign in with their own read-only Student account to view their class timetable, published exam results, attendance log, and school announcements.
+          </p>
+
+          <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/50">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  Student Login Access
+                </p>
+                <p className="mt-0.5 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                  Status: {tenant.studentPortalEnabled ? 'Enabled' : 'Disabled'}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={!canMutateTenant || togglingPortal}
+                onClick={handleToggleStudentPortal}
+                className={`rounded-lg px-3.5 py-2 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                  tenant.studentPortalEnabled
+                    ? 'border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                {togglingPortal
+                  ? 'Updating...'
+                  : tenant.studentPortalEnabled
+                  ? 'Disable Portal'
+                  : 'Enable Portal'}
+              </button>
+            </div>
+            <ul className="mt-3 space-y-1 text-[11px] text-slate-600 dark:text-slate-400">
+              <li>• Strictly read-only — students cannot modify any data.</li>
+              <li>• Finance, fee ledgers, payroll, and other learners remain hidden.</li>
+              <li>• Turning off immediately signs out all active Student sessions.</li>
+              <li>• Issue student logins from the Student Directory in Admissions.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      {/* Reopen Closed Term Modal */}
+      {reopenTermTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                Reopen Closed Term — {reopenTermTarget.name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setReopenTermTarget(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
+              Reopening a closed term unlocks exam scores, attendance logs, and fee records for this term. Your reason will be permanently recorded in the school audit trail.
+            </p>
+            <form onSubmit={handleConfirmReopenTerm} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Audit Reason (Required)
+                </label>
+                <textarea
+                  required
+                  minLength={3}
+                  rows={3}
+                  value={reopenReason}
+                  onChange={(e) => setReopenReason(e.target.value)}
+                  placeholder="e.g. Correcting KNEC moderation remark for Grade 9 Science"
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReopenTermTarget(null)}
+                  className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={calendarSaving || reopenReason.trim().length < 3}
+                  className="rounded-lg bg-amber-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {calendarSaving ? 'Reopening...' : 'Confirm Reopen Term'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

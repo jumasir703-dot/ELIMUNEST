@@ -954,35 +954,6 @@ app.put('/api/tenants/:id/subjects', ...settingsGuard, (req: AuthenticatedReques
   }
 });
 
-// Academic calendar: terms can be closed (locks attendance, exam marks, new invoices) and reopened with a reason
-app.post('/api/tenants/:id/terms', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = assertTenantParamAccess(req, String(req.params.id));
-    res.status(201).json({ term: store.createTerm(tenantId, req.body || {}, req.authUser) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post('/api/tenants/:id/terms/:termId/close', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = assertTenantParamAccess(req, String(req.params.id));
-    res.json(store.closeTerm(tenantId, String(req.params.termId), req.authUser));
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post('/api/tenants/:id/terms/:termId/reopen', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = assertTenantParamAccess(req, String(req.params.id));
-    const term = store.reopenTerm(tenantId, String(req.params.termId), req.body?.reason, req.authUser);
-    res.json({ term });
-  } catch (err) {
-    next(err);
-  }
-});
-
 app.post('/api/tenants/:id/teachers', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     assertTenantParamAccess(req, String(req.params.id));
@@ -1039,6 +1010,101 @@ app.post(
   }
 );
 
+app.put(
+  '/api/tenants/:id/student-portal',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      assertTenantParamAccess(req, String(req.params.id));
+      const tenant = store.updateTenantStudentPortal(
+        String(req.params.id),
+        Boolean(req.body?.enabled),
+        req.authUser!
+      );
+      res.json({ tenant });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Academic Calendar (Years & Terms + Close / Reopen Locks)
+app.get('/api/academic-calendar', (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    res.json(store.listAcademicCalendar(tenantId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/academic-calendar/years', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const year = store.createAcademicYear(tenantId, req.body || {}, req.authUser!);
+    res.status(201).json({ year });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/academic-calendar/terms', ...settingsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const term = store.createAcademicTerm(tenantId, req.body || {}, req.authUser!);
+    res.status(201).json({ term });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post(
+  '/api/academic-calendar/terms/:id/set-current',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const term = store.setCurrentAcademicTerm(tenantId, String(req.params.id), req.authUser!);
+      res.json({ term });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academic-calendar/terms/:id/close',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const term = store.closeAcademicTerm(tenantId, String(req.params.id), req.authUser!);
+      res.json({ term });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academic-calendar/terms/:id/reopen',
+  ...settingsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const term = store.reopenAcademicTerm(
+        tenantId,
+        String(req.params.id),
+        String(req.body?.reason || ''),
+        req.authUser!
+      );
+      res.json({ term });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 app.get('/api/workspace', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
@@ -1077,40 +1143,22 @@ const admissionsGuard = [
   requireModule('admissions'),
 ];
 
+app.get('/api/students/audit-logs', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 200;
+    const logs = store.getLifecycleAuditLogs(tenantId, Number.isFinite(limit) ? limit : 200);
+    res.json({ logs });
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.post('/api/students/enroll', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const result = store.enrollStudent(tenantId, req.body);
+    const result = store.enrollStudent(tenantId, req.body, req.authUser!);
     res.status(201).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.patch('/api/students/:id', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const student = store.updateStudent(tenantId, String(req.params.id), req.body || {}, req.authUser);
-    res.json({ student });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post('/api/students/:id/status', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const result = store.changeStudentStatus(tenantId, String(req.params.id), req.body || {}, req.authUser);
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post('/api/students/promote', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    res.json(store.promoteStudents(tenantId, req.body || {}, req.authUser));
   } catch (err) {
     next(err);
   }
@@ -1119,11 +1167,104 @@ app.post('/api/students/promote', ...admissionsGuard, (req: AuthenticatedRequest
 app.post('/api/students/import', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    res.json(store.importStudents(tenantId, req.body || {}, req.authUser));
+    const result = store.importStudents(tenantId, req.body || {}, req.authUser!);
+    res.status(result.dryRun ? 200 : 201).json(result);
   } catch (err) {
     next(err);
   }
 });
+
+app.post(
+  '/api/students/promotions/preview',
+  ...admissionsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.previewYearEndPromotion(tenantId, req.body || {});
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/students/promotions/execute',
+  ...admissionsGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.executeYearEndPromotion(tenantId, req.body || {}, req.authUser!, req.ip);
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch('/api/students/:id', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const student = store.updateStudentDetails(
+      tenantId,
+      String(req.params.id),
+      req.body || {},
+      req.authUser!
+    );
+    res.json({ student });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/students/:id/lifecycle', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const student = store.transitionStudentStatus(
+      tenantId,
+      String(req.params.id),
+      req.body || {},
+      req.authUser!
+    );
+    res.json({ student });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/students/:id', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.softDeleteStudent(
+      tenantId,
+      String(req.params.id),
+      String(req.body?.reason || ''),
+      req.authUser!
+    );
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post(
+  '/api/students/:id/portal-account',
+  ...admissionsGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = await store.provisionStudentPortalAccount(
+        req.authUser!,
+        tenantId,
+        String(req.params.id),
+        req.body || {}
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 app.patch('/api/students/:id/parent', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
   try {
