@@ -7,6 +7,7 @@ import type { Announcement, TenantWorkspaceData, UserRole } from '../shared/type
 interface CommunicationsModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
+  canEdit?: boolean;
   wsConnected: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
@@ -18,16 +19,18 @@ const CHANNELS = ['Staff & Faculty', 'Admissions & Registrar', 'Parent Liaison',
 export function CommunicationsModule({
   workspace,
   currentRole,
+  canEdit = true,
   wsConnected,
   onRefresh,
   onNotify,
   onNavigate,
 }: CommunicationsModuleProps) {
   const { tenant, announcements, messages, notifications } = workspace;
-  const isReadOnlyViewer = currentRole === 'Parent' || currentRole === 'Student';
+  const isPortalViewer = currentRole === 'Parent' || currentRole === 'Student';
+  const isReadOnlyViewer = !canEdit || isPortalViewer;
 
   const [activeChannel, setActiveChannel] = useState(
-    isReadOnlyViewer ? 'Parent Liaison' : CHANNELS[0]
+    isPortalViewer ? 'Parent Liaison' : CHANNELS[0]
   );
   const [messageText, setMessageText] = useState('');
   const [sendingMsg, setSendingMsg] = useState(false);
@@ -115,6 +118,12 @@ export function CommunicationsModule({
           <span>{wsConnected ? 'WebSocket Connected' : 'Reconnecting Socket'}</span>
         </div>
       </div>
+
+      {!canEdit && !isPortalViewer && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
+          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Communications. Publishing announcements and posting staff channel messages are disabled.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Announcements Composer & Feed */}

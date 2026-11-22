@@ -516,7 +516,15 @@ describe('Phase 5: Student Lifecycle, Academic Calendar, Bulk Import & Student P
     ).toBe(false);
 
     // Enforce learnerCap check
-    const activeCount = store.getWorkspace(tenantId).students.filter((s) => !s.deleted).length;
+    const activeCount = store
+      .getWorkspace(tenantId)
+      .students.filter(
+        (s) =>
+          !s.deleted &&
+          s.status !== 'Graduated' &&
+          s.status !== 'Transferred' &&
+          s.status !== 'Withdrawn'
+      ).length;
     const tenantObj = store.listTenants().find((t) => t.id === tenantId)!;
     tenantObj.learnerCap = activeCount + 1;
 

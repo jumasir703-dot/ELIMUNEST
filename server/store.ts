@@ -7237,6 +7237,20 @@ export class TenantStore {
     const saved: ExamResult[] = [];
     const touchedSubjects = new Set<string>();
 
+    const studentById = new Map<string, Student>();
+    for (const s of this.state.students) {
+      if (s.tenantId === tenantId && !s.deleted) {
+        studentById.set(s.id, s);
+      }
+    }
+
+    const existingResultByKey = new Map<string, ExamResult>();
+    for (const r of this.state.examResults) {
+      if (r.tenantId === tenantId && r.examCycleId === cycle.id) {
+        existingResultByKey.set(`${r.studentId}:::${r.subject.toLowerCase()}`, r);
+      }
+    }
+
     for (const entry of input.entries) {
       const subject = (entry.subject || '').trim();
       if (!subject) {
@@ -7249,9 +7263,7 @@ export class TenantStore {
         );
       }
 
-      const student = this.state.students.find(
-        (s) => s.id === entry.studentId && s.tenantId === tenantId && !s.deleted
-      );
+      const student = studentById.get(entry.studentId);
       if (!student) {
         throw new ConflictError(`Student not found in this school (${entry.studentId}).`, 404);
       }
@@ -7278,13 +7290,8 @@ export class TenantStore {
           ? { letterGrade: 'EXM', gpaPoints: 0 }
           : computeLetterGrade(parsed.score, student.grade);
 
-      const existing = this.state.examResults.find(
-        (r) =>
-          r.tenantId === tenantId &&
-          r.examCycleId === cycle!.id &&
-          r.studentId === student.id &&
-          r.subject.toLowerCase() === subject.toLowerCase()
-      );
+      const lookupKey = `${student.id}:::${subject.toLowerCase()}`;
+      const existing = existingResultByKey.get(lookupKey);
 
       if (existing) {
         existing.score = parsed.score;
@@ -7322,6 +7329,7 @@ export class TenantStore {
           updatedAt: now,
         };
         this.state.examResults.push(res);
+        existingResultByKey.set(lookupKey, res);
         saved.push(res);
       }
       touchedSubjects.add(subject);
@@ -10636,11 +10644,25 @@ export class TenantStore {
           403
         );
       }
-      if (actor && actor.role === 'Bursar' && getModuleAccessLevel(actor, 'fees') !== 'edit') {
-        throw new ConflictError(
-          'Forbidden: Read-only access for module "fees" does not permit budget approval.',
-          403
-        );
+      if (actor) {
+        const feesLevel = getModuleAccessLevel(actor, 'fees');
+        if (feesLevel === 'none') {
+          throw new ConflictError(
+            'Forbidden: Account lacks access permission to module "fees".',
+            403
+          );
+        }
+        if (
+          actor.role !== 'Budget Approver' &&
+          actor.role !== 'Super Admin' &&
+          actor.role !== 'Developer' &&
+          feesLevel !== 'edit'
+        ) {
+          throw new ConflictError(
+            'Forbidden: Read-only access for module "fees" does not permit budget approval.',
+            403
+          );
+        }
       }
     }
 
@@ -11050,35 +11072,56 @@ export class TenantStore {
       return byId;
     }
 
-    if (opts?.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date.trim())) {
-      const d = opts.date.trim();
-      const byDate =
-        terms.find((t) => t.isCurrent && t.startDate <= d && d <= t.endDate) ||
-        terms.find((t) => t.startDate <= d && d <= t.endDate);
-      if (byDate) return byDate;
-    }
+    const pickPreferredTerm = (candidates: AcademicTerm[], dateStr?: string): AcademicTerm | undefined => {
+      if (candidates.length === 0) return undefined;
+      if (dateStr) {
+        const byDateInCandidates =
+          candidates.find((t) => t.isCurrent && t.startDate <= dateStr && dateStr <= t.endDate) ||
+          [...candidates].reverse().find((t) => t.startDate <= dateStr && dateStr <= t.endDate);
+        if (byDateInCandidates) return byDateInCandidates;
+      }
+      const tenant = this.state.tenants.find((t) => t.id === tenantId);
+      const currentYear = (this.state.academicYears || []).find(
+        (y) => y.tenantId === tenantId && (y.isCurrent || y.name === tenant?.academicYear)
+      );
+      return (
+        candidates.find((t) => t.isCurrent) ||
+        (currentYear
+          ? candidates.find((t) => t.academicYearId === currentYear.id && t.status === 'Open') ||
+            candidates.find((t) => t.academicYearId === currentYear.id)
+          : undefined) ||
+        [...candidates].reverse().find((t) => t.status === 'Open') ||
+        candidates[candidates.length - 1]
+      );
+    };
+
+    const validDate =
+      opts?.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date.trim()) ? opts.date.trim() : undefined;
 
     if (opts?.termName && opts.termName.trim()) {
       const clean = opts.termName.trim().toLowerCase();
       const base = clean.replace(/\s*\([^)]*\)\s*/g, '').trim();
-      const exact =
-        terms.find((t) => t.isCurrent && t.name.trim().toLowerCase() === clean) ||
-        terms.find((t) => t.name.trim().toLowerCase() === clean);
-      if (exact) return exact;
-      const baseMatch =
-        terms.find(
-          (t) =>
-            t.isCurrent &&
-            t.name.trim().toLowerCase().replace(/\s*\([^)]*\)\s*/g, '').trim() === base
-        ) ||
-        terms.find(
-          (t) => t.name.trim().toLowerCase().replace(/\s*\([^)]*\)\s*/g, '').trim() === base
-        );
-      if (baseMatch) return baseMatch;
+      const exactMatches = terms.filter((t) => t.name.trim().toLowerCase() === clean);
+      if (exactMatches.length > 0) {
+        return pickPreferredTerm(exactMatches, validDate);
+      }
+      const baseMatches = terms.filter(
+        (t) => t.name.trim().toLowerCase().replace(/\s*\([^)]*\)\s*/g, '').trim() === base
+      );
+      if (baseMatches.length > 0) {
+        return pickPreferredTerm(baseMatches, validDate);
+      }
       if (opts.exactTermNameOnly) return undefined;
     }
 
-    return terms.find((t) => t.isCurrent) || terms[0];
+    if (validDate) {
+      const byDate =
+        terms.find((t) => t.isCurrent && t.startDate <= validDate && validDate <= t.endDate) ||
+        [...terms].reverse().find((t) => t.startDate <= validDate && validDate <= t.endDate);
+      if (byDate) return byDate;
+    }
+
+    return terms.find((t) => t.isCurrent) || terms[terms.length - 1];
   }
 
   private assertTermOpen(

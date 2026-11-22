@@ -37,7 +37,7 @@ interface ZerakiExamAnalyticsPanelProps {
   selectedGrade: string;
   onChangeCycle: (cycleId: string) => void;
   onChangeGrade: (grade: string) => void;
-  onJumpToMarkEntry: (target: {
+  onJumpToMarkEntry?: (target: {
     cycleId: string;
     examTitle: string;
     grade: string;
@@ -1359,7 +1359,7 @@ export function ZerakiExamAnalyticsPanel({
                       style={{ width: `${sub.completionPct}%` }}
                     />
                   </div>
-                  {sub.streamsMissing.length > 0 && activeCycle && (
+                  {onJumpToMarkEntry && sub.streamsMissing.length > 0 && activeCycle && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       {sub.streamsMissing.map((st) => (
                         <button
@@ -1446,7 +1446,7 @@ export function ZerakiExamAnalyticsPanel({
                           {item.missingSubjects.join(', ')}
                         </td>
                         <td className="px-4 py-2.5 text-right">
-                          {activeCycle && (
+                          {activeCycle && onJumpToMarkEntry ? (
                             <button
                               type="button"
                               onClick={() =>
@@ -1463,6 +1463,8 @@ export function ZerakiExamAnalyticsPanel({
                               <FileSpreadsheet className="h-3.5 w-3.5" />
                               Enter {item.missingSubjects[0]}
                             </button>
+                          ) : (
+                            <span className="text-[11px] text-slate-400">Read-only</span>
                           )}
                         </td>
                       </tr>

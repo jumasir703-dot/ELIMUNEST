@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { CheckCircle2, Download, Printer, X, XCircle } from 'lucide-react';
+import { CheckCircle2, Download, Plus, Printer, ShieldCheck, X, XCircle } from 'lucide-react';
 import { TenantDocumentHeader } from '../TenantDocumentHeader';
 import { createBrandedWorksheetFromObjects } from '../../lib/documentBranding';
 import { saasApi } from '../../lib/api';
@@ -8,13 +8,35 @@ import { formatCurrency, formatDateShort } from '../../lib/format';
 import {
   EXPENSE_CATEGORIES,
   type BudgetApprovalStatus,
-  type ExpenseCategory,
 } from '../../shared/types';
 import type { FinanceControlPanelProps } from './types';
+
+interface BudgetDisplayRow {
+  rowKey: string;
+  budgetId?: string;
+  category: string;
+  fiscalYear: string;
+  term: string;
+  isCustom: boolean;
+  allocated: number;
+  paid: number;
+  committed: number;
+  utilized: number;
+  remaining: number;
+  utilPct: number;
+  status: BudgetApprovalStatus;
+  notes?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  approvalNotes?: string;
+}
+
+const STANDARD_TERM_OPTIONS = ['Term 1', 'Term 2', 'Term 3', 'Annual'];
 
 export function BudgetTrackingPanel({
   workspace,
   canManage,
+  canApprove = canManage,
   actorRole,
   onRefresh,
   onNotify,
@@ -30,43 +52,129 @@ export function BudgetTrackingPanel({
     [workspace.payrollEntries]
   );
 
-  const [editingCategory, setEditingCategory] = useState<ExpenseCategory | null>(null);
+  const fiscalYearOptions = useMemo(() => {
+    const years = new Set<string>();
+    if (tenant.academicYear) years.add(tenant.academicYear);
+    budgets.forEach((b) => {
+      if (b.fiscalYear) years.add(b.fiscalYear);
+    });
+    return Array.from(years).sort((a, b) => b.localeCompare(a));
+  }, [budgets, tenant.academicYear]);
+
+  const [selectedFiscalYear, setSelectedFiscalYear] = useState<string>(
+    () => tenant.academicYear || fiscalYearOptions[0] || '2026–2027'
+  );
+
+  const [editingRowKey, setEditingRowKey] = useState<string | null>(null);
   const [draftBudget, setDraftBudget] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Create Budget Modal state
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [createCategoryMode, setCreateCategoryMode] = useState<'standard' | 'custom'>('standard');
+  const [createStandardCategory, setCreateStandardCategory] = useState<string>(EXPENSE_CATEGORIES[0]);
+  const [createCustomCategory, setCreateCustomCategory] = useState('');
+  const [createFiscalYear, setCreateFiscalYear] = useState(
+    () => tenant.academicYear || fiscalYearOptions[0] || '2026–2027'
+  );
+  const [createTerm, setCreateTerm] = useState(() => tenant.currentTerm || 'Term 1');
+  const [createAmount, setCreateAmount] = useState('');
+  const [createNotes, setCreateNotes] = useState('');
+  const [creatingBudget, setCreatingBudget] = useState(false);
+
   const [approvalTarget, setApprovalTarget] = useState<{
-    category: ExpenseCategory;
+    budgetId?: string;
+    category: string;
+    fiscalYear: string;
+    term: string;
     allocated: number;
     decision: 'Approved' | 'Rejected';
   } | null>(null);
   const [approvalNotes, setApprovalNotes] = useState('');
   const [submittingApproval, setSubmittingApproval] = useState(false);
 
-  const rows = useMemo(() => {
-    const payrollDisbursed = payrollEntries
+  const fiscalDateWindow = useMemo(() => {
+    const match = /(\d{4})\D+(\d{4})/.exec(selectedFiscalYear);
+    if (match) {
+      const startYr = match[1];
+      const endYr = match[2];
+      return {
+        startDate: `${startYr}-08-01`,
+        endDate: `${endYr}-07-31`,
+        startMonth: `${startYr}-08`,
+        endMonth: `${endYr}-07`,
+      };
+    }
+    const singleYr = /(\d{4})/.exec(selectedFiscalYear);
+    if (singleYr) {
+      return {
+        startDate: `${singleYr[1]}-01-01`,
+        endDate: `${singleYr[1]}-12-31`,
+        startMonth: `${singleYr[1]}-01`,
+        endMonth: `${singleYr[1]}-12`,
+      };
+    }
+    return null;
+  }, [selectedFiscalYear]);
+
+  const rows: BudgetDisplayRow[] = useMemo(() => {
+    const scopedBudgets = budgets.filter(
+      (b) => !b.fiscalYear || b.fiscalYear === selectedFiscalYear
+    );
+    const scopedExpenses = fiscalDateWindow
+      ? expenses.filter(
+          (e) =>
+            e.expenseDate >= fiscalDateWindow.startDate &&
+            e.expenseDate <= fiscalDateWindow.endDate
+        )
+      : expenses;
+    const scopedPayroll = fiscalDateWindow
+      ? payrollEntries.filter(
+          (p) =>
+            p.payPeriod >= fiscalDateWindow.startMonth &&
+            p.payPeriod <= fiscalDateWindow.endMonth
+        )
+      : payrollEntries;
+
+    const payrollDisbursed = scopedPayroll
       .filter((p) => p.status === 'Disbursed')
       .reduce((s, p) => s + (p.totalEmployerCost ?? p.grossPay), 0);
-    const payrollCommitted = payrollEntries
+    const payrollCommitted = scopedPayroll
       .filter((p) => p.status !== 'Disbursed')
       .reduce((s, p) => s + (p.totalEmployerCost ?? p.grossPay), 0);
 
-    return EXPENSE_CATEGORIES.map((category) => {
-      const alloc = budgets.find((b) => b.category === category);
+    const standardCategorySet = new Set<string>(EXPENSE_CATEGORIES);
+    const usedBudgetIds = new Set<string>();
+
+    const buildRow = (
+      category: string,
+      alloc: (typeof budgets)[number] | undefined,
+      isCustom: boolean,
+      includeSpendMetrics: boolean
+    ): BudgetDisplayRow => {
       const allocated = alloc?.allocatedAmount ?? 0;
       const status: BudgetApprovalStatus =
         alloc?.status || (allocated > 0 ? 'Pending Approval' : 'Draft');
+      const fiscalYear = alloc?.fiscalYear || selectedFiscalYear;
+      const term = alloc?.term || tenant.currentTerm || 'Term 1';
 
-      const catExpenses = expenses.filter((e) => e.category === category);
-      let paid = catExpenses
-        .filter((e) => e.status === 'Paid')
-        .reduce((s, e) => s + e.amount, 0);
-      let committed = catExpenses
-        .filter((e) => e.status !== 'Paid')
-        .reduce((s, e) => s + e.amount, 0);
+      let paid = 0;
+      let committed = 0;
+      if (includeSpendMetrics) {
+        const catExpenses = scopedExpenses.filter(
+          (e) => e.category.trim().toLowerCase() === category.trim().toLowerCase()
+        );
+        paid = catExpenses
+          .filter((e) => e.status === 'Paid')
+          .reduce((s, e) => s + e.amount, 0);
+        committed = catExpenses
+          .filter((e) => e.status !== 'Paid')
+          .reduce((s, e) => s + e.amount, 0);
 
-      if (category === 'Payroll & Allowances' && paid === 0 && committed === 0) {
-        paid = payrollDisbursed;
-        committed = payrollCommitted;
+        if (category === 'Payroll & Allowances' && paid === 0 && committed === 0) {
+          paid = payrollDisbursed;
+          committed = payrollCommitted;
+        }
       }
 
       const utilized = paid + committed;
@@ -74,7 +182,12 @@ export function BudgetTrackingPanel({
       const utilPct = allocated > 0 ? (utilized / allocated) * 100 : utilized > 0 ? 100 : 0;
 
       return {
+        rowKey: alloc?.id ? `bdg:${alloc.id}` : `cat:${category}:${fiscalYear}:${term}`,
+        budgetId: alloc?.id,
         category,
+        fiscalYear,
+        term,
+        isCustom,
         allocated,
         paid,
         committed,
@@ -82,12 +195,43 @@ export function BudgetTrackingPanel({
         remaining,
         utilPct,
         status,
+        notes: alloc?.notes,
         approvedBy: alloc?.approvedBy,
         approvedAt: alloc?.approvedAt,
         approvalNotes: alloc?.approvalNotes,
       };
-    });
-  }, [budgets, expenses, payrollEntries]);
+    };
+
+    const result: BudgetDisplayRow[] = [];
+
+    for (const category of EXPENSE_CATEGORIES) {
+      const matches = scopedBudgets.filter(
+        (b) => b.category.trim().toLowerCase() === category.toLowerCase()
+      );
+      if (matches.length > 0) {
+        matches.forEach((alloc, idx) => {
+          usedBudgetIds.add(alloc.id);
+          result.push(buildRow(category, alloc, false, idx === 0));
+        });
+      } else {
+        result.push(buildRow(category, undefined, false, true));
+      }
+    }
+
+    // Include custom / additional budget lines created outside standard expense categories
+    const customBudgets = scopedBudgets.filter(
+      (b) => !usedBudgetIds.has(b.id) && !standardCategorySet.has(b.category)
+    );
+    const seenCustomSpend = new Set<string>();
+    for (const alloc of customBudgets) {
+      const key = alloc.category.trim().toLowerCase();
+      const showSpend = !seenCustomSpend.has(key);
+      seenCustomSpend.add(key);
+      result.push(buildRow(alloc.category, alloc, true, showSpend));
+    }
+
+    return result;
+  }, [budgets, expenses, payrollEntries, selectedFiscalYear, fiscalDateWindow, tenant.currentTerm]);
 
   const totals = useMemo(
     () =>
@@ -120,9 +264,64 @@ export function BudgetTrackingPanel({
     [rows]
   );
 
+  function openCreateBudgetModal() {
+    setCreateCategoryMode('standard');
+    setCreateStandardCategory(EXPENSE_CATEGORIES[0]);
+    setCreateCustomCategory('');
+    setCreateFiscalYear(selectedFiscalYear || tenant.academicYear || '2026–2027');
+    setCreateTerm(tenant.currentTerm || 'Term 1');
+    setCreateAmount('');
+    setCreateNotes('');
+    setCreateModalOpen(true);
+  }
+
+  async function handleCreateBudgetSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canManage) return;
+    const categoryName =
+      createCategoryMode === 'custom' ? createCustomCategory.trim() : createStandardCategory.trim();
+    const parsedAmount = Number(createAmount);
+    if (categoryName.length < 2) {
+      onNotify('Enter a budget line or cost centre name (at least 2 characters).', 'error');
+      return;
+    }
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      onNotify('Enter a positive budget ceiling amount.', 'error');
+      return;
+    }
+    const targetYear = createFiscalYear.trim() || selectedFiscalYear;
+    const targetTerm = createTerm.trim() || tenant.currentTerm || 'Term 1';
+
+    setCreatingBudget(true);
+    try {
+      await saasApi.upsertBudgetAllocation(tenant.id, {
+        category: categoryName,
+        fiscalYear: targetYear,
+        term: targetTerm,
+        allocatedAmount: Math.round(parsedAmount),
+        notes: createNotes.trim() || undefined,
+      });
+      if (targetYear && targetYear !== selectedFiscalYear) {
+        setSelectedFiscalYear(targetYear);
+      }
+      await onRefresh();
+      setCreateModalOpen(false);
+      onNotify(
+        `Budget line "${categoryName}" (${targetYear} · ${targetTerm}) saved as Pending Approval.`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to create budget line', 'error');
+    } finally {
+      setCreatingBudget(false);
+    }
+  }
+
   function handleExportBudgetExcel() {
     const sheetRows = rows.map((r) => ({
       Category: r.category,
+      Fiscal_Year: r.fiscalYear,
+      Term: r.term,
+      Type: r.isCustom ? 'Custom Line' : 'Standard Votehead',
       Approval_Status: r.status,
       Allocated_Budget: r.allocated,
       Disbursed_Actual: r.paid,
@@ -135,12 +334,15 @@ export function BudgetTrackingPanel({
     }));
     const ws = createBrandedWorksheetFromObjects(
       tenant,
-      `Departmental Budget Tracking & Approvals (${tenant.academicYear} ${tenant.currentTerm})`,
+      `Departmental Budget Tracking & Approvals (${selectedFiscalYear})`,
       sheetRows
     );
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Budget Variance');
-    XLSX.writeFile(wb, `${tenant.slug}-budget-tracking-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(
+      wb,
+      `${tenant.slug}-budget-tracking-${new Date().toISOString().slice(0, 10)}.xlsx`
+    );
     onNotify('Exported Budget vs Actuals Variance report to Excel.');
   }
 
@@ -150,7 +352,10 @@ export function BudgetTrackingPanel({
     setSubmittingApproval(true);
     try {
       await saasApi.approveBudgetAllocation(tenant.id, {
+        budgetId: approvalTarget.budgetId,
         category: approvalTarget.category,
+        fiscalYear: approvalTarget.fiscalYear,
+        term: approvalTarget.term,
         status: approvalTarget.decision,
         approvedBy: `${actorRole} Office`,
         approvalNotes: approvalNotes.trim() || undefined,
@@ -177,7 +382,7 @@ export function BudgetTrackingPanel({
         <TenantDocumentHeader
           tenant={tenant}
           documentTitle="Departmental Budget Tracking &amp; Approval Schedule"
-          subtitle={`${tenant.academicYear} · ${tenant.currentTerm} · Per-votehead ceilings &amp; sign-off register`}
+          subtitle={`${selectedFiscalYear} · ${tenant.currentTerm} · Per-votehead ceilings &amp; sign-off register`}
           rightMeta={[
             { label: 'Currency', value: tenant.currency },
             { label: 'Approved Lines', value: `${totals.approvedCount} / ${rows.length}` },
@@ -186,9 +391,23 @@ export function BudgetTrackingPanel({
         />
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Adjust any department ceiling and approve or reject individual budget voteheads directly below.
+            Create departmental or project budgets, adjust ceilings, and route voteheads for independent sign-off by a designated Budget Approver, Admin, or separate Bursar.
           </p>
           <div className="flex flex-wrap items-center gap-2 no-print">
+            {fiscalYearOptions.length > 0 && (
+              <select
+                aria-label="Filter by Fiscal Year"
+                value={selectedFiscalYear}
+                onChange={(e) => setSelectedFiscalYear(e.target.value)}
+                className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+              >
+                {fiscalYearOptions.map((fy) => (
+                  <option key={fy} value={fy}>
+                    FY {fy}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               type="button"
               onClick={() => window.print()}
@@ -205,9 +424,28 @@ export function BudgetTrackingPanel({
               <Download className="h-3.5 w-3.5" />
               Export Variance (.xlsx)
             </button>
+            {canManage && (
+              <button
+                type="button"
+                onClick={openCreateBudgetModal}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Create Budget
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {canApprove && !canManage && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 text-xs text-emerald-900 dark:border-emerald-800/60 dark:bg-emerald-950/30 dark:text-emerald-200">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
+          <div>
+            <strong>Budget Approver Authority Active:</strong> You can inspect all budget lines in read-only ledger mode and execute independent <strong>Approve</strong> or <strong>Reject</strong> sign-offs on pending departmental voteheads.
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
@@ -248,7 +486,7 @@ export function BudgetTrackingPanel({
 
       <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left text-xs">
+          <table className="w-full min-w-[980px] text-left text-xs">
             <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-500 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-400">
               <tr>
                 <th className="px-4 py-3">Cost Centre / Budget Line</th>
@@ -263,15 +501,30 @@ export function BudgetTrackingPanel({
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {rows.map((r) => {
-                const isEditing = editingCategory === r.category;
+                const isEditing = editingRowKey === r.rowKey;
                 const overBudget = r.remaining < 0;
                 const nearLimit = !overBudget && r.utilPct >= 85;
                 return (
-                  <tr key={r.category} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                  <tr key={r.rowKey} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
                     <td className="px-4 py-3 align-top">
-                      <p className="font-semibold text-slate-900 dark:text-slate-100">
-                        {r.category}
-                      </p>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <p className="font-semibold text-slate-900 dark:text-slate-100">
+                          {r.category}
+                        </p>
+                        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {r.term}
+                        </span>
+                        {r.isCustom && (
+                          <span className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300">
+                            Custom
+                          </span>
+                        )}
+                      </div>
+                      {r.notes && (
+                        <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                          {r.notes}
+                        </p>
+                      )}
                       {r.approvedBy && (
                         <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                           {r.status} by {r.approvedBy}
@@ -280,7 +533,7 @@ export function BudgetTrackingPanel({
                       )}
                       {r.approvalNotes && (
                         <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                          Note: {r.approvalNotes}
+                          Sign-off note: {r.approvalNotes}
                         </p>
                       )}
                     </td>
@@ -347,8 +600,8 @@ export function BudgetTrackingPanel({
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right align-top no-print">
-                      {canManage &&
-                        (isEditing ? (
+                      {(canManage || canApprove) ? (
+                        isEditing && canManage ? (
                           <div className="inline-flex items-center gap-1">
                             <button
                               type="button"
@@ -357,17 +610,24 @@ export function BudgetTrackingPanel({
                                 setSaving(true);
                                 try {
                                   await saasApi.upsertBudgetAllocation(tenant.id, {
+                                    id: r.budgetId,
                                     category: r.category,
+                                    fiscalYear: r.fiscalYear,
+                                    term: r.term,
                                     allocatedAmount: Number(draftBudget),
                                   });
                                   await onRefresh();
-                                  setEditingCategory(null);
+                                  setEditingRowKey(null);
                                   onNotify(
-                                    `Updated ${r.category} ceiling (${Number(draftBudget) > 0 ? 'Pending Approval' : 'Draft'}).`
+                                    `Updated ${r.category} ceiling (${
+                                      Number(draftBudget) > 0 ? 'Pending Approval' : 'Draft'
+                                    }).`
                                   );
                                 } catch (err) {
                                   onNotify(
-                                    err instanceof Error ? err.message : 'Unable to save budget ceiling',
+                                    err instanceof Error
+                                      ? err.message
+                                      : 'Unable to save budget ceiling',
                                     'error'
                                   );
                                 } finally {
@@ -380,7 +640,7 @@ export function BudgetTrackingPanel({
                             </button>
                             <button
                               type="button"
-                              onClick={() => setEditingCategory(null)}
+                              onClick={() => setEditingRowKey(null)}
                               className="rounded border border-slate-200 px-2 py-1 text-[11px] text-slate-600 dark:border-slate-700 dark:text-slate-300"
                             >
                               Cancel
@@ -388,23 +648,28 @@ export function BudgetTrackingPanel({
                           </div>
                         ) : (
                           <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingCategory(r.category);
-                                setDraftBudget(String(r.allocated));
-                              }}
-                              className="rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                            >
-                              Set Limit
-                            </button>
-                            {r.allocated > 0 && r.status !== 'Approved' && (
+                            {canManage && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingRowKey(r.rowKey);
+                                  setDraftBudget(String(r.allocated));
+                                }}
+                                className="rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                              >
+                                Set Limit
+                              </button>
+                            )}
+                            {canApprove && r.allocated > 0 && r.status !== 'Approved' && (
                               <button
                                 type="button"
                                 onClick={() => {
                                   setApprovalNotes('');
                                   setApprovalTarget({
+                                    budgetId: r.budgetId,
                                     category: r.category,
+                                    fiscalYear: r.fiscalYear,
+                                    term: r.term,
                                     allocated: r.allocated,
                                     decision: 'Approved',
                                   });
@@ -415,13 +680,16 @@ export function BudgetTrackingPanel({
                                 Approve
                               </button>
                             )}
-                            {r.allocated > 0 && r.status !== 'Rejected' && (
+                            {canApprove && r.allocated > 0 && r.status !== 'Rejected' && (
                               <button
                                 type="button"
                                 onClick={() => {
                                   setApprovalNotes('');
                                   setApprovalTarget({
+                                    budgetId: r.budgetId,
                                     category: r.category,
+                                    fiscalYear: r.fiscalYear,
+                                    term: r.term,
                                     allocated: r.allocated,
                                     decision: 'Rejected',
                                   });
@@ -433,7 +701,10 @@ export function BudgetTrackingPanel({
                               </button>
                             )}
                           </div>
-                        ))}
+                        )
+                      ) : (
+                        <span className="text-[11px] text-slate-400">Read-only</span>
+                      )}
                     </td>
                   </tr>
                 );
@@ -442,6 +713,187 @@ export function BudgetTrackingPanel({
           </table>
         </div>
       </div>
+
+      {/* Create Budget Line Modal */}
+      {createModalOpen && canManage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <form
+            onSubmit={handleCreateBudgetSubmit}
+            className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Create Budget Allocation
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  Define a new departmental votehead or custom cost-centre budget for approval.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCreateModalOpen(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3.5 text-xs">
+              <div>
+                <label className="mb-1.5 block font-semibold text-slate-700 dark:text-slate-300">
+                  Budget Line Type
+                </label>
+                <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 dark:border-slate-700 dark:bg-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setCreateCategoryMode('standard')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      createCategoryMode === 'standard'
+                        ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-slate-100'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    Standard Votehead
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreateCategoryMode('custom')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      createCategoryMode === 'custom'
+                        ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-slate-100'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    Custom Cost Centre
+                  </button>
+                </div>
+              </div>
+
+              {createCategoryMode === 'standard' ? (
+                <div>
+                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">
+                    Votehead / Expense Category
+                  </label>
+                  <select
+                    value={createStandardCategory}
+                    onChange={(e) => setCreateStandardCategory(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {EXPENSE_CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">
+                    Custom Budget Line Name
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={2}
+                    maxLength={80}
+                    value={createCustomCategory}
+                    onChange={(e) => setCreateCustomCategory(e.target.value)}
+                    placeholder="e.g. Science Lab Equipment Fund, Sports Tournament"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">
+                    Fiscal Year
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    list="budget-fiscal-year-options"
+                    value={createFiscalYear}
+                    onChange={(e) => setCreateFiscalYear(e.target.value)}
+                    placeholder="e.g. 2026–2027"
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                  <datalist id="budget-fiscal-year-options">
+                    {fiscalYearOptions.map((fy) => (
+                      <option key={fy} value={fy} />
+                    ))}
+                  </datalist>
+                </div>
+                <div>
+                  <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">
+                    Term / Cycle
+                  </label>
+                  <select
+                    value={createTerm}
+                    onChange={(e) => setCreateTerm(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {Array.from(
+                      new Set([tenant.currentTerm || 'Term 1', ...STANDARD_TERM_OPTIONS])
+                    ).map((tm) => (
+                      <option key={tm} value={tm}>
+                        {tm}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">
+                  Allocated Budget Ceiling ({tenant.currency})
+                </label>
+                <input
+                  type="number"
+                  required
+                  min={1}
+                  step="1"
+                  value={createAmount}
+                  onChange={(e) => setCreateAmount(e.target.value)}
+                  placeholder="e.g. 450000"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block font-semibold text-slate-700 dark:text-slate-300">
+                  Justification / Scope Notes (Optional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={createNotes}
+                  onChange={(e) => setCreateNotes(e.target.value)}
+                  placeholder="Optional breakdown or Board minute reference..."
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setCreateModalOpen(false)}
+                className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creatingBudget}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {creatingBudget ? 'Saving Budget...' : 'Save Budget Line'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {approvalTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
@@ -457,7 +909,7 @@ export function BudgetTrackingPanel({
                     : 'Reject Budget Line'}
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  {approvalTarget.category} ·{' '}
+                  {approvalTarget.category} ({approvalTarget.fiscalYear} · {approvalTarget.term}) ·{' '}
                   <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
                     {formatCurrency(approvalTarget.allocated, tenant.currency)}
                   </span>

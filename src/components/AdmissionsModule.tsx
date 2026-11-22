@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowRightLeft,
@@ -32,6 +32,7 @@ import {
 
 interface AdmissionsModuleProps {
   workspace: TenantWorkspaceData;
+  canEdit?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -57,7 +58,7 @@ const STATUS_BADGE_CLASS: Record<StudentStatus, string> = {
   Withdrawn: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900',
 };
 
-export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsModuleProps) {
+export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotify }: AdmissionsModuleProps) {
   const { tenant, students } = workspace;
   const academicTerms = workspace.academicTerms || [];
   const lifecycleAuditLogs = workspace.lifecycleAuditLogs || [];
@@ -240,6 +241,22 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
       );
     });
   }, [students, statusFilter, gradeStreamFilter, yearFilter, searchQuery]);
+
+  const STUDENTS_PAGE_SIZE = 50;
+  const [studentPage, setStudentPage] = useState(1);
+  useEffect(() => {
+    setStudentPage(1);
+  }, [statusFilter, gradeStreamFilter, yearFilter, searchQuery, tenant.id]);
+  const totalStudentPages = Math.max(1, Math.ceil(filteredStudents.length / STUDENTS_PAGE_SIZE));
+  const safeStudentPage = Math.min(studentPage, totalStudentPages);
+  const paginatedStudents = useMemo(
+    () =>
+      filteredStudents.slice(
+        (safeStudentPage - 1) * STUDENTS_PAGE_SIZE,
+        safeStudentPage * STUDENTS_PAGE_SIZE
+      ),
+    [filteredStudents, safeStudentPage]
+  );
 
   function openGradesStreamsEditor() {
     const rows: EditableGradeRow[] = availableGrades.map((g, idx) => ({
@@ -712,45 +729,55 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
             <History className="h-3.5 w-3.5" />
             Lifecycle Audit ({lifecycleAuditLogs.length})
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setImportPreview(null);
-              setImportFileName('');
-              setImportFilePayload(null);
-              setShowImportModal(true);
-            }}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <Upload className="h-3.5 w-3.5" />
-            Bulk Import CSV/Excel
-          </button>
-          <button
-            type="button"
-            onClick={openPromotionWizard}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <GraduationCap className="h-3.5 w-3.5" />
-            Promotion Wizard
-          </button>
-          <button
-            type="button"
-            onClick={openGradesStreamsEditor}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            Grades &amp; Streams
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600"
-          >
-            <Plus className="h-4 w-4" />
-            New Enrollment
-          </button>
+          {canEdit && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setImportPreview(null);
+                  setImportFileName('');
+                  setImportFilePayload(null);
+                  setShowImportModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                Bulk Import CSV/Excel
+              </button>
+              <button
+                type="button"
+                onClick={openPromotionWizard}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <GraduationCap className="h-3.5 w-3.5" />
+                Promotion Wizard
+              </button>
+              <button
+                type="button"
+                onClick={openGradesStreamsEditor}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                Grades &amp; Streams
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCreateModal(true)}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600"
+              >
+                <Plus className="h-4 w-4" />
+                New Enrollment
+              </button>
+            </>
+          )}
         </div>
       </div>
+
+      {!canEdit && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
+          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Admissions. Enrolling, editing, importing, promoting, and archiving learners are disabled.
+        </div>
+      )}
 
       {/* Issued Student Portal Credentials Banner */}
       {issuedStudentPortalCreds && (
@@ -913,14 +940,14 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {filteredStudents.length === 0 ? (
+              {paginatedStudents.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                     No students match the selected filters.
                   </td>
                 </tr>
               ) : (
-                filteredStudents.map((stu) => (
+                paginatedStudents.map((stu) => (
                   <tr key={stu.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/30">
                     <td className="px-4 py-3">
                       <div className="font-mono text-xs font-semibold text-slate-800 tabular-nums dark:text-slate-200">
@@ -965,51 +992,55 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="inline-flex flex-wrap items-center justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => openEditStudentModal(stu)}
-                          title="Edit student details"
-                          className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                        >
-                          <Pencil className="h-3 w-3" />
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openLifecycleModal(stu)}
-                          title="Transfer, Withdraw, Graduate, or Reactivate"
-                          className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                        >
-                          <ArrowRightLeft className="h-3 w-3" />
-                          Status
-                        </button>
-                        {tenant.studentPortalEnabled &&
-                          stu.status !== 'Transferred' &&
-                          stu.status !== 'Withdrawn' && (
-                            <button
-                              type="button"
-                              disabled={saving}
-                              onClick={() => handleIssueStudentPortalLogin(stu)}
-                              title="Issue or reset Student Portal OTP"
-                              className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
-                            >
-                              <KeyRound className="h-3 w-3" />
-                              {stu.studentUserId ? 'Reset Portal' : 'Portal Login'}
-                            </button>
-                          )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDeleteTarget(stu);
-                            setDeleteReason('');
-                          }}
-                          title="Soft-delete / Archive student"
-                          className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-1 text-[11px] font-medium text-red-600 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/40"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
+                      {canEdit ? (
+                        <div className="inline-flex flex-wrap items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openEditStudentModal(stu)}
+                            title="Edit student details"
+                            className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openLifecycleModal(stu)}
+                            title="Transfer, Withdraw, Graduate, or Reactivate"
+                            className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                          >
+                            <ArrowRightLeft className="h-3 w-3" />
+                            Status
+                          </button>
+                          {tenant.studentPortalEnabled &&
+                            stu.status !== 'Transferred' &&
+                            stu.status !== 'Withdrawn' && (
+                              <button
+                                type="button"
+                                disabled={saving}
+                                onClick={() => handleIssueStudentPortalLogin(stu)}
+                                title="Issue or reset Student Portal OTP"
+                                className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
+                              >
+                                <KeyRound className="h-3 w-3" />
+                                {stu.studentUserId ? 'Reset Portal' : 'Portal Login'}
+                              </button>
+                            )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteTarget(stu);
+                              setDeleteReason('');
+                            }}
+                            title="Soft-delete / Archive student"
+                            className="inline-flex items-center gap-1 rounded border border-red-200 px-2 py-1 text-[11px] font-medium text-red-600 hover:bg-red-50 dark:border-red-900/60 dark:text-red-400 dark:hover:bg-red-950/40"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">Read-only</span>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -1017,6 +1048,36 @@ export function AdmissionsModule({ workspace, onRefresh, onNotify }: AdmissionsM
             </tbody>
           </table>
         </div>
+        {filteredStudents.length > STUDENTS_PAGE_SIZE && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-400">
+            <span className="tabular-nums">
+              Showing {(safeStudentPage - 1) * STUDENTS_PAGE_SIZE + 1}–
+              {Math.min(safeStudentPage * STUDENTS_PAGE_SIZE, filteredStudents.length)} of{' '}
+              {filteredStudents.length} learners
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={safeStudentPage <= 1}
+                onClick={() => setStudentPage((p) => Math.max(1, p - 1))}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                Previous
+              </button>
+              <span className="font-mono tabular-nums">
+                Page {safeStudentPage} / {totalStudentPages}
+              </span>
+              <button
+                type="button"
+                disabled={safeStudentPage >= totalStudentPages}
+                onClick={() => setStudentPage((p) => Math.min(totalStudentPages, p + 1))}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Edit Student Details Modal */}

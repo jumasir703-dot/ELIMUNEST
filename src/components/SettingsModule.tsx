@@ -21,14 +21,16 @@ import {
 import { saasApi } from '../lib/api';
 import {
   ALL_TENANT_MODULES,
-  getDefaultModulesForTenantRole,
-  getEffectiveUserModules,
+  getDefaultModuleAccessForTenantRole,
+  getEffectiveUserModuleAccess,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
   suggestNameEmailLocalPart,
   type AcademicTerm,
   type CurrencyCode,
   type CustomRoleDefinition,
+  type ModuleAccessLevel,
+  type TenantModuleAccessMap,
   type TenantModulePermission,
   type TenantUser,
   type TenantWorkspaceData,
@@ -39,6 +41,7 @@ interface SettingsModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
   currentUserId?: string;
+  canEdit?: boolean;
   onRefresh: () => Promise<void>;
   onSwitchTenant: (tenantId: string) => void;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
@@ -50,6 +53,7 @@ const STAFF_ROLE_OPTIONS: UserRole[] = [
   'Registrar',
   'Teacher',
   'Bursar',
+  'Budget Approver',
   'Parent',
 ];
 
@@ -58,12 +62,14 @@ const CUSTOMIZABLE_BUILTIN_ROLES: UserRole[] = [
   'Registrar',
   'Teacher',
   'Bursar',
+  'Budget Approver',
   'Parent',
   'Super Admin',
 ];
 
 function inferSuggestedRoleForNonTeaching(designation: string): UserRole {
   const norm = designation.toLowerCase();
+  if (/(budget|approver|auditor)/i.test(norm)) return 'Budget Approver';
   if (/(bursar|account|finance|cashier|treasurer)/i.test(norm)) return 'Bursar';
   if (/(principal|head|director|admin|deputy)/i.test(norm)) return 'Admin';
   if (/(registrar|secretary|admission|clerk|front office)/i.test(norm)) return 'Registrar';
@@ -78,13 +84,15 @@ export function SettingsModule({
   workspace,
   currentRole,
   currentUserId,
+  canEdit = true,
   onRefresh,
   onSwitchTenant,
   onNotify,
 }: SettingsModuleProps) {
   const { tenant } = workspace;
   const canMutateTenant =
-    currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
+    canEdit &&
+    (currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer');
   const isDeveloper = currentRole === 'Developer';
   const domainSuffix = tenant.emailDomain || `${tenant.slug}.ac.ke`;
 
@@ -103,8 +111,8 @@ export function SettingsModule({
   const [staffPhone, setStaffPhone] = useState('');
   const [staffRole, setStaffRole] = useState<UserRole>('Teacher');
   const [staffCustomRoleId, setStaffCustomRoleId] = useState<string>('');
-  const [staffModules, setStaffModules] = useState<TenantModulePermission[]>(() =>
-    getDefaultModulesForTenantRole(tenant, 'Teacher')
+  const [staffModuleAccess, setStaffModuleAccess] = useState<TenantModuleAccessMap>(() =>
+    getDefaultModuleAccessForTenantRole(tenant, 'Teacher')
   );
   const [creatingStaff, setCreatingStaff] = useState(false);
   const [issuedStaffOtp, setIssuedStaffOtp] = useState<{
@@ -118,7 +126,7 @@ export function SettingsModule({
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editRole, setEditRole] = useState<UserRole>('Teacher');
   const [editCustomRoleId, setEditCustomRoleId] = useState<string>('');
-  const [editModules, setEditModules] = useState<TenantModulePermission[]>([]);
+  const [editModuleAccess, setEditModuleAccess] = useState<TenantModuleAccessMap>({});
   const [editStatus, setEditStatus] = useState<'Active' | 'Disabled'>('Active');
   const [savingUserAccess, setSavingUserAccess] = useState(false);
 
@@ -129,14 +137,13 @@ export function SettingsModule({
   const [customRoleName, setCustomRoleName] = useState('');
   const [customRoleBase, setCustomRoleBase] = useState<UserRole>('Teacher');
   const [customRoleDesc, setCustomRoleDesc] = useState('');
-  const [customRoleModules, setCustomRoleModules] = useState<TenantModulePermission[]>(() =>
-    getDefaultModulesForTenantRole(tenant, 'Teacher')
+  const [customRoleModuleAccess, setCustomRoleModuleAccess] = useState<TenantModuleAccessMap>(() =>
+    getDefaultModuleAccessForTenantRole(tenant, 'Teacher')
   );
   const [syncRoleToExisting, setSyncRoleToExisting] = useState(true);
   const [builtInTargetRole, setBuiltInTargetRole] = useState<UserRole>('Teacher');
-  const [builtInModulesDraft, setBuiltInModulesDraft] = useState<TenantModulePermission[]>(() =>
-    getDefaultModulesForTenantRole(tenant, 'Teacher')
-  );
+  const [builtInModuleAccessDraft, setBuiltInModuleAccessDraft] =
+    useState<TenantModuleAccessMap>(() => getDefaultModuleAccessForTenantRole(tenant, 'Teacher'));
   const [savingRoleConfig, setSavingRoleConfig] = useState(false);
 
   const [tenantForm, setTenantForm] = useState({
@@ -231,7 +238,7 @@ export function SettingsModule({
       }
       setStaffRole(member.suggestedRole);
       setStaffCustomRoleId('');
-      setStaffModules(getDefaultModulesForTenantRole(tenant, member.suggestedRole));
+      setStaffModuleAccess(getDefaultModuleAccessForTenantRole(tenant, member.suggestedRole));
     },
     [staffDirectory.all, domainSuffix, tenant]
   );
@@ -243,7 +250,7 @@ export function SettingsModule({
   }, [selectedStaffKey, staffFullName, staffHandleEdited]);
 
   useEffect(() => {
-    setBuiltInModulesDraft(getDefaultModulesForTenantRole(tenant, builtInTargetRole));
+    setBuiltInModuleAccessDraft(getDefaultModuleAccessForTenantRole(tenant, builtInTargetRole));
   }, [tenant, builtInTargetRole]);
 
   const loadTenantUsers = useCallback(async () => {
@@ -382,15 +389,116 @@ export function SettingsModule({
     }
   }
 
-  function toggleModuleSelection(
-    list: TenantModulePermission[],
+  function updateModuleAccessLevel(
+    prev: TenantModuleAccessMap,
     modId: TenantModulePermission,
+    level: ModuleAccessLevel,
     roleForRule: UserRole
-  ): TenantModulePermission[] {
+  ): TenantModuleAccessMap {
+    const next: TenantModuleAccessMap = { ...prev };
     if (roleForRule === 'Admin' && modId === 'settings') {
-      return list.includes('settings') ? list : [...list, 'settings'];
+      next.settings = 'edit';
+      return next;
     }
-    return list.includes(modId) ? list.filter((m) => m !== modId) : [...list, modId];
+    if (level === 'none') {
+      delete next[modId];
+      return next;
+    }
+    if (roleForRule === 'Parent' || roleForRule === 'Student') {
+      next[modId] = 'read';
+      return next;
+    }
+    next[modId] = level;
+    return next;
+  }
+
+  function deriveAllowedModulesFromAccess(map: TenantModuleAccessMap): TenantModulePermission[] {
+    return ALL_TENANT_MODULES.map((m) => m.id).filter(
+      (id) => map[id] === 'read' || map[id] === 'edit'
+    );
+  }
+
+  function formatModuleAccessSummary(map: TenantModuleAccessMap): string {
+    const entries = ALL_TENANT_MODULES.filter(
+      (m) => map[m.id] === 'read' || map[m.id] === 'edit'
+    ).map((m) => `${m.label} (${map[m.id] === 'read' ? 'Read Only' : 'Read & Edit'})`);
+    if (entries.length === 0) return 'No modules assigned';
+    if (
+      entries.length === ALL_TENANT_MODULES.length &&
+      ALL_TENANT_MODULES.every((m) => map[m.id] === 'edit')
+    ) {
+      return 'All Modules (Read & Edit)';
+    }
+    return entries.join(', ');
+  }
+
+  function renderModuleAccessMatrix(
+    accessMap: TenantModuleAccessMap,
+    roleForRule: UserRole,
+    onChangeLevel: (modId: TenantModulePermission, level: ModuleAccessLevel) => void
+  ) {
+    const readOnlyTier = roleForRule === 'Parent' || roleForRule === 'Student';
+    return (
+      <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+        {ALL_TENANT_MODULES.map((mod) => {
+          const level: ModuleAccessLevel = accessMap[mod.id] || 'none';
+          const lockedAdminSettings = roleForRule === 'Admin' && mod.id === 'settings';
+          return (
+            <div
+              key={mod.id}
+              className="flex items-center justify-between gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+            >
+              <span className="truncate font-medium text-slate-700 dark:text-slate-200">
+                {mod.label}
+              </span>
+              <div
+                className="inline-flex shrink-0 overflow-hidden rounded border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800"
+                role="group"
+                aria-label={`${mod.label} access level`}
+              >
+                <button
+                  type="button"
+                  disabled={lockedAdminSettings}
+                  onClick={() => onChangeLevel(mod.id, 'none')}
+                  className={`px-1.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-40 ${
+                    level === 'none'
+                      ? 'bg-slate-600 text-white dark:bg-slate-600'
+                      : 'text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  Off
+                </button>
+                <button
+                  type="button"
+                  disabled={lockedAdminSettings}
+                  onClick={() => onChangeLevel(mod.id, 'read')}
+                  className={`border-l border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-40 dark:border-slate-700 ${
+                    level === 'read'
+                      ? 'bg-amber-600 text-white'
+                      : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  Read Only
+                </button>
+                <button
+                  type="button"
+                  disabled={readOnlyTier}
+                  title={readOnlyTier ? 'Portal viewer roles are Read Only' : undefined}
+                  onClick={() => onChangeLevel(mod.id, 'edit')}
+                  className={`border-l border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-40 dark:border-slate-700 ${
+                    level === 'edit'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  Read &amp; Edit
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
   }
 
   async function handleCopyStaffOtp(val: string) {
@@ -407,7 +515,7 @@ export function SettingsModule({
   function resolveRoleChoice(value: string): {
     role: UserRole;
     customRoleId: string;
-    modules: TenantModulePermission[];
+    moduleAccess: TenantModuleAccessMap;
   } {
     if (value.startsWith('custom:')) {
       const id = value.slice('custom:'.length);
@@ -416,7 +524,7 @@ export function SettingsModule({
         return {
           role: found.baseRole,
           customRoleId: found.id,
-          modules: getDefaultModulesForTenantRole(tenant, found.baseRole, found.id),
+          moduleAccess: getDefaultModuleAccessForTenantRole(tenant, found.baseRole, found.id),
         };
       }
     }
@@ -424,7 +532,7 @@ export function SettingsModule({
     return {
       role,
       customRoleId: '',
-      modules: getDefaultModulesForTenantRole(tenant, role),
+      moduleAccess: getDefaultModuleAccessForTenantRole(tenant, role),
     };
   }
 
@@ -453,13 +561,15 @@ export function SettingsModule({
     setCopiedStaffOtp(false);
     try {
       const local = staffEmailHandle.trim().toLowerCase().replace(/@.*$/, '');
+      const allowedModules = deriveAllowedModulesFromAccess(staffModuleAccess);
       const res = await saasApi.createTenantStaffUser(tenant.id, {
         fullName: staffFullName.trim(),
         email: `${local}@${domainSuffix}`,
         phone: staffPhone.trim() || undefined,
         role: staffRole,
         customRoleId: staffCustomRoleId || undefined,
-        allowedModules: staffModules,
+        allowedModules,
+        moduleAccess: staffModuleAccess,
       });
       setIssuedStaffOtp({
         fullName: res.user.fullName,
@@ -474,7 +584,7 @@ export function SettingsModule({
       setSelectedStaffKey('__manual__');
       setStaffRole('Teacher');
       setStaffCustomRoleId('');
-      setStaffModules(getDefaultModulesForTenantRole(tenant, 'Teacher'));
+      setStaffModuleAccess(getDefaultModuleAccessForTenantRole(tenant, 'Teacher'));
       setShowAddStaff(false);
       await loadTenantUsers();
       onNotify(`Added ${res.user.fullName} with 1-time password.`);
@@ -493,7 +603,7 @@ export function SettingsModule({
     setEditingUserId(u.id);
     setEditRole(u.role);
     setEditCustomRoleId(u.customRoleId || '');
-    setEditModules(getEffectiveUserModules(u));
+    setEditModuleAccess(getEffectiveUserModuleAccess(u));
     setEditStatus(u.status);
   }
 
@@ -501,10 +611,12 @@ export function SettingsModule({
     setSavingUserAccess(true);
     setCopiedStaffOtp(false);
     try {
+      const allowedModules = deriveAllowedModulesFromAccess(editModuleAccess);
       const res = await saasApi.updateTenantUserAccess(tenant.id, targetUser.id, {
         role: editRole,
         customRoleId: editCustomRoleId || undefined,
-        allowedModules: editModules,
+        allowedModules,
+        moduleAccess: editModuleAccess,
         status: editStatus,
         resetOneTimePassword: resetOtp,
       });
@@ -538,7 +650,7 @@ export function SettingsModule({
     setCustomRoleName('');
     setCustomRoleBase('Teacher');
     setCustomRoleDesc('');
-    setCustomRoleModules(getDefaultModulesForTenantRole(tenant, 'Teacher'));
+    setCustomRoleModuleAccess(getDefaultModuleAccessForTenantRole(tenant, 'Teacher'));
     setSyncRoleToExisting(true);
   }
 
@@ -548,7 +660,9 @@ export function SettingsModule({
     setCustomRoleName(cr.name);
     setCustomRoleBase(cr.baseRole);
     setCustomRoleDesc(cr.description || '');
-    setCustomRoleModules([...cr.defaultModules]);
+    setCustomRoleModuleAccess(
+      getDefaultModuleAccessForTenantRole(tenant, cr.baseRole, cr.id)
+    );
     setSyncRoleToExisting(true);
   }
 
@@ -560,11 +674,13 @@ export function SettingsModule({
     }
     setSavingRoleConfig(true);
     try {
+      const defaultModules = deriveAllowedModulesFromAccess(customRoleModuleAccess);
       const res = await saasApi.upsertCustomRole(tenant.id, {
         id: editingCustomRoleId || undefined,
         name: customRoleName.trim(),
         baseRole: customRoleBase,
-        defaultModules: customRoleModules,
+        defaultModules,
+        defaultModuleAccess: customRoleModuleAccess,
         description: customRoleDesc.trim() || undefined,
         syncExistingUsers: syncRoleToExisting,
       });
@@ -603,8 +719,10 @@ export function SettingsModule({
     e.preventDefault();
     setSavingRoleConfig(true);
     try {
+      const defaultModules = deriveAllowedModulesFromAccess(builtInModuleAccessDraft);
       const res = await saasApi.updateBuiltInRoleModules(tenant.id, builtInTargetRole, {
-        defaultModules: builtInModulesDraft,
+        defaultModules,
+        defaultModuleAccess: builtInModuleAccessDraft,
         syncExistingUsers: syncRoleToExisting,
       });
       await onRefresh();
@@ -1069,11 +1187,10 @@ export function SettingsModule({
                               )}
                               <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                                 Modules:{' '}
-                                {cr.defaultModules
-                                  .map(
-                                    (id) => ALL_TENANT_MODULES.find((m) => m.id === id)?.label || id
-                                  )
-                                  .join(', ')}
+                                {formatModuleAccessSummary(
+                                  cr.defaultModuleAccess ||
+                                    getDefaultModuleAccessForTenantRole(tenant, cr.baseRole, cr.id)
+                                )}
                               </p>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
@@ -1139,11 +1256,14 @@ export function SettingsModule({
                               const nextBase = e.target.value as UserRole;
                               setCustomRoleBase(nextBase);
                               if (!editingCustomRoleId) {
-                                setCustomRoleModules(
-                                  getDefaultModulesForTenantRole(tenant, nextBase)
+                                setCustomRoleModuleAccess(
+                                  getDefaultModuleAccessForTenantRole(tenant, nextBase)
                                 );
-                              } else if (nextBase === 'Admin' && !customRoleModules.includes('settings')) {
-                                setCustomRoleModules([...customRoleModules, 'settings']);
+                              } else if (nextBase === 'Admin' && customRoleModuleAccess.settings !== 'edit') {
+                                setCustomRoleModuleAccess({
+                                  ...customRoleModuleAccess,
+                                  settings: 'edit',
+                                });
                               }
                             }}
                             className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
@@ -1170,33 +1290,16 @@ export function SettingsModule({
                       </div>
                       <div>
                         <span className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                          Default Module Permissions
+                          Default Module Permissions (Read Only vs Read &amp; Edit)
                         </span>
-                        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-                          {ALL_TENANT_MODULES.map((mod) => {
-                            const checked = customRoleModules.includes(mod.id);
-                            const locked = customRoleBase === 'Admin' && mod.id === 'settings';
-                            return (
-                              <label
-                                key={mod.id}
-                                className="flex cursor-pointer items-center gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  disabled={locked}
-                                  onChange={() =>
-                                    setCustomRoleModules((prev) =>
-                                      toggleModuleSelection(prev, mod.id, customRoleBase)
-                                    )
-                                  }
-                                  className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
-                                />
-                                <span className="truncate">{mod.label}</span>
-                              </label>
-                            );
-                          })}
-                        </div>
+                        {renderModuleAccessMatrix(
+                          customRoleModuleAccess,
+                          customRoleBase,
+                          (modId, level) =>
+                            setCustomRoleModuleAccess((prev) =>
+                              updateModuleAccessLevel(prev, modId, level, customRoleBase)
+                            )
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                         <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
@@ -1243,33 +1346,16 @@ export function SettingsModule({
                     </div>
                     <div>
                       <span className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                        Module Permissions for {builtInTargetRole}
+                        Module Permissions for {builtInTargetRole} (Read Only vs Read &amp; Edit)
                       </span>
-                      <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-                        {ALL_TENANT_MODULES.map((mod) => {
-                          const checked = builtInModulesDraft.includes(mod.id);
-                          const locked = builtInTargetRole === 'Admin' && mod.id === 'settings';
-                          return (
-                            <label
-                              key={mod.id}
-                              className="flex cursor-pointer items-center gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                disabled={locked}
-                                onChange={() =>
-                                  setBuiltInModulesDraft((prev) =>
-                                    toggleModuleSelection(prev, mod.id, builtInTargetRole)
-                                  )
-                                }
-                                className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
-                              />
-                              <span className="truncate">{mod.label}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
+                      {renderModuleAccessMatrix(
+                        builtInModuleAccessDraft,
+                        builtInTargetRole,
+                        (modId, level) =>
+                          setBuiltInModuleAccessDraft((prev) =>
+                            updateModuleAccessLevel(prev, modId, level, builtInTargetRole)
+                          )
+                      )}
                     </div>
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                       <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
@@ -1393,7 +1479,7 @@ export function SettingsModule({
                         const resolved = resolveRoleChoice(e.target.value);
                         setStaffRole(resolved.role);
                         setStaffCustomRoleId(resolved.customRoleId);
-                        setStaffModules(resolved.modules);
+                        setStaffModuleAccess(resolved.moduleAccess);
                       }}
                       className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                     >
@@ -1457,33 +1543,16 @@ export function SettingsModule({
 
                 <div>
                   <span className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                    Module Access Rights
+                    Module Access Rights (Read Only vs Read &amp; Edit)
                   </span>
-                  <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-                    {ALL_TENANT_MODULES.map((mod) => {
-                      const checked = staffModules.includes(mod.id);
-                      const locked = staffRole === 'Admin' && mod.id === 'settings';
-                      return (
-                        <label
-                          key={mod.id}
-                          className="flex cursor-pointer items-center gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={locked}
-                            onChange={() =>
-                              setStaffModules((prev) =>
-                                toggleModuleSelection(prev, mod.id, staffRole)
-                              )
-                            }
-                            className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
-                          />
-                          <span className="truncate">{mod.label}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
+                  {renderModuleAccessMatrix(
+                    staffModuleAccess,
+                    staffRole,
+                    (modId, level) =>
+                      setStaffModuleAccess((prev) =>
+                        updateModuleAccessLevel(prev, modId, level, staffRole)
+                      )
+                  )}
                 </div>
 
                 <div className="flex items-center justify-between pt-1">
@@ -1517,7 +1586,7 @@ export function SettingsModule({
             ) : (
               <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
                 {tenantUsers.map((u) => {
-                  const userMods = getEffectiveUserModules(u);
+                  const userAccess = getEffectiveUserModuleAccess(u);
                   const isEditing = editingUserId === u.id;
                   const isSelf = Boolean(currentUserId && u.id === currentUserId);
                   return (
@@ -1547,16 +1616,7 @@ export function SettingsModule({
                             {u.phone ? ` · ${u.phone}` : ''}
                           </p>
                           <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                            Access:{' '}
-                            {userMods.length === ALL_TENANT_MODULES.length
-                              ? 'All Modules'
-                              : userMods.length === 0
-                              ? 'No modules assigned'
-                              : userMods
-                                  .map(
-                                    (id) => ALL_TENANT_MODULES.find((m) => m.id === id)?.label || id
-                                  )
-                                  .join(', ')}
+                            Access: {formatModuleAccessSummary(userAccess)}
                           </p>
                         </div>
                         <button
@@ -1582,7 +1642,7 @@ export function SettingsModule({
                                   const resolved = resolveRoleChoice(e.target.value);
                                   setEditRole(resolved.role);
                                   setEditCustomRoleId(resolved.customRoleId);
-                                  setEditModules(resolved.modules);
+                                  setEditModuleAccess(resolved.moduleAccess);
                                 }}
                                 className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                               >
@@ -1625,13 +1685,13 @@ export function SettingsModule({
                           <div>
                             <div className="flex items-center justify-between">
                               <span className="text-[11px] font-medium text-slate-600 dark:text-slate-400">
-                                Permitted School Modules
+                                Permitted School Modules (Read Only vs Read &amp; Edit)
                               </span>
                               <button
                                 type="button"
                                 onClick={() =>
-                                  setEditModules(
-                                    getDefaultModulesForTenantRole(
+                                  setEditModuleAccess(
+                                    getDefaultModuleAccessForTenantRole(
                                       tenant,
                                       editRole,
                                       editCustomRoleId || undefined
@@ -1647,31 +1707,14 @@ export function SettingsModule({
                                 Defaults
                               </button>
                             </div>
-                            <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-                              {ALL_TENANT_MODULES.map((mod) => {
-                                const checked = editModules.includes(mod.id);
-                                const locked = editRole === 'Admin' && mod.id === 'settings';
-                                return (
-                                  <label
-                                    key={mod.id}
-                                    className="flex cursor-pointer items-center gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={checked}
-                                      disabled={locked}
-                                      onChange={() =>
-                                        setEditModules((prev) =>
-                                          toggleModuleSelection(prev, mod.id, editRole)
-                                        )
-                                      }
-                                      className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
-                                    />
-                                    <span className="truncate">{mod.label}</span>
-                                  </label>
-                                );
-                              })}
-                            </div>
+                            {renderModuleAccessMatrix(
+                              editModuleAccess,
+                              editRole,
+                              (modId, level) =>
+                                setEditModuleAccess((prev) =>
+                                  updateModuleAccessLevel(prev, modId, level, editRole)
+                                )
+                            )}
                           </div>
 
                           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">

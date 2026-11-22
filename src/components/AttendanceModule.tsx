@@ -31,6 +31,7 @@ import {
 interface AttendanceModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
+  canEdit?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -59,6 +60,7 @@ function formatOfficialDate(isoDate: string): string {
 export function AttendanceModule({
   workspace,
   currentRole,
+  canEdit = true,
   onRefresh,
   onNotify,
 }: AttendanceModuleProps) {
@@ -71,9 +73,9 @@ export function AttendanceModule({
     timetable = [],
   } = workspace;
 
-  const isAdmin = currentRole === 'Admin' || currentRole === 'Super Admin';
-  const isTeacherRole = currentRole === 'Teacher';
-  const isReadOnlyViewer = currentRole === 'Parent' || currentRole === 'Student';
+  const isAdmin = canEdit && (currentRole === 'Admin' || currentRole === 'Super Admin');
+  const isTeacherRole = canEdit && currentRole === 'Teacher';
+  const isReadOnlyViewer = !canEdit || currentRole === 'Parent' || currentRole === 'Student';
 
   const defaultGrade = tenant.grades.includes('Grade 9')
     ? 'Grade 9'
@@ -1090,6 +1092,12 @@ export function AttendanceModule({
           </div>
         </div>
       </div>
+
+      {!canEdit && currentRole !== 'Parent' && currentRole !== 'Student' && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
+          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Attendance. Marking roll calls and issuing leave-out chits are disabled.
+        </div>
+      )}
 
       {isDateTermClosed && !isReadOnlyViewer && (
         <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">

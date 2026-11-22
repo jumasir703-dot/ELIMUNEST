@@ -69,6 +69,7 @@ import type {
   TeacherProfile,
   Tenant,
   TenantBranding,
+  TenantModuleAccessMap,
   TenantModulePermission,
   TenantMpesaConfig,
   TenantPlan,
@@ -413,6 +414,7 @@ export const saasApi = {
       role: UserRole;
       customRoleId?: string;
       allowedModules?: TenantModulePermission[];
+      moduleAccess?: TenantModuleAccessMap;
     }
   ) {
     return apiRequest<{ user: TenantUser; oneTimePassword: string }>('/api/auth/users', {
@@ -430,6 +432,7 @@ export const saasApi = {
       customRoleId?: string | null;
       phone?: string;
       allowedModules?: TenantModulePermission[];
+      moduleAccess?: TenantModuleAccessMap;
       status?: 'Active' | 'Disabled';
       resetOneTimePassword?: boolean;
     }
@@ -450,7 +453,8 @@ export const saasApi = {
       id?: string;
       name: string;
       baseRole: UserRole;
-      defaultModules: TenantModulePermission[];
+      defaultModules?: TenantModulePermission[];
+      defaultModuleAccess?: TenantModuleAccessMap;
       description?: string;
       syncExistingUsers?: boolean;
     }
@@ -480,13 +484,15 @@ export const saasApi = {
     tenantId: string,
     role: UserRole,
     payload: {
-      defaultModules: TenantModulePermission[];
+      defaultModules?: TenantModulePermission[];
+      defaultModuleAccess?: TenantModuleAccessMap;
       syncExistingUsers?: boolean;
     }
   ) {
     return apiRequest<{
       role: UserRole;
       defaultModules: TenantModulePermission[];
+      defaultModuleAccess: TenantModuleAccessMap;
       tenant: Tenant;
       updatedUsersCount: number;
     }>(`/api/auth/roles/builtin/${encodeURIComponent(role)}`, {
@@ -1754,7 +1760,8 @@ export const saasApi = {
   upsertBudgetAllocation(
     tenantId: string,
     payload: {
-      category: ExpenseCategory;
+      id?: string;
+      category: string;
       allocatedAmount: number;
       fiscalYear?: string;
       term?: string;
@@ -1772,7 +1779,9 @@ export const saasApi = {
     tenantId: string,
     payload: {
       budgetId?: string;
-      category?: ExpenseCategory;
+      category?: string;
+      fiscalYear?: string;
+      term?: string;
       status: 'Draft' | 'Pending Approval' | 'Approved' | 'Rejected';
       approvedBy?: string;
       approvalNotes?: string;

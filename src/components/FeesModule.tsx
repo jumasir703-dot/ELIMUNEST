@@ -74,6 +74,7 @@ import {
 interface FeesModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
+  canEdit?: boolean;
   embeddedInHub?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
@@ -82,6 +83,7 @@ interface FeesModuleProps {
 export function FeesModule({
   workspace,
   currentRole,
+  canEdit = true,
   embeddedInHub = false,
   onRefresh,
   onNotify,
@@ -93,11 +95,13 @@ export function FeesModule({
   );
   const whatsappDispatches = workspace.whatsappDispatches || [];
   const canManageFees =
-    currentRole === 'Admin' ||
-    currentRole === 'Bursar' ||
-    currentRole === 'Super Admin' ||
-    currentRole === 'Developer';
-  const canSwitchCurrency = currentRole === 'Admin' || currentRole === 'Super Admin';
+    canEdit &&
+    (currentRole === 'Admin' ||
+      currentRole === 'Bursar' ||
+      currentRole === 'Super Admin' ||
+      currentRole === 'Developer');
+  const canSwitchCurrency =
+    canEdit && (currentRole === 'Admin' || currentRole === 'Super Admin');
   const currentTermEntity = useMemo(() => {
     const terms = workspace.academicTerms || [];
     return (
@@ -692,6 +696,22 @@ export function FeesModule({
     invoiceStreamFilter,
     searchQuery,
   ]);
+
+  const INVOICES_PAGE_SIZE = 50;
+  const [invoicePage, setInvoicePage] = useState(1);
+  useEffect(() => {
+    setInvoicePage(1);
+  }, [statusFilter, invoiceGradeFilter, invoiceStreamFilter, searchQuery, tenant.id]);
+  const totalInvoicePages = Math.max(1, Math.ceil(filteredInvoices.length / INVOICES_PAGE_SIZE));
+  const safeInvoicePage = Math.min(invoicePage, totalInvoicePages);
+  const paginatedInvoices = useMemo(
+    () =>
+      filteredInvoices.slice(
+        (safeInvoicePage - 1) * INVOICES_PAGE_SIZE,
+        safeInvoicePage * INVOICES_PAGE_SIZE
+      ),
+    [filteredInvoices, safeInvoicePage]
+  );
 
   const independentMetrics = useMemo(() => {
     const totalCharged = independentVotelines.reduce((sum, v) => sum + v.amount, 0);
@@ -1913,16 +1933,16 @@ export function FeesModule({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {filteredInvoices.length === 0 ? (
+                  {paginatedInvoices.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                         No invoices match your filter.
                       </td>
                     </tr>
                   ) : (
-                    filteredInvoices.map((inv) => {
+                    paginatedInvoices.map((inv) => {
                       const rowIndependent = getInvoiceIndependentVotelines(inv);
-                      const studentRecord = students.find((s) => s.id === inv.studentId);
+                      const studentRecord = studentById.get(inv.studentId);
                       const creditBal = studentRecord?.creditBalance || 0;
                       return (
                       <tr key={inv.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30">
@@ -2115,6 +2135,36 @@ export function FeesModule({
                 </tbody>
               </table>
             </div>
+            {filteredInvoices.length > INVOICES_PAGE_SIZE && (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-400">
+                <span className="tabular-nums">
+                  Showing {(safeInvoicePage - 1) * INVOICES_PAGE_SIZE + 1}–
+                  {Math.min(safeInvoicePage * INVOICES_PAGE_SIZE, filteredInvoices.length)} of{' '}
+                  {filteredInvoices.length} invoices
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={safeInvoicePage <= 1}
+                    onClick={() => setInvoicePage((p) => Math.max(1, p - 1))}
+                    className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    Previous
+                  </button>
+                  <span className="font-mono tabular-nums">
+                    Page {safeInvoicePage} / {totalInvoicePages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safeInvoicePage >= totalInvoicePages}
+                    onClick={() => setInvoicePage((p) => Math.min(totalInvoicePages, p + 1))}
+                    className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </>
       ) : activeTab === 'payments' ? (

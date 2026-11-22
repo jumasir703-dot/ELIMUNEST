@@ -72,6 +72,7 @@ import {
   resolveTenantSidebarTheme,
 } from './lib/theme';
 import {
+  canEditModule,
   DEFAULT_TENANT_BRANDING,
   getEffectiveUserModules,
   PASSWORD_MIN_LENGTH,
@@ -1073,6 +1074,7 @@ export default function App() {
                 {activeModule === 'admissions' && effectiveModules.includes('admissions') && (
                   <AdmissionsModule
                     workspace={workspace}
+                    canEdit={canEditModule(authSession.user, 'admissions')}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1081,6 +1083,7 @@ export default function App() {
                   <TimetableModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    canEdit={canEditModule(authSession.user, 'timetable')}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1089,6 +1092,7 @@ export default function App() {
                   <AttendanceModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    canEdit={canEditModule(authSession.user, 'attendance')}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1097,6 +1101,7 @@ export default function App() {
                   <ExamsModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    canEdit={canEditModule(authSession.user, 'exams')}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1105,6 +1110,7 @@ export default function App() {
                   <FinanceModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    canEdit={canEditModule(authSession.user, 'fees')}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1113,6 +1119,7 @@ export default function App() {
                   <CommunicationsModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    canEdit={canEditModule(authSession.user, 'communications')}
                     wsConnected={wsConnected}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
@@ -1124,6 +1131,7 @@ export default function App() {
                     workspace={workspace}
                     currentRole={currentRole}
                     currentUserId={authSession.user.id}
+                    canEdit={canEditModule(authSession.user, 'settings')}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onSwitchTenant={(newId) => {
                       if (isPlatformSuperAdmin) {

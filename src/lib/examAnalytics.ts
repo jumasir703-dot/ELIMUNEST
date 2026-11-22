@@ -39,11 +39,11 @@ export function getCycleOrderRank(title: string): number {
 
 export function sortExamCyclesChronologically(cycles: ExamCycle[]): ExamCycle[] {
   return [...cycles].sort((a, b) => {
-    const termCmp = a.term.localeCompare(b.term);
-    if (termCmp !== 0) return termCmp;
+    const dateCmp = (a.startDate || '').localeCompare(b.startDate || '');
+    if (dateCmp !== 0) return dateCmp;
     const rankDiff = getCycleOrderRank(a.title) - getCycleOrderRank(b.title);
     if (rankDiff !== 0) return rankDiff;
-    return a.startDate.localeCompare(b.startDate);
+    return a.term.localeCompare(b.term);
   });
 }
 

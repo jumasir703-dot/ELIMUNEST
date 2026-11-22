@@ -60,6 +60,7 @@ import { ZerakiExamAnalyticsPanel } from './ZerakiExamAnalyticsPanel';
 interface ExamsModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
+  canEdit?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -95,6 +96,7 @@ function getGradeBadgeColor(letterGrade: string, is844: boolean): string {
 export function ExamsModule({
   workspace,
   currentRole = 'Teacher',
+  canEdit = true,
   onRefresh,
   onNotify,
 }: ExamsModuleProps) {
@@ -109,7 +111,9 @@ export function ExamsModule({
 
   const [activeTab, setActiveTab] = useState<'results' | 'analytics' | 'entry'>('results');
   const [selectedCycleId, setSelectedCycleId] = useState<string>(
-    orderedCycles.find((c) => /mid[- ]?term/i.test(c.title))?.id || orderedCycles[0]?.id || ''
+    [...orderedCycles].reverse().find((c) => /mid[- ]?term/i.test(c.title))?.id ||
+      orderedCycles[orderedCycles.length - 1]?.id ||
+      ''
   );
   const [selectedGrade, setSelectedGrade] = useState<string>(defaultGrade);
   const [selectedStream, setSelectedStream] = useState<string>('All');
@@ -129,8 +133,9 @@ export function ExamsModule({
   const [queueStreamFilter, setQueueStreamFilter] = useState<string>('All');
   const [queueSelectedStudentId, setQueueSelectedStudentId] = useState<string | null>(null);
   const isAdminRole =
-    currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
-  const isParentRole = currentRole === 'Parent' || currentRole === 'Student';
+    canEdit &&
+    (currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer');
+  const isParentRole = !canEdit || currentRole === 'Parent' || currentRole === 'Student';
 
   const [showCycleModal, setShowCycleModal] = useState(false);
   const [showUnlockModal, setShowUnlockModal] = useState(false);
@@ -983,6 +988,12 @@ export function ExamsModule({
         </div>
       </div>
 
+      {!canEdit && currentRole !== 'Parent' && currentRole !== 'Student' && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
+          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Exams &amp; Grades. Mark entry, creating cycles, publishing results, and parent dispatches are disabled.
+        </div>
+      )}
+
       {isCycleTermClosed && (
         <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
           <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
@@ -1020,13 +1031,17 @@ export function ExamsModule({
             setSelectedGrade(g);
             setSelectedStream('All');
           }}
-          onJumpToMarkEntry={(target) => {
-            setEntryPrefillTarget({
-              ...target,
-              requestKey: Date.now(),
-            });
-            setActiveTab('entry');
-          }}
+          onJumpToMarkEntry={
+            isParentRole
+              ? undefined
+              : (target) => {
+                  setEntryPrefillTarget({
+                    ...target,
+                    requestKey: Date.now(),
+                  });
+                  setActiveTab('entry');
+                }
+          }
           onOpenReportCard={(studentId) => openReportCardModal(studentId, false)}
           onNotify={onNotify}
         />

@@ -79,10 +79,10 @@ app.use(
             objectSrc: ["'none'"],
             baseUri: ["'self'"],
             formAction: ["'self'"],
-            frameAncestors: ["'none'"],
           },
         }
       : false,
+    xFrameOptions: false,
     crossOriginEmbedderPolicy: false,
   })
 );
@@ -93,26 +93,31 @@ const configuredOrigins = (process.env.APP_URL || '')
   .filter(Boolean);
 
 app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-      const normalized = origin.replace(/\/+$/, '');
-      if (configuredOrigins.includes(normalized)) {
-        callback(null, true);
-        return;
-      }
-      if (!IS_PROD && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
-        callback(null, true);
-        return;
-      }
-      callback(new ConflictError(`CORS origin "${origin}" is not allowed.`, 403));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
+  cors((req, callback) => {
+    const origin = req.header('origin');
+    if (!origin) {
+      callback(null, { origin: true, credentials: true });
+      return;
+    }
+    const normalized = origin.replace(/\/+$/, '');
+    const hostHeader = (req.header('x-forwarded-host') || req.header('host') || '').split(',')[0].trim();
+    const isSameHost =
+      Boolean(hostHeader) &&
+      (normalized === `https://${hostHeader}` || normalized === `http://${hostHeader}`);
+    if (
+      isSameHost ||
+      configuredOrigins.includes(normalized) ||
+      (!IS_PROD && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized))
+    ) {
+      callback(null, {
+        origin: true,
+        credentials: true,
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
+      });
+      return;
+    }
+    callback(new ConflictError(`CORS origin "${origin}" is not allowed.`, 403));
   })
 );
 
@@ -681,6 +686,7 @@ app.put(
       const result = store.updateBuiltInRoleModules(authUser, targetTenantId, {
         role: decodeURIComponent(String(req.params.role)) as any,
         defaultModules: req.body?.defaultModules,
+        defaultModuleAccess: req.body?.defaultModuleAccess,
         syncExistingUsers: Boolean(req.body?.syncExistingUsers),
       });
       await store.flushRemotePersist();
@@ -1737,7 +1743,34 @@ app.post(
   }
 );
 
-// Fees, Billing & Finance Controls (Admin & Bursar only)
+// Budget Approval endpoint: accessible by dedicated Budget Approver (with fees read/edit) plus Admin/Bursar with edit
+const budgetApprovalGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Bursar', 'Budget Approver'),
+  requireModule('fees', { allowReadOnlyMutation: true }),
+];
+app.patch(
+  '/api/finance/budgets/approval',
+  ...budgetApprovalGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const budget = store.approveBudgetAllocation(
+        tenantId,
+        {
+          ...(req.body || {}),
+          approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
+        },
+        req.authUser!,
+        req.ip
+      );
+      res.json({ budget });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Fees, Billing & Finance Controls (Admin & Bursar with edit permission only)
 const financeGuard = [
   requireRole('Developer', 'Super Admin', 'Admin', 'Bursar'),
   requireModule('fees'),
@@ -2203,24 +2236,6 @@ app.post('/api/finance/budgets', (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const budget = store.upsertBudgetAllocation(tenantId, req.body, req.authUser!, req.ip);
-    res.json({ budget });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.patch('/api/finance/budgets/approval', (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const budget = store.approveBudgetAllocation(
-      tenantId,
-      {
-        ...(req.body || {}),
-        approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
-      },
-      req.authUser!,
-      req.ip
-    );
     res.json({ budget });
   } catch (err) {
     next(err);
