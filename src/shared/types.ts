@@ -718,6 +718,8 @@ export interface Tenant {
   curriculum: string;
   academicYear: string;
   currentTerm: string;
+  /** Academic calendar. When empty, no term locking applies. */
+  terms?: AcademicTerm[];
   currency: CurrencyCode;
   plan: TenantPlan;
   status?: TenantStatus;
@@ -1142,8 +1144,98 @@ export interface Student {
   gender: 'Female' | 'Male' | 'Non-binary';
   dateOfBirth: string;
   enrolledAt: string;
-  status: 'Active' | 'On Leave' | 'Graduated';
+  status: StudentStatus;
+  /** Why the learner left / changed status (required for Transferred and Withdrawn). */
+  statusReason?: string;
+  statusChangedAt?: string;
+  /** Date the learner left the school (Graduated / Transferred / Withdrawn). */
+  exitDate?: string;
   creditBalance?: number;
+  /** Audit trail of edits, status changes and promotions. */
+  history?: StudentHistoryEntry[];
+}
+
+/** Learners are never hard-deleted: Withdrawn / Transferred keep the record and its audit trail. */
+export type StudentStatus = 'Active' | 'On Leave' | 'Graduated' | 'Transferred' | 'Withdrawn';
+
+/** Statuses that occupy a seat against the tenant's learner cap. */
+export const COUNTED_STUDENT_STATUSES: ReadonlyArray<StudentStatus> = ['Active', 'On Leave'];
+
+export interface StudentHistoryEntry {
+  at: string;
+  by: string;
+  kind: 'edit' | 'status' | 'promotion' | 'import';
+  summary: string;
+  reason?: string;
+}
+
+export type AcademicTermStatus = 'Open' | 'Closed';
+
+export interface AcademicTerm {
+  id: string;
+  academicYear: string;
+  name: string;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  status: AcademicTermStatus;
+  closedAt?: string;
+  closedBy?: string;
+  reopenedAt?: string;
+  reopenedBy?: string;
+  reopenReason?: string;
+}
+
+export type PromotionAction = 'promote' | 'repeat' | 'graduate' | 'transfer' | 'withdraw';
+
+export interface PromotionPreviewItem {
+  studentId: string;
+  fullName: string;
+  studentCode: string;
+  action: PromotionAction;
+  fromGrade: string;
+  fromSection: string;
+  toGrade?: string;
+  toSection?: string;
+  outstandingBalance: number;
+}
+
+export interface PromotionResult {
+  dryRun: boolean;
+  applied: boolean;
+  fromGrade: string;
+  /** Next grade in the school's ordering, or null when fromGrade is the final grade. */
+  toGrade: string | null;
+  counts: Record<PromotionAction, number>;
+  totalOutstandingBalance: number;
+  items: PromotionPreviewItem[];
+}
+
+export interface StudentImportRow {
+  fullName: string;
+  dateOfBirth: string;
+  gender: string;
+  grade: string;
+  section?: string;
+  guardianName: string;
+  guardianPhone: string;
+  guardianEmail?: string;
+  studentCode?: string;
+  upi?: string;
+}
+
+export interface StudentImportRowResult {
+  row: number;
+  ok: boolean;
+  studentCode?: string;
+  error?: string;
+}
+
+export interface StudentImportResult {
+  dryRun: boolean;
+  total: number;
+  accepted: number;
+  rejected: number;
+  results: StudentImportRowResult[];
 }
 
 export interface OnboardingChecklist {

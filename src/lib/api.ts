@@ -45,6 +45,9 @@ import type {
   PayrollEntry,
   PayrollStatus,
   PayrollStatutoryRateSchedule,
+  AcademicTerm,
+  PromotionAction,
+  PromotionResult,
   PublicSchoolDirectoryItem,
   ReconciliationChannel,
   ReconciliationLine,
@@ -53,6 +56,9 @@ import type {
   StaffAttendanceRecord,
   StaffCategory,
   Student,
+  StudentImportRow,
+  StudentImportResult,
+  StudentStatus,
   SubjectTimetableConstraint,
   SubscriptionCycle,
   SuperAdminTenantSummary,
@@ -682,6 +688,77 @@ export const saasApi = {
       tenantId,
       body: JSON.stringify(payload),
     });
+  },
+
+  updateStudent(
+    tenantId: string,
+    studentId: string,
+    patch: Partial<
+      Pick<
+        Student,
+        'fullName' | 'dateOfBirth' | 'gender' | 'guardianName' | 'guardianPhone' | 'guardianEmail' | 'grade' | 'section' | 'upi'
+      >
+    >
+  ) {
+    return apiRequest<{ student: Student }>(`/api/students/${encodeURIComponent(studentId)}`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify(patch),
+    });
+  },
+
+  changeStudentStatus(
+    tenantId: string,
+    studentId: string,
+    payload: { status: StudentStatus; reason?: string; effectiveDate?: string }
+  ) {
+    return apiRequest<{ student: Student; outstandingBalance: number }>(
+      `/api/students/${encodeURIComponent(studentId)}/status`,
+      { method: 'POST', tenantId, body: JSON.stringify(payload) }
+    );
+  },
+
+  promoteStudents(
+    tenantId: string,
+    payload: { fromGrade: string; section?: string; decisions?: Record<string, PromotionAction>; dryRun?: boolean }
+  ) {
+    return apiRequest<PromotionResult>('/api/students/promote', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  importStudents(tenantId: string, payload: { rows: StudentImportRow[]; dryRun?: boolean }) {
+    return apiRequest<StudentImportResult>('/api/students/import', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  createTerm(
+    tenantId: string,
+    payload: { name: string; academicYear?: string; startDate: string; endDate: string }
+  ) {
+    return apiRequest<{ term: AcademicTerm }>(`/api/tenants/${encodeURIComponent(tenantId)}/terms`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  closeTerm(tenantId: string, termId: string) {
+    return apiRequest<{ term: AcademicTerm; warnings: string[] }>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/terms/${encodeURIComponent(termId)}/close`,
+      { method: 'POST' }
+    );
+  },
+
+  reopenTerm(tenantId: string, termId: string, reason: string) {
+    return apiRequest<{ term: AcademicTerm }>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/terms/${encodeURIComponent(termId)}/reopen`,
+      { method: 'POST', body: JSON.stringify({ reason }) }
+    );
   },
 
   createAdmission(
