@@ -12,6 +12,7 @@ import {
   Sun,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import { ParentSignupForm } from './ParentSignupForm';
 import {
   PASSWORD_MIN_LENGTH,
   validatePasswordStrength,
@@ -24,7 +25,7 @@ interface AuthPortalProps {
   onAuthenticated: (session: AuthSessionInfo) => void;
 }
 
-type AuthPortalView = 'signin' | 'forgot-request' | 'forgot-verify';
+type AuthPortalView = 'signin' | 'forgot-request' | 'forgot-verify' | 'parent-signup';
 
 export function AuthPortal({
   darkMode,
@@ -168,7 +169,9 @@ export function AuthPortal({
             <p className="text-xs text-slate-500 dark:text-slate-400">
               {view === 'signin'
                 ? 'Account Sign In'
-                : 'Reset Forgotten Password'}
+                : view === 'parent-signup'
+                  ? 'Parent Account Sign Up'
+                  : 'Reset Forgotten Password'}
             </p>
           </div>
         </div>
@@ -260,7 +263,33 @@ export function AuthPortal({
               <span>{submitting ? 'Signing in...' : 'Sign In'}</span>
               <ArrowRight className="h-4 w-4" />
             </button>
+
+            <p className="text-center text-xs text-slate-500 dark:text-slate-400">
+              Parent or guardian?{' '}
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  setSuccessMsg(null);
+                  setView('parent-signup');
+                }}
+                className="font-medium text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Create an account
+              </button>
+            </p>
           </form>
+        )}
+
+        {view === 'parent-signup' && (
+          <ParentSignupForm
+            onAuthenticated={onAuthenticated}
+            onBack={() => {
+              setErrorMsg(null);
+              setView('signin');
+            }}
+            onError={setErrorMsg}
+          />
         )}
 
         {view === 'forgot-request' && (

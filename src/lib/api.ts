@@ -284,6 +284,7 @@ export const saasApi = {
     email: string;
     role: UserRole;
     password: string;
+    phone?: string;
     /** Admission number + guardian phone on file are required to claim a learner. */
     studentCode: string;
     guardianPhone: string;
@@ -396,6 +397,24 @@ export const saasApi = {
       method: 'POST',
       skipAuth: true,
       body: JSON.stringify(payload),
+    });
+  },
+
+  /** Parent: claim another child. Needs the admission number AND the guardian phone the school holds. */
+  linkChild(tenantId: string, payload: { studentCode: string; guardianPhone: string }) {
+    return apiRequest<{ studentId: string; fullName: string }>('/api/parent/link-child', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /** Admin: link a learner to a Parent account, or pass null to unlink. */
+  setStudentParent(tenantId: string, studentId: string, parentUserId: string | null) {
+    return apiRequest<{ student: Student }>(`/api/students/${encodeURIComponent(studentId)}/parent`, {
+      method: 'PATCH',
+      tenantId,
+      body: JSON.stringify({ parentUserId }),
     });
   },
 

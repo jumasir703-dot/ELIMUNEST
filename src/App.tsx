@@ -1068,6 +1068,7 @@ export default function App() {
                     workspace={workspace}
                     currentRole={currentRole}
                     onNavigate={handleNavigate}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
                   />
                 )}
                 {activeModule === 'admissions' && effectiveModules.includes('admissions') && (
