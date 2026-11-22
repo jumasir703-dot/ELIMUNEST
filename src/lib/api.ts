@@ -284,6 +284,9 @@ export const saasApi = {
     email: string;
     role: UserRole;
     password: string;
+    /** Admission number + guardian phone on file are required to claim a learner. */
+    studentCode: string;
+    guardianPhone: string;
   }): Promise<AuthSessionInfo> {
     const session = await apiRequest<AuthSessionInfo>('/api/auth/register', {
       method: 'POST',
@@ -344,7 +347,13 @@ export const saasApi = {
 
   async logout() {
     try {
-      await apiRequest<{ ok: boolean }>('/api/auth/logout', { method: 'POST', skipAuth: true });
+      const current = readStoredAuthSession();
+      await apiRequest<{ ok: boolean }>('/api/auth/logout', {
+        method: 'POST',
+        skipAuth: true,
+        // Present the token explicitly so the server can revoke it (skipAuth only disables 401 handling).
+        headers: current?.token ? { Authorization: `Bearer ${current.token}` } : undefined,
+      });
     } catch {
       // ignore offline logout failures
     }
@@ -2028,16 +2037,15 @@ export function useTenantSocket(
     function connect() {
       if (!active || !tenantId || !effectiveToken) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const socket = new WebSocket(
-        `${proto}//${window.location.host}/ws?token=${encodeURIComponent(effectiveToken)}`
-      );
+      const socket = new WebSocket(`${proto}//${window.location.host}/ws`);
       wsRef.current = socket;
 
       socket.onopen = () => {
         if (!active) return;
         setConnected(true);
         retryDelay = 1000;
-        socket.send(JSON.stringify({ type: 'subscribe', tenantId }));
+        // Authenticate with the first frame (tokens are never sent in the URL).
+        socket.send(JSON.stringify({ type: 'auth', token: effectiveToken, tenantId }));
       };
 
       socket.onmessage = (evt) => {

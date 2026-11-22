@@ -13,6 +13,9 @@ describe('Phase 1: Security Blockers & Tenant Isolation', () => {
   let teacherToken = '';
   let bursarToken = '';
   let parentToken = '';
+  let parentUserId = '';
+  let childCode = '';
+  let domainName = '';
   let devToken = '';
 
   beforeAll(async () => {
@@ -96,6 +99,22 @@ describe('Phase 1: Security Blockers & Tenant Isolation', () => {
       'BursarPass2026!'
     );
 
+    domainName = domain;
+    const childEnroll = await request(app)
+      .post('/api/students/enroll')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        fullName: 'Achieng Junior',
+        dateOfBirth: '2014-03-02',
+        gender: 'Female',
+        grade: 'Grade 6',
+        section: 'A',
+        guardianName: 'Mary Achieng',
+        guardianPhone: '0712340003',
+      });
+    expect(childEnroll.status).toBe(201);
+    childCode = childEnroll.body.student.studentCode;
+
     const parentRegRes = await request(app)
       .post('/api/auth/register')
       .send({
@@ -104,10 +123,13 @@ describe('Phase 1: Security Blockers & Tenant Isolation', () => {
         email: `parent.sec@${domain}`,
         password: 'ParentPass2026!',
         phone: '+254712340003',
+        studentCode: childCode,
+        guardianPhone: '0712340003',
       });
     expect(parentRegRes.status).toBe(201);
     expect(parentRegRes.body.user.role).toBe('Parent');
     parentToken = parentRegRes.body.token;
+    parentUserId = parentRegRes.body.user.id;
 
     const devCred = findCred('Developer');
     if (devCred) {
@@ -164,15 +186,199 @@ describe('Phase 1: Security Blockers & Tenant Isolation', () => {
     });
     expect(escalatedRes.status).toBe(403);
 
-    // Valid signup without role defaults strictly to Parent
-    const okRes = await request(app).post('/api/auth/register').send({
+    // Signup without proof of a learner is rejected (no account is created)
+    const noProofRes = await request(app).post('/api/auth/register').send({
       tenantId,
       fullName: 'Honest Guardian',
       email: `guardian.new@${domain}`,
       password: 'ValidPass2026!',
     });
+    expect(noProofRes.status).toBe(403);
+
+    // A second learner with a different guardian phone can be claimed with the right proof
+    const second = await request(app)
+      .post('/api/students/enroll')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        fullName: 'Second Learner',
+        dateOfBirth: '2014-06-02',
+        gender: 'Male',
+        grade: 'Grade 6',
+        section: 'A',
+        guardianName: 'Honest Guardian',
+        guardianPhone: '0712340077',
+      });
+    expect(second.status).toBe(201);
+    const okRes = await request(app).post('/api/auth/register').send({
+      tenantId,
+      fullName: 'Honest Guardian',
+      email: `guardian.new@${domain}`,
+      password: 'ValidPass2026!',
+      studentCode: second.body.student.studentCode,
+      guardianPhone: '0712340077',
+    });
     expect(okRes.status).toBe(201);
     expect(okRes.body.user.role).toBe('Parent');
+  });
+
+  it('verifies parent ownership: wrong phone / unknown code get the same generic 403, and a linked child cannot be re-claimed', async () => {
+    const wrongPhone = await request(app).post('/api/auth/register').send({
+      tenantId,
+      fullName: 'Intruder',
+      email: `intruder.a@${domainName}`,
+      password: 'ValidPass2026!',
+      studentCode: childCode,
+      guardianPhone: '0799999999',
+    });
+    const unknownCode = await request(app).post('/api/auth/register').send({
+      tenantId,
+      fullName: 'Intruder',
+      email: `intruder.b@${domainName}`,
+      password: 'ValidPass2026!',
+      studentCode: 'NOPE-0000',
+      guardianPhone: '0712340003',
+    });
+    expect(wrongPhone.status).toBe(403);
+    expect(unknownCode.status).toBe(403);
+    expect(wrongPhone.body.error).toBe(unknownCode.body.error);
+
+    // Correct proof, but the child already belongs to Mary => 409, Mary keeps access
+    const reclaim = await request(app).post('/api/auth/register').send({
+      tenantId,
+      fullName: 'Other Guardian',
+      email: `other.guardian@${domainName}`,
+      password: 'ValidPass2026!',
+      studentCode: childCode,
+      guardianPhone: '0712340003',
+    });
+    expect(reclaim.status).toBe(409);
+    const ws = await request(app).get('/api/workspace').set('Authorization', `Bearer ${parentToken}`);
+    expect(ws.body.students.map((s: { studentCode: string }) => s.studentCode)).toEqual([childCode]);
+  });
+
+  it('does not grant a parent access to a learner just because guardianEmail matches their email', async () => {
+    const victim = (store as any).state.students.find(
+      (st: { tenantId: string; id: string }) => st.tenantId === tenantId
+    );
+    const before = victim.parentUserId;
+    victim.guardianEmail = `parent.sec@${domainName}`;
+    delete victim.parentUserId;
+    const ws = await request(app).get('/api/workspace').set('Authorization', `Bearer ${parentToken}`);
+    expect(ws.status).toBe(200);
+    expect(ws.body.students.some((s: { id: string }) => s.id === victim.id)).toBe(false);
+    victim.parentUserId = before;
+  });
+
+  it('lets a parent link another child with proof, and lets an admin relink / unlink', async () => {
+    const other = await request(app)
+      .post('/api/students/enroll')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        fullName: 'Third Learner',
+        dateOfBirth: '2013-02-02',
+        gender: 'Male',
+        grade: 'Grade 7',
+        section: 'A',
+        guardianName: 'Mary Achieng',
+        guardianPhone: '0712340003',
+      });
+    expect(other.status).toBe(201);
+
+    const bad = await request(app)
+      .post('/api/parent/link-child')
+      .set('Authorization', `Bearer ${parentToken}`)
+      .send({ studentCode: other.body.student.studentCode, guardianPhone: '0700000000' });
+    expect(bad.status).toBe(403);
+
+    const good = await request(app)
+      .post('/api/parent/link-child')
+      .set('Authorization', `Bearer ${parentToken}`)
+      .send({ studentCode: other.body.student.studentCode, guardianPhone: '0712340003' });
+    expect(good.status).toBe(200);
+
+    let ws = await request(app).get('/api/workspace').set('Authorization', `Bearer ${parentToken}`);
+    expect(ws.body.students).toHaveLength(2);
+
+    const unlink = await request(app)
+      .patch(`/api/students/${other.body.student.id}/parent`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ parentUserId: null });
+    expect(unlink.status).toBe(200);
+    ws = await request(app).get('/api/workspace').set('Authorization', `Bearer ${parentToken}`);
+    expect(ws.body.students).toHaveLength(1);
+
+    // Teachers / parents cannot relink
+    const forbidden = await request(app)
+      .patch(`/api/students/${other.body.student.id}/parent`)
+      .set('Authorization', `Bearer ${parentToken}`)
+      .send({ parentUserId });
+    expect(forbidden.status).toBe(403);
+  });
+
+  it('scopes teacher workspace to assigned cohorts and ignores client-supplied attendance identity', async () => {
+    // No faculty profile for this account => no learners at all
+    let ws = await request(app).get('/api/workspace').set('Authorization', `Bearer ${teacherToken}`);
+    expect(ws.status).toBe(200);
+    expect(ws.body.students).toEqual([]);
+    expect(ws.body.admissions).toEqual([]);
+
+    // Spoofing actorRole / teacherId cannot bypass the assignment check
+    const spoof = await request(app)
+      .post('/api/attendance/batch')
+      .set('Authorization', `Bearer ${teacherToken}`)
+      .send({
+        date: '2026-11-20',
+        grade: 'Grade 6',
+        section: 'A',
+        recordedBy: 'Someone Else',
+        teacherId: store.listTenants()[0].teachers[0]?.id,
+        entries: [],
+      });
+    expect(spoof.status).toBe(403);
+
+    // Add a faculty profile for this teacher assigned to Grade 6 A only
+    const add = await request(app)
+      .post(`/api/tenants/${tenantId}/teachers`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        name: 'Grace Wanjiku',
+        email: `teacher.sec@${domainName}`,
+        phone: '+254712340001',
+        department: 'Sciences',
+        subjects: ['Mathematics'],
+        assignedClasses: [{ grade: 'Grade 6', section: 'A' }],
+      });
+    expect(add.status).toBe(201);
+
+    ws = await request(app).get('/api/workspace').set('Authorization', `Bearer ${teacherToken}`);
+    expect(ws.body.students.length).toBeGreaterThan(0);
+    expect(
+      ws.body.students.every(
+        (s: { grade: string; section: string }) => s.grade === 'Grade 6' && s.section === 'A'
+      )
+    ).toBe(true);
+    const ids = new Set(ws.body.students.map((s: { id: string }) => s.id));
+    expect(ws.body.attendance.every((a: { studentId: string }) => ids.has(a.studentId))).toBe(true);
+    expect(ws.body.examResults.every((r: { studentId: string }) => ids.has(r.studentId))).toBe(true);
+
+    const own = await request(app)
+      .post('/api/attendance/batch')
+      .set('Authorization', `Bearer ${teacherToken}`)
+      .send({ date: '2026-11-20', grade: 'Grade 6', section: 'A', recordedBy: 'x', entries: [] });
+    expect(own.status).toBe(200);
+  });
+
+  it('revokes the session server-side on logout', async () => {
+    const out = await request(app).post('/api/auth/logout').set('Authorization', `Bearer ${parentToken}`);
+    expect(out.status).toBe(200);
+    const after = await request(app).get('/api/workspace').set('Authorization', `Bearer ${parentToken}`);
+    expect(after.status).toBe(401);
+  });
+
+  it('hides suspended schools from the public directory', async () => {
+    const res = await request(app).get('/api/auth/schools');
+    expect(res.status).toBe(200);
+    expect(res.body.schools.every((s: { status: string }) => s.status !== 'Suspended')).toBe(true);
   });
 
   it('enforces server-side RBAC, module authorization, and Parent/Teacher/Bursar workspace scoping', async () => {
@@ -439,11 +645,14 @@ describe('Phase 1: Security Blockers & Tenant Isolation', () => {
 
       // Authenticated socket receives server-assigned tenantId even if spoofing another tenant
       await new Promise<void>((resolve, reject) => {
-        const ws = new WebSocket(`${baseWsUrl}?token=${encodeURIComponent(adminToken)}`);
+        const ws = new WebSocket(baseWsUrl);
         const timer = setTimeout(() => {
           ws.terminate();
           reject(new Error('Expected authenticated socket connected frame'));
         }, 3000);
+        ws.on('open', () => {
+          ws.send(JSON.stringify({ type: 'auth', token: adminToken }));
+        });
         ws.on('message', (raw) => {
           const msg = JSON.parse(raw.toString());
           if (msg.type === 'connected') {
@@ -455,6 +664,23 @@ describe('Phase 1: Security Blockers & Tenant Isolation', () => {
             ws.close();
             resolve();
           }
+        });
+      });
+
+      // A token in the URL is no longer accepted: the socket stays unauthenticated and is closed
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${baseWsUrl}?token=${encodeURIComponent(adminToken)}`);
+        const timer = setTimeout(() => {
+          ws.terminate();
+          reject(new Error('Expected URL-token socket to be closed'));
+        }, 3000);
+        ws.on('open', () => {
+          ws.send(JSON.stringify({ type: 'subscribe', tenantId }));
+        });
+        ws.on('close', (code) => {
+          clearTimeout(timer);
+          expect(code).toBe(4401);
+          resolve();
         });
       });
     } finally {
