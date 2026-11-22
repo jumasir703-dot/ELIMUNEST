@@ -92,6 +92,8 @@ export function AttendanceModule({
   // Separate department filters for Teaching vs Non-Teaching staff
   const [teachingDept, setTeachingDept] = useState<string>('All');
   const [nonTeachingDept, setNonTeachingDept] = useState<string>('All');
+  const [summaryGradeFilter, setSummaryGradeFilter] = useState<string>('All');
+  const [summaryStreamFilter, setSummaryStreamFilter] = useState<string>('All');
   const [saving, setSaving] = useState(false);
 
   // Add Non-Teaching Staff inline form (Admin only)
@@ -345,6 +347,51 @@ export function AttendanceModule({
     selectedTeacher,
     timetable,
   ]);
+
+  const summaryGradeOptions = useMemo(() => {
+    const presentGrades = new Set(studentSummary.map((row) => row.student.grade));
+    const ordered = tenant.grades.filter((g) => presentGrades.has(g));
+    presentGrades.forEach((g) => {
+      if (!ordered.includes(g)) ordered.push(g);
+    });
+    return ordered;
+  }, [studentSummary, tenant.grades]);
+
+  const summaryStreamOptions = useMemo(() => {
+    const relevantRows =
+      summaryGradeFilter === 'All'
+        ? studentSummary
+        : studentSummary.filter((row) => row.student.grade === summaryGradeFilter);
+    const configured =
+      summaryGradeFilter === 'All'
+        ? summaryGradeOptions.flatMap((g) => getStreamsForGrade(tenant, g))
+        : getStreamsForGrade(tenant, summaryGradeFilter);
+    const set = new Set<string>(configured);
+    relevantRows.forEach((row) => {
+      if (row.student.section) set.add(row.student.section);
+    });
+    return Array.from(set);
+  }, [studentSummary, summaryGradeFilter, summaryGradeOptions, tenant]);
+
+  useEffect(() => {
+    if (summaryStreamFilter !== 'All' && !summaryStreamOptions.includes(summaryStreamFilter)) {
+      setSummaryStreamFilter('All');
+    }
+  }, [summaryStreamFilter, summaryStreamOptions]);
+
+  const filteredStudentSummary = useMemo(() => {
+    return studentSummary.filter(({ student }) => {
+      if (summaryGradeFilter !== 'All' && student.grade !== summaryGradeFilter) return false;
+      if (summaryStreamFilter !== 'All' && student.section !== summaryStreamFilter) return false;
+      return true;
+    });
+  }, [studentSummary, summaryGradeFilter, summaryStreamFilter]);
+
+  const summaryAverageRate = useMemo(() => {
+    if (filteredStudentSummary.length === 0) return 100;
+    const sum = filteredStudentSummary.reduce((acc, row) => acc + row.rate, 0);
+    return Math.round((sum / filteredStudentSummary.length) * 10) / 10;
+  }, [filteredStudentSummary]);
 
   // --- Teaching Staff Roll Call (Admin Only) ---
   const teachingDepartments = useMemo(() => {
@@ -2355,59 +2402,138 @@ export function AttendanceModule({
         </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                Student Attendance Rates
+              </h2>
+              <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                Showing {filteredStudentSummary.length} of {studentSummary.length} student(s) · Avg Rate:{' '}
+                <strong className="text-slate-800 dark:text-slate-200">{summaryAverageRate}%</strong>
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <label
+                  htmlFor="attendance-summary-grade"
+                  className="text-xs font-medium text-slate-600 dark:text-slate-400"
+                >
+                  Grade
+                </label>
+                <select
+                  id="attendance-summary-grade"
+                  value={summaryGradeFilter}
+                  onChange={(e) => setSummaryGradeFilter(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                >
+                  <option value="All">All Grades</option>
+                  {summaryGradeOptions.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <label
+                  htmlFor="attendance-summary-stream"
+                  className="text-xs font-medium text-slate-600 dark:text-slate-400"
+                >
+                  Stream
+                </label>
+                <select
+                  id="attendance-summary-stream"
+                  value={summaryStreamFilter}
+                  onChange={(e) => setSummaryStreamFilter(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                >
+                  <option value="All">All Streams</option>
+                  {summaryStreamOptions.map((sec) => (
+                    <option key={sec} value={sec}>
+                      Stream {sec}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {(summaryGradeFilter !== 'All' || summaryStreamFilter !== 'All') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSummaryGradeFilter('All');
+                    setSummaryStreamFilter('All');
+                  }}
+                  className="whitespace-nowrap rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  Reset
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
                 <tr>
                   <th className="px-4 py-3">Student ID</th>
                   <th className="px-4 py-3">Name</th>
-                  <th className="px-4 py-3">Cohort</th>
+                  <th className="px-4 py-3">Grade &amp; Stream</th>
                   <th className="px-4 py-3 text-right">Sessions Logged</th>
                   <th className="px-4 py-3 text-right">Absences</th>
                   <th className="px-4 py-3 text-right">Attendance Rate</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {studentSummary.map(({ student, total, absent, rate, activeChit }) => (
-                  <tr
-                    key={student.id}
-                    className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
-                  >
-                    <td className="px-4 py-2.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                      {student.studentCode}
-                    </td>
-                    <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
-                      <div>{student.fullName}</div>
-                      {activeChit && (
-                        <p className="mt-0.5 text-[11px] font-normal text-amber-700 dark:text-amber-400">
-                          Leave Out Chit ({activeChit.startDate} → {activeChit.endDate})
-                        </p>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400">
-                      {student.grade} · {student.section}
-                    </td>
-                    <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
-                      {total}
-                    </td>
-                    <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
-                      {absent}
-                    </td>
-                    <td className="px-4 py-2.5 text-right font-mono text-xs font-semibold tabular-nums">
-                      <span
-                        className={
-                          rate < 85
-                            ? 'text-red-700 dark:text-red-400'
-                            : rate < 92
-                            ? 'text-amber-700 dark:text-amber-400'
-                            : 'text-emerald-700 dark:text-emerald-400'
-                        }
-                      >
-                        {rate}%
-                      </span>
+                {filteredStudentSummary.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="px-4 py-10 text-center text-xs text-slate-500 dark:text-slate-400"
+                    >
+                      No students match the selected Grade / Stream filter.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  filteredStudentSummary.map(({ student, total, absent, rate, activeChit }) => (
+                    <tr
+                      key={student.id}
+                      className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
+                    >
+                      <td className="px-4 py-2.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                        {student.studentCode}
+                      </td>
+                      <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
+                        <div>{student.fullName}</div>
+                        {activeChit && (
+                          <p className="mt-0.5 text-[11px] font-normal text-amber-700 dark:text-amber-400">
+                            Leave Out Chit ({activeChit.startDate} → {activeChit.endDate})
+                          </p>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400">
+                        {student.grade} · Stream {student.section}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
+                        {total}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
+                        {absent}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs font-semibold tabular-nums">
+                        <span
+                          className={
+                            rate < 85
+                              ? 'text-red-700 dark:text-red-400'
+                              : rate < 92
+                              ? 'text-amber-700 dark:text-amber-400'
+                              : 'text-emerald-700 dark:text-emerald-400'
+                          }
+                        >
+                          {rate}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

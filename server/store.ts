@@ -20,12 +20,18 @@ import {
   deriveSchoolEmailDomain,
   findOptionalGroupForSubject,
   getClusterForGrade,
+  getDefaultModuleAccessForTenantRole,
+  getDefaultModulesForTenantRole,
+  getEffectiveUserModuleAccess,
+  getEffectiveUserModules,
+  getModuleAccessLevel,
   getDoubleStartPeriodsFromSchedule,
   getTenantBellSchedule,
   getTenantLessonRows,
   getTenantPeriodTimes,
   isSlotWithinSubjectTimeWindow,
   normalizeBellSchedule,
+  normalizeModuleAccessMap,
   PUBLIC_EMAIL_DOMAINS,
   resolveSubjectConstraint,
   sanitizeSchoolEmailDomain,
@@ -61,6 +67,7 @@ import {
   type CbcClusterId,
   type CreditNoteRecord,
   type CurrencyCode,
+  type CustomRoleDefinition,
   DEFAULT_CURRENCY,
   type DayOfWeek,
   type DevCollectionStorageStat,
@@ -123,6 +130,7 @@ import {
   type TeacherProfile,
   type Tenant,
   type TenantBranding,
+  type TenantModuleAccessMap,
   type TenantModulePermission,
   type TenantMpesaConfig,
   type TenantPlan,
@@ -328,42 +336,62 @@ export class TenantStore {
     this.onBroadcast = fn;
   }
 
-  private developerEnsured = false;
+  private developerEnsurePromise: Promise<void> | null = null;
 
   async ensureHydrated(): Promise<void> {
     await this.hydrateFromKvIfConfigured();
     await this.ensureDeveloperAccount();
   }
 
-  /** Creates developer@elimunest.platform if missing. Never overwrites an existing account/password. */
+  /**
+   * Creates developer@elimunest.platform if missing.
+   * Never overwrites an already-activated developer password (mustChangePassword === false).
+   * If the account still has mustChangePassword === true and DEVELOPER_BOOTSTRAP_PASSWORD is set,
+   * syncs its initial password to that configured value so local/hosting recovery works cleanly.
+   */
   private async ensureDeveloperAccount(): Promise<void> {
-    if (this.developerEnsured) return;
-    this.developerEnsured = true;
-    const exists = (this.state.users || []).some(
-      (u) => u.email.toLowerCase() === DEVELOPER_EMAIL
-    );
-    if (exists) return;
-    const { password, fromEnv } = resolveDeveloperBootstrapPassword();
-    this.state.users.push({
-      id: 'usr-platform-dev',
-      tenantId: 'platform',
-      fullName: 'Lead Platform Engineer',
-      email: DEVELOPER_EMAIL,
-      phone: '',
-      role: 'Developer',
-      passwordHash: await hashPassword(password),
-      status: 'Active',
-      mustChangePassword: true,
-      tokenVersion: 0,
-      allowedModules: [...DEFAULT_ROLE_MODULES.Developer],
-      createdAt: new Date().toISOString(),
-    });
-    this.persist();
-    console.log(
-      fromEnv
-        ? `[elimuNest] Created ${DEVELOPER_EMAIL} with the password from DEVELOPER_BOOTSTRAP_PASSWORD (change required on first login).`
-        : `[elimuNest] Created ${DEVELOPER_EMAIL} with one-time password: ${password} (change required on first login). Set DEVELOPER_BOOTSTRAP_PASSWORD to choose your own.`
-    );
+    if (!this.developerEnsurePromise) {
+      this.developerEnsurePromise = (async () => {
+        const existing = (this.state.users || []).find(
+          (u) => u.email.toLowerCase() === DEVELOPER_EMAIL
+        );
+        const { password, fromEnv } = resolveDeveloperBootstrapPassword();
+        if (existing) {
+          if (existing.mustChangePassword && fromEnv) {
+            const matches = await verifyPassword(password, existing.passwordHash);
+            if (!matches) {
+              existing.passwordHash = await hashPassword(password);
+              this.persist();
+              console.log(
+                `[elimuNest] Synced unactivated ${DEVELOPER_EMAIL} password from DEVELOPER_BOOTSTRAP_PASSWORD.`
+              );
+            }
+          }
+          return;
+        }
+        this.state.users.push({
+          id: 'usr-platform-dev',
+          tenantId: 'platform',
+          fullName: 'Lead Platform Engineer',
+          email: DEVELOPER_EMAIL,
+          phone: '',
+          role: 'Developer',
+          passwordHash: await hashPassword(password),
+          status: 'Active',
+          mustChangePassword: true,
+          tokenVersion: 0,
+          allowedModules: [...DEFAULT_ROLE_MODULES.Developer],
+          createdAt: new Date().toISOString(),
+        });
+        this.persist();
+        console.log(
+          fromEnv
+            ? `[elimuNest] Created ${DEVELOPER_EMAIL} with the password from DEVELOPER_BOOTSTRAP_PASSWORD (change required on first login).`
+            : `[elimuNest] Created ${DEVELOPER_EMAIL} with one-time password: ${password} (change required on first login). Set DEVELOPER_BOOTSTRAP_PASSWORD to choose your own.`
+        );
+      })();
+    }
+    await this.developerEnsurePromise;
   }
 
   private async hydrateFromKvIfConfigured(): Promise<void> {
@@ -1345,7 +1373,7 @@ export class TenantStore {
     this.resetRequestsByIp.clear();
     const { state, devCredentials } = await createSeedDatabase({ empty: Boolean(options?.empty) });
     this.state = state;
-    this.developerEnsured = false;
+    this.developerEnsurePromise = null;
     await this.ensureDeveloperAccount();
     return { devCredentials };
   }
@@ -1943,56 +1971,69 @@ export class TenantStore {
           )
         : [];
       const teacherStudentIds = new Set(teacherStudents.map((s) => s.id));
+      const canReadFees = getModuleAccessLevel(authUser, 'fees') !== 'none';
+      const canReadAdmissions = getModuleAccessLevel(authUser, 'admissions') !== 'none';
       return {
         tenant,
         tenants: [tenant],
         academicYears: allYears,
         academicTerms: allTerms,
-        students: teacherStudents,
-        archivedStudentsCount: 0,
-        lifecycleAuditLogs: [],
-        admissions: [],
+        students: canReadAdmissions ? allStudents : teacherStudents,
+        archivedStudentsCount: canReadAdmissions ? archivedStudentsCount : 0,
+        lifecycleAuditLogs: canReadAdmissions ? allLifecycleAudit : [],
+        admissions: canReadAdmissions ? allAdmissions : [],
         timetable: allTimetable,
-        attendance: allAttendance.filter((a) => teacherStudentIds.has(a.studentId)),
+        attendance: canReadAdmissions
+          ? allAttendance
+          : allAttendance.filter((a) => teacherStudentIds.has(a.studentId)),
         staffAttendance: [],
-        leaveOutChits: allLeaveChits.filter((c) => teacherStudentIds.has(c.studentId)),
+        leaveOutChits: canReadAdmissions
+          ? allLeaveChits
+          : allLeaveChits.filter((c) => teacherStudentIds.has(c.studentId)),
         examCycles: allExamCycles,
         examResults: allExamResults.filter((r) => teacherStudentIds.has(r.studentId)),
-        feeStructures: [],
-        invoices: [],
-        creditNotes: [],
-        feeWaivers: [],
-        independentVotelines: [],
-        mpesaTransactions: [],
-        expenses: [],
-        etimsChecks: [],
-        reconciliationLines: [],
-        payrollEntries: [],
-        budgets: [],
-        approvalRecords: [],
+        feeStructures: canReadFees ? allFeeStructures : [],
+        invoices: canReadFees ? allInvoices : [],
+        creditNotes: canReadFees ? allCreditNotes : [],
+        feeWaivers: canReadFees ? allFeeWaivers : [],
+        independentVotelines: canReadFees ? allVotelines : [],
+        mpesaTransactions: canReadFees ? allMpesa : [],
+        expenses: canReadFees ? allExpenses : [],
+        etimsChecks: canReadFees ? allEtims : [],
+        reconciliationLines: canReadFees ? allRecon : [],
+        payrollEntries: canReadFees ? allPayroll : [],
+        budgets: canReadFees ? allBudgets : [],
+        approvalRecords: canReadFees ? allApprovals : [],
+        ...(canReadFees ? { statutoryRateSchedules } : {}),
         announcements: allAnnouncements,
         messages: allMessages,
         whatsappDispatches: [],
-        notifications: allNotifications.filter((n) => n.category !== 'fee'),
+        notifications: canReadFees
+          ? allNotifications
+          : allNotifications.filter((n) => n.category !== 'fee'),
       };
     }
 
-    if (authUser?.role === 'Bursar') {
+    if (authUser?.role === 'Bursar' || authUser?.role === 'Budget Approver') {
+      const canReadAdmissions = getModuleAccessLevel(authUser, 'admissions') !== 'none';
+      const canReadExams = getModuleAccessLevel(authUser, 'exams') !== 'none';
+      const canReadAttendance = getModuleAccessLevel(authUser, 'attendance') !== 'none';
+      const canReadTimetable = getModuleAccessLevel(authUser, 'timetable') !== 'none';
       return {
         tenant,
         tenants: [tenant],
         academicYears: allYears,
         academicTerms: allTerms,
         students: allStudents,
-        archivedStudentsCount: 0,
-        lifecycleAuditLogs: [],
-        admissions: [],
-        timetable: [],
-        attendance: [],
+        archivedStudentsCount: canReadAdmissions ? archivedStudentsCount : 0,
+        lifecycleAuditLogs: canReadAdmissions ? allLifecycleAudit : [],
+        admissions: canReadAdmissions ? allAdmissions : [],
+        timetable: canReadTimetable ? allTimetable : [],
+        attendance: canReadAttendance ? allAttendance : [],
         staffAttendance: [],
-        leaveOutChits: [],
-        examCycles: [],
-        examResults: [],
+        leaveOutChits: canReadAttendance ? allLeaveChits : [],
+        examCycles: canReadExams ? allExamCycles : [],
+        examResults: canReadExams ? allExamResults : [],
         feeStructures: allFeeStructures,
         invoices: allInvoices,
         creditNotes: allCreditNotes,
@@ -2014,6 +2055,7 @@ export class TenantStore {
     }
 
     if (authUser?.role === 'Registrar') {
+      const canReadFees = getModuleAccessLevel(authUser, 'fees') !== 'none';
       return {
         tenant,
         tenants: [tenant],
@@ -2029,22 +2071,25 @@ export class TenantStore {
         leaveOutChits: allLeaveChits,
         examCycles: allExamCycles,
         examResults: allExamResults,
-        feeStructures: [],
-        invoices: [],
-        creditNotes: [],
-        feeWaivers: [],
-        independentVotelines: [],
-        mpesaTransactions: [],
-        expenses: [],
-        etimsChecks: [],
-        reconciliationLines: [],
-        payrollEntries: [],
-        budgets: [],
-        approvalRecords: [],
+        feeStructures: canReadFees ? allFeeStructures : [],
+        invoices: canReadFees ? allInvoices : [],
+        creditNotes: canReadFees ? allCreditNotes : [],
+        feeWaivers: canReadFees ? allFeeWaivers : [],
+        independentVotelines: canReadFees ? allVotelines : [],
+        mpesaTransactions: canReadFees ? allMpesa : [],
+        expenses: canReadFees ? allExpenses : [],
+        etimsChecks: canReadFees ? allEtims : [],
+        reconciliationLines: canReadFees ? allRecon : [],
+        payrollEntries: canReadFees ? allPayroll : [],
+        budgets: canReadFees ? allBudgets : [],
+        approvalRecords: canReadFees ? allApprovals : [],
+        ...(canReadFees ? { statutoryRateSchedules } : {}),
         announcements: allAnnouncements,
         messages: allMessages,
         whatsappDispatches: allWhatsapp,
-        notifications: allNotifications.filter((n) => n.category !== 'fee'),
+        notifications: canReadFees
+          ? allNotifications
+          : allNotifications.filter((n) => n.category !== 'fee'),
       };
     }
 
@@ -2549,13 +2594,14 @@ export class TenantStore {
 
   private toPublicUser(user: StoredTenantUser): TenantUser {
     const { passwordHash: _omitted, ...publicUser } = user;
+    const moduleAccess = getEffectiveUserModuleAccess(publicUser);
+    const allowedModules = getEffectiveUserModules({ ...publicUser, moduleAccess });
     return {
       ...publicUser,
       mustChangePassword: Boolean(publicUser.mustChangePassword),
       tokenVersion: typeof publicUser.tokenVersion === 'number' ? publicUser.tokenVersion : 0,
-      allowedModules: Array.isArray(publicUser.allowedModules)
-        ? publicUser.allowedModules
-        : [...(DEFAULT_ROLE_MODULES[publicUser.role] || ['analytics'])],
+      allowedModules,
+      moduleAccess,
     };
   }
 
@@ -3241,6 +3287,35 @@ export class TenantStore {
     return filtered;
   }
 
+  private resolveModuleAccessPayload(
+    role: UserRole,
+    rawModuleAccess?: unknown,
+    rawModules?: unknown,
+    fallbackAccess?: TenantModuleAccessMap
+  ): { moduleAccess: TenantModuleAccessMap; allowedModules: TenantModulePermission[] } {
+    const hasExplicitMap =
+      rawModuleAccess && typeof rawModuleAccess === 'object' && !Array.isArray(rawModuleAccess);
+    const fallbackModList = Array.isArray(rawModules)
+      ? this.normalizeAllowedModules(role, rawModules)
+      : undefined;
+
+    let moduleAccess: TenantModuleAccessMap;
+    if (hasExplicitMap) {
+      moduleAccess = normalizeModuleAccessMap(role, rawModuleAccess);
+    } else if (fallbackModList) {
+      moduleAccess = normalizeModuleAccessMap(role, undefined, fallbackModList);
+    } else if (fallbackAccess) {
+      moduleAccess = normalizeModuleAccessMap(role, fallbackAccess);
+    } else {
+      moduleAccess = normalizeModuleAccessMap(role);
+    }
+
+    const allowedModules = ALL_TENANT_MODULES.map((m) => m.id).filter(
+      (id) => moduleAccess[id] === 'read' || moduleAccess[id] === 'edit'
+    );
+    return { moduleAccess, allowedModules };
+  }
+
   async createTenantStaffUser(
     actor: TenantUser,
     tenantId: string,
@@ -3249,7 +3324,11 @@ export class TenantStore {
       email: string;
       phone?: string;
       role: UserRole;
+      customRoleId?: string;
       allowedModules?: TenantModulePermission[];
+      moduleAccess?: TenantModuleAccessMap;
+      password?: string;
+      requirePasswordChange?: boolean;
     }
   ): Promise<{ user: TenantUser; oneTimePassword: string }> {
     if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
@@ -3267,12 +3346,28 @@ export class TenantStore {
       'Registrar',
       'Teacher',
       'Bursar',
+      'Budget Approver',
       'Parent',
     ]);
-    const role: UserRole = input.role || 'Teacher';
+    let role: UserRole = input.role || 'Teacher';
+    let customRoleId: string | undefined;
+    let roleLabel: string | undefined;
+
+    if (typeof input.customRoleId === 'string' && input.customRoleId.trim()) {
+      const foundCustom = (tenant.customRoles || []).find(
+        (r) => r.id === input.customRoleId!.trim()
+      );
+      if (!foundCustom) {
+        throw new ConflictError('Selected custom role does not exist in this school.', 400);
+      }
+      role = foundCustom.baseRole;
+      customRoleId = foundCustom.id;
+      roleLabel = foundCustom.name;
+    }
+
     if (!allowedSchoolRoles.has(role)) {
       throw new ConflictError(
-        'Staff role must be Super Admin, Admin, Registrar, Teacher, Bursar, or Parent.',
+        'Staff role must be Super Admin, Admin, Registrar, Teacher, Bursar, Budget Approver, or Parent.',
         400
       );
     }
@@ -3304,8 +3399,24 @@ export class TenantStore {
       throw new ConflictError(`An account with email "${finalEmail}" already exists.`, 409);
     }
 
-    const allowedModules = this.normalizeAllowedModules(role, input.allowedModules);
-    const oneTimePassword = generateOneTimePassword();
+    const defaultAccess = getDefaultModuleAccessForTenantRole(tenant, role, customRoleId);
+    const { moduleAccess, allowedModules } = this.resolveModuleAccessPayload(
+      role,
+      input.moduleAccess,
+      input.allowedModules,
+      defaultAccess
+    );
+    const customPassword = typeof input.password === 'string' ? input.password.trim() : '';
+    let assignedPassword: string;
+    let mustChangePassword: boolean;
+    if (customPassword) {
+      this.assertStrongPassword(customPassword);
+      assignedPassword = customPassword;
+      mustChangePassword = input.requirePasswordChange === true;
+    } else {
+      assignedPassword = generateOneTimePassword();
+      mustChangePassword = true;
+    }
     const now = new Date().toISOString();
     const created: StoredTenantUser = {
       id: `usr-${randomUUID().slice(0, 8)}`,
@@ -3314,11 +3425,13 @@ export class TenantStore {
       email: finalEmail,
       phone: (input.phone || '').trim() || undefined,
       role,
-      passwordHash: await hashPassword(oneTimePassword),
+      ...(customRoleId ? { customRoleId, roleLabel } : {}),
+      passwordHash: await hashPassword(assignedPassword),
       status: 'Active',
-      mustChangePassword: true,
+      mustChangePassword,
       tokenVersion: 0,
       allowedModules,
+      moduleAccess,
       createdAt: now,
     };
 
@@ -3341,12 +3454,12 @@ export class TenantStore {
     this.pushNotification(
       tenant.id,
       'announcement',
-      `Staff Account Provisioned (${role})`,
+      `Staff Account Provisioned (${roleLabel || role})`,
       `${actor.fullName} added ${fullName} (${finalEmail}) with access to ${allowedModules.length} module(s).`,
       'settings'
     );
 
-    return { user: this.toPublicUser(created), oneTimePassword };
+    return { user: this.toPublicUser(created), oneTimePassword: assignedPassword };
   }
 
   async updateTenantUserAccess(
@@ -3355,10 +3468,14 @@ export class TenantStore {
     targetUserId: string,
     patch: {
       role?: UserRole;
+      customRoleId?: string | null;
       phone?: string;
       allowedModules?: TenantModulePermission[];
+      moduleAccess?: TenantModuleAccessMap;
       status?: 'Active' | 'Disabled';
       resetOneTimePassword?: boolean;
+      newPassword?: string;
+      requirePasswordChange?: boolean;
     }
   ): Promise<{ user: TenantUser; oneTimePassword?: string }> {
     if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
@@ -3381,9 +3498,28 @@ export class TenantStore {
       'Registrar',
       'Teacher',
       'Bursar',
+      'Budget Approver',
       'Parent',
+      'Student',
     ]);
-    if (patch.role !== undefined) {
+    if (typeof patch.customRoleId === 'string' && patch.customRoleId.trim()) {
+      const foundCustom = (tenant.customRoles || []).find(
+        (r) => r.id === patch.customRoleId!.trim()
+      );
+      if (!foundCustom) {
+        throw new ConflictError('Selected custom role does not exist in this school.', 400);
+      }
+      if (
+        target.id === actor.id &&
+        foundCustom.baseRole !== 'Admin' &&
+        foundCustom.baseRole !== 'Super Admin'
+      ) {
+        throw new ConflictError('You cannot remove your own administrative role.', 400);
+      }
+      target.role = foundCustom.baseRole;
+      target.customRoleId = foundCustom.id;
+      target.roleLabel = foundCustom.name;
+    } else if (patch.role !== undefined) {
       if (!allowedSchoolRoles.has(patch.role)) {
         throw new ConflictError('Invalid staff role specified.', 400);
       }
@@ -3391,14 +3527,22 @@ export class TenantStore {
         throw new ConflictError('You cannot remove your own administrative role.', 400);
       }
       target.role = patch.role;
+      target.customRoleId = undefined;
+      target.roleLabel = undefined;
     }
 
     if (patch.phone !== undefined) {
       target.phone = patch.phone.trim() || undefined;
     }
 
-    if (patch.allowedModules !== undefined) {
-      target.allowedModules = this.normalizeAllowedModules(target.role, patch.allowedModules);
+    if (patch.moduleAccess !== undefined || patch.allowedModules !== undefined) {
+      const resolved = this.resolveModuleAccessPayload(
+        target.role,
+        patch.moduleAccess,
+        patch.allowedModules
+      );
+      target.moduleAccess = resolved.moduleAccess;
+      target.allowedModules = resolved.allowedModules;
     }
 
     if (patch.status !== undefined) {
@@ -3415,10 +3559,17 @@ export class TenantStore {
     }
 
     let oneTimePassword: string | undefined;
-    if (patch.resetOneTimePassword) {
+    const explicitPassword = typeof patch.newPassword === 'string' ? patch.newPassword.trim() : '';
+    if (explicitPassword) {
+      this.assertStrongPassword(explicitPassword);
+      oneTimePassword = explicitPassword;
+      target.passwordHash = await hashPassword(explicitPassword);
+      target.mustChangePassword = patch.requirePasswordChange === true;
+      target.tokenVersion = (target.tokenVersion ?? 0) + 1;
+    } else if (patch.resetOneTimePassword) {
       oneTimePassword = generateOneTimePassword();
       target.passwordHash = await hashPassword(oneTimePassword);
-      target.mustChangePassword = true;
+      target.mustChangePassword = patch.requirePasswordChange !== false;
       target.tokenVersion = (target.tokenVersion ?? 0) + 1;
     }
 
@@ -3427,13 +3578,233 @@ export class TenantStore {
       tenant.id,
       'announcement',
       'Staff Access Rights Updated',
-      `${actor.fullName} updated permissions for ${target.fullName} (${target.role}, ${target.status}).`,
+      `${actor.fullName} updated permissions for ${target.fullName} (${target.roleLabel || target.role}, ${target.status}).`,
       'settings'
     );
 
     return {
       user: this.toPublicUser(target),
       ...(oneTimePassword ? { oneTimePassword } : {}),
+    };
+  }
+
+  upsertTenantCustomRole(
+    actor: TenantUser,
+    tenantId: string,
+    input: {
+      id?: string;
+      name: string;
+      baseRole: UserRole;
+      defaultModules?: TenantModulePermission[];
+      defaultModuleAccess?: TenantModuleAccessMap;
+      description?: string;
+      syncExistingUsers?: boolean;
+    }
+  ): { customRole: CustomRoleDefinition; tenant: Tenant; updatedUsersCount: number } {
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Forbidden: Only School Admins can manage school roles.', 403);
+    }
+    const tenant = this.requireTenant(tenantId);
+    const name = (input.name || '').trim();
+    if (name.length < 2 || name.length > 48) {
+      throw new ConflictError('Role name must be between 2 and 48 characters.', 400);
+    }
+    const reservedNames = new Set([
+      'developer',
+      'super admin',
+      'admin',
+      'registrar',
+      'teacher',
+      'bursar',
+      'budget approver',
+      'parent',
+      'student',
+    ]);
+    if (reservedNames.has(name.toLowerCase())) {
+      throw new ConflictError(
+        `"${name}" is a built-in role name. Customize the built-in role directly or choose a distinct custom role name.`,
+        400
+      );
+    }
+    const allowedBaseRoles = new Set<UserRole>([
+      'Super Admin',
+      'Admin',
+      'Registrar',
+      'Teacher',
+      'Bursar',
+      'Budget Approver',
+      'Parent',
+    ]);
+    if (!allowedBaseRoles.has(input.baseRole)) {
+      throw new ConflictError(
+        'Base access tier must be Super Admin, Admin, Registrar, Teacher, Bursar, Budget Approver, or Parent.',
+        400
+      );
+    }
+    if (!Array.isArray(tenant.customRoles)) {
+      tenant.customRoles = [];
+    }
+    const duplicateName = tenant.customRoles.find(
+      (r) => r.name.trim().toLowerCase() === name.toLowerCase() && r.id !== input.id
+    );
+    if (duplicateName) {
+      throw new ConflictError(`A custom role named "${name}" already exists.`, 409);
+    }
+
+    const { moduleAccess: defaultModuleAccess, allowedModules: defaultModules } =
+      this.resolveModuleAccessPayload(
+        input.baseRole,
+        input.defaultModuleAccess,
+        input.defaultModules
+      );
+    const description = (input.description || '').trim() || undefined;
+    let roleDef: CustomRoleDefinition;
+
+    if (input.id) {
+      const existing = tenant.customRoles.find((r) => r.id === input.id);
+      if (!existing) {
+        throw new ConflictError('Custom role not found.', 404);
+      }
+      existing.name = name;
+      existing.baseRole = input.baseRole;
+      existing.defaultModules = defaultModules;
+      existing.defaultModuleAccess = defaultModuleAccess;
+      existing.description = description;
+      roleDef = existing;
+    } else {
+      roleDef = {
+        id: `role-${randomUUID().slice(0, 8)}`,
+        name,
+        baseRole: input.baseRole,
+        defaultModules,
+        defaultModuleAccess,
+        description,
+      };
+      tenant.customRoles.push(roleDef);
+    }
+
+    let updatedUsersCount = 0;
+    for (const u of this.state.users || []) {
+      if (u.tenantId === tenant.id && u.customRoleId === roleDef.id) {
+        u.roleLabel = roleDef.name;
+        if (input.syncExistingUsers) {
+          if (
+            u.id === actor.id &&
+            roleDef.baseRole !== 'Admin' &&
+            roleDef.baseRole !== 'Super Admin'
+          ) {
+            continue;
+          }
+          u.role = roleDef.baseRole;
+          u.allowedModules = [...defaultModules];
+          u.moduleAccess = { ...defaultModuleAccess };
+          updatedUsersCount += 1;
+        }
+      }
+    }
+
+    this.persist();
+    this.syncTenant(tenant.id, 'roles:updated');
+    return { customRole: roleDef, tenant, updatedUsersCount };
+  }
+
+  deleteTenantCustomRole(
+    actor: TenantUser,
+    tenantId: string,
+    roleId: string
+  ): { deleted: boolean; tenant: Tenant } {
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Forbidden: Only School Admins can delete custom roles.', 403);
+    }
+    const tenant = this.requireTenant(tenantId);
+    const list = tenant.customRoles || [];
+    const target = list.find((r) => r.id === roleId);
+    if (!target) {
+      throw new ConflictError('Custom role not found.', 404);
+    }
+    const assignedCount = (this.state.users || []).filter(
+      (u) => u.tenantId === tenant.id && u.customRoleId === roleId
+    ).length;
+    if (assignedCount > 0) {
+      throw new ConflictError(
+        `Cannot delete "${target.name}" while ${assignedCount} user account(s) are assigned to it. Reassign those accounts first.`,
+        409
+      );
+    }
+    tenant.customRoles = list.filter((r) => r.id !== roleId);
+    this.persist();
+    this.syncTenant(tenant.id, 'roles:deleted');
+    return { deleted: true, tenant };
+  }
+
+  updateBuiltInRoleModules(
+    actor: TenantUser,
+    tenantId: string,
+    input: {
+      role: UserRole;
+      defaultModules?: TenantModulePermission[];
+      defaultModuleAccess?: TenantModuleAccessMap;
+      syncExistingUsers?: boolean;
+    }
+  ): {
+    role: UserRole;
+    defaultModules: TenantModulePermission[];
+    defaultModuleAccess: TenantModuleAccessMap;
+    tenant: Tenant;
+    updatedUsersCount: number;
+  } {
+    if (actor.role !== 'Admin' && actor.role !== 'Super Admin' && actor.role !== 'Developer') {
+      throw new ConflictError('Forbidden: Only School Admins can customize role permissions.', 403);
+    }
+    const tenant = this.requireTenant(tenantId);
+    const customizableRoles = new Set<UserRole>([
+      'Admin',
+      'Registrar',
+      'Teacher',
+      'Bursar',
+      'Budget Approver',
+      'Parent',
+    ]);
+    if (!customizableRoles.has(input.role)) {
+      throw new ConflictError(
+        'Only Admin, Registrar, Teacher, Bursar, Budget Approver, and Parent module templates can be customized.',
+        400
+      );
+    }
+    const { moduleAccess: defaultModuleAccess, allowedModules: normalized } =
+      this.resolveModuleAccessPayload(
+        input.role,
+        input.defaultModuleAccess,
+        input.defaultModules
+      );
+    if (!tenant.roleModuleOverrides) {
+      tenant.roleModuleOverrides = {};
+    }
+    if (!tenant.roleModuleAccessOverrides) {
+      tenant.roleModuleAccessOverrides = {};
+    }
+    tenant.roleModuleOverrides[input.role] = normalized;
+    tenant.roleModuleAccessOverrides[input.role] = defaultModuleAccess;
+
+    let updatedUsersCount = 0;
+    if (input.syncExistingUsers) {
+      for (const u of this.state.users || []) {
+        if (u.tenantId === tenant.id && u.role === input.role && !u.customRoleId) {
+          u.allowedModules = [...normalized];
+          u.moduleAccess = { ...defaultModuleAccess };
+          updatedUsersCount += 1;
+        }
+      }
+    }
+
+    this.persist();
+    this.syncTenant(tenant.id, 'roles:builtin-updated');
+    return {
+      role: input.role,
+      defaultModules: normalized,
+      defaultModuleAccess,
+      tenant,
+      updatedUsersCount,
     };
   }
 
@@ -6352,9 +6723,10 @@ export class TenantStore {
       const chitRemark = activeChit
         ? `Leave Out Chit (${activeChit.days}d: ${activeChit.startDate} to ${activeChit.endDate}): ${activeChit.reason}`
         : '';
+      const rawRemarks = typeof entry.remarks === 'string' ? entry.remarks : '';
       const resolvedRemarks = activeChit
-        ? entry.remarks.trim() || chitRemark
-        : entry.remarks;
+        ? rawRemarks.trim() || chitRemark
+        : rawRemarks;
 
       const existing = this.state.attendance.find(
         (r) => r.tenantId === tenantId && r.date === input.date && r.studentId === entry.studentId
@@ -10061,7 +10433,8 @@ export class TenantStore {
   upsertBudgetAllocation(
     tenantId: string,
     input: {
-      category: ExpenseCategory;
+      id?: string;
+      category: string;
       allocatedAmount: number;
       fiscalYear?: string;
       term?: string;
@@ -10071,19 +10444,31 @@ export class TenantStore {
     ip?: string
   ): BudgetAllocation {
     const tenant = this.requireTenant(tenantId);
-    const validCategories = new Set<string>(EXPENSE_CATEGORIES);
-    if (!validCategories.has(input.category)) {
-      throw new ConflictError(`Invalid budget expense category "${input.category}".`, 400);
+    const category = (input.category || '').trim();
+    if (category.length < 2 || category.length > 80) {
+      throw new ConflictError(
+        'Budget line / category name must be between 2 and 80 characters.',
+        400
+      );
     }
     const allocatedAmount = Math.round(Number(input.allocatedAmount));
     if (!Number.isFinite(allocatedAmount) || allocatedAmount < 0) {
       throw new ConflictError('Budget allocation amount must be zero or positive.', 400);
     }
 
+    const fiscalYear = (input.fiscalYear || '').trim() || tenant.academicYear || '2026';
+    const term = (input.term || '').trim() || tenant.currentTerm || 'Term 3';
+
     if (!Array.isArray(this.state.budgets)) this.state.budgets = [];
-    const existing = this.state.budgets.find(
-      (b) => b.tenantId === tenantId && b.category === input.category
-    );
+    const existing = input.id
+      ? this.state.budgets.find((b) => b.tenantId === tenantId && b.id === input.id)
+      : this.state.budgets.find(
+          (b) =>
+            b.tenantId === tenantId &&
+            b.category.trim().toLowerCase() === category.toLowerCase() &&
+            (b.fiscalYear || '').trim().toLowerCase() === fiscalYear.toLowerCase() &&
+            (b.term || '').trim().toLowerCase() === term.toLowerCase()
+        );
 
     if (existing) {
       const beforeSnap = {
@@ -10091,9 +10476,10 @@ export class TenantStore {
         status: existing.status,
       };
       const amountChanged = existing.allocatedAmount !== allocatedAmount;
+      existing.category = category;
       existing.allocatedAmount = allocatedAmount;
-      if (input.fiscalYear) existing.fiscalYear = input.fiscalYear.trim();
-      if (input.term) existing.term = input.term.trim();
+      existing.fiscalYear = fiscalYear;
+      existing.term = term;
       if (input.notes !== undefined) existing.notes = input.notes.trim() || undefined;
       if (amountChanged) {
         existing.status = 'Pending Approval';
@@ -10114,7 +10500,13 @@ export class TenantStore {
         'BudgetAllocation',
         existing.id,
         beforeSnap,
-        { category: existing.category, allocatedAmount, status: existing.status },
+        {
+          category: existing.category,
+          fiscalYear: existing.fiscalYear,
+          term: existing.term,
+          allocatedAmount,
+          status: existing.status,
+        },
         ip
       );
       this.persist();
@@ -10125,11 +10517,11 @@ export class TenantStore {
     const created: BudgetAllocation = {
       id: `bdg-${randomUUID().slice(0, 8)}`,
       tenantId,
-      fiscalYear: (input.fiscalYear || '').trim() || tenant.academicYear || '2026–2027',
-      term: (input.term || '').trim() || tenant.currentTerm || 'Term 1',
-      category: input.category,
+      fiscalYear,
+      term,
+      category,
       allocatedAmount,
-      status: 'Pending Approval',
+      status: allocatedAmount > 0 ? 'Pending Approval' : 'Draft',
       createdByUserId: actor?.id || 'system',
       notes: (input.notes || '').trim() || undefined,
       updatedAt: new Date().toISOString(),
@@ -10142,7 +10534,13 @@ export class TenantStore {
       'BudgetAllocation',
       created.id,
       null,
-      { category: created.category, allocatedAmount, status: created.status },
+      {
+        category: created.category,
+        fiscalYear: created.fiscalYear,
+        term: created.term,
+        allocatedAmount,
+        status: created.status,
+      },
       ip
     );
     this.persist();
@@ -10154,12 +10552,14 @@ export class TenantStore {
     tenantId: string,
     input: {
       budgetId?: string;
-      category?: ExpenseCategory;
+      category?: string;
+      fiscalYear?: string;
+      term?: string;
       status: BudgetApprovalStatus;
       approvedBy: string;
       approvalNotes?: string;
     },
-    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>,
+    actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role' | 'allowedModules' | 'moduleAccess'>,
     ip?: string
   ): BudgetAllocation {
     const tenant = this.requireTenant(tenantId);
@@ -10169,22 +10569,36 @@ export class TenantStore {
       ? this.state.budgets.find((b) => b.tenantId === tenantId && b.id === input.budgetId)
       : undefined;
     if (!target && input.category) {
-      target = this.state.budgets.find(
-        (b) => b.tenantId === tenantId && b.category === input.category
-      );
+      const catLower = input.category.trim().toLowerCase();
+      if (input.fiscalYear || input.term) {
+        const fyLower = (input.fiscalYear || tenant.academicYear || '').trim().toLowerCase();
+        const tmLower = (input.term || tenant.currentTerm || '').trim().toLowerCase();
+        target = this.state.budgets.find(
+          (b) =>
+            b.tenantId === tenantId &&
+            b.category.trim().toLowerCase() === catLower &&
+            (b.fiscalYear || '').trim().toLowerCase() === fyLower &&
+            (b.term || '').trim().toLowerCase() === tmLower
+        );
+      }
+      if (!target) {
+        target = this.state.budgets.find(
+          (b) => b.tenantId === tenantId && b.category.trim().toLowerCase() === catLower
+        );
+      }
     }
 
     if (!target && input.category) {
-      const validCategories = new Set<string>(EXPENSE_CATEGORIES);
-      if (!validCategories.has(input.category)) {
+      const cleanCat = input.category.trim();
+      if (cleanCat.length < 2) {
         throw new ConflictError(`Invalid budget category "${input.category}".`, 400);
       }
       target = {
         id: `bdg-${randomUUID().slice(0, 8)}`,
         tenantId,
-        fiscalYear: tenant.academicYear || '2026–2027',
-        term: tenant.currentTerm || 'Term 1',
-        category: input.category,
+        fiscalYear: (input.fiscalYear || '').trim() || tenant.academicYear || '2026',
+        term: (input.term || '').trim() || tenant.currentTerm || 'Term 3',
+        category: cleanCat,
         allocatedAmount: 0,
         status: 'Draft',
         createdByUserId: actor?.id || 'system',
@@ -10207,16 +10621,30 @@ export class TenantStore {
       throw new ConflictError(`Invalid budget approval status "${String(input.status)}".`, 400);
     }
 
-    if (input.status === 'Approved') {
-      if (
-        actor &&
-        actor.role !== 'Admin' &&
-        actor.role !== 'Bursar' &&
-        actor.role !== 'Super Admin' &&
-        actor.role !== 'Developer'
-      ) {
-        throw new ConflictError('Only School Admin or a different Bursar can approve budgets.', 403);
+    const approverRoles = new Set<UserRole>([
+      'Budget Approver',
+      'Admin',
+      'Bursar',
+      'Super Admin',
+      'Developer',
+    ]);
+
+    if (input.status === 'Approved' || input.status === 'Rejected') {
+      if (actor && !approverRoles.has(actor.role)) {
+        throw new ConflictError(
+          'Only Budget Approver, School Admin, or a different Bursar can approve or reject budgets.',
+          403
+        );
       }
+      if (actor && actor.role === 'Bursar' && getModuleAccessLevel(actor, 'fees') !== 'edit') {
+        throw new ConflictError(
+          'Forbidden: Read-only access for module "fees" does not permit budget approval.',
+          403
+        );
+      }
+    }
+
+    if (input.status === 'Approved') {
       if (target.createdByUserId && actor?.id && target.createdByUserId === actor.id) {
         throw new ConflictError(
           'Maker-checker violation: the user who created or revised a budget ceiling cannot approve it.',
@@ -10239,7 +10667,7 @@ export class TenantStore {
 
     if (input.status === 'Approved' || input.status === 'Rejected') {
       target.approvedBy =
-        actor?.fullName || actor?.email || (input.approvedBy || '').trim() || 'Finance Administrator';
+        actor?.fullName || actor?.email || (input.approvedBy || '').trim() || 'Budget Approver';
       target.approvedAt = now;
     } else {
       target.approvedBy = undefined;
@@ -10262,7 +10690,7 @@ export class TenantStore {
       tenantId,
       'fee',
       `Budget ${input.status}: ${target.category}`,
-      `${target.category} ceiling (${target.allocatedAmount.toLocaleString()}) marked ${input.status} by ${target.approvedBy || 'Finance Admin'}.`,
+      `${target.category} ceiling (${target.allocatedAmount.toLocaleString()}) marked ${input.status} by ${target.approvedBy || 'Budget Approver'}.`,
       'finance'
     );
     return target;

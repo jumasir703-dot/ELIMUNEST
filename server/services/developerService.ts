@@ -19,6 +19,8 @@ import {
   type TenantPlan,
   type TenantStatus,
   type TenantUser,
+  type UserRole,
+  validatePasswordStrength,
 } from '../../src/shared/types.ts';
 import {
   createUserSessionToken,
@@ -107,7 +109,7 @@ export class PlatformDeveloperService {
     raw: DeveloperOnboardTenantPayload
   ): Promise<{
     tenant: Tenant;
-    adminUser: { fullName: string; email: string; oneTimePassword: string };
+    adminUser: { fullName: string; email: string; oneTimePassword: string; mustChangePassword: boolean };
     auditEntry: AdminAuditEntry;
   }> {
     const verified = this.assertDeveloperActor(actor);
@@ -207,7 +209,16 @@ export class PlatformDeveloperService {
       throw new ConflictError(`User email "${finalAdminEmail}" is already registered.`, 409);
     }
 
-    const oneTimePassword = generateOneTimePassword();
+    const customAdminPassword =
+      typeof raw.adminPassword === 'string' ? raw.adminPassword.trim() : '';
+    if (customAdminPassword) {
+      const pwErr = validatePasswordStrength(customAdminPassword);
+      if (pwErr) {
+        throw new ConflictError(pwErr, 400);
+      }
+    }
+    const oneTimePassword = customAdminPassword || generateOneTimePassword();
+    const requireFirstLoginChange = !customAdminPassword;
 
     const tenant = this.store.createTenant({
       name,
@@ -244,7 +255,7 @@ export class PlatformDeveloperService {
       adminFullName,
       finalAdminEmail,
       oneTimePassword,
-      true,
+      requireFirstLoginChange,
       raw.adminPhone?.trim() || raw.contactPhone?.trim()
     );
 
@@ -253,7 +264,9 @@ export class PlatformDeveloperService {
       'PROVISION_TENANT',
       tenant.id,
       tenant.name,
-      `Developer provisioned ${tenant.name} (@${emailDomain}) on ${plan} tier (cap: ${learnerCap} learners). One-time admin password generated for ${finalAdminEmail} (password change required on first login).`
+      `Developer provisioned ${tenant.name} (@${emailDomain}) on ${plan} tier (cap: ${learnerCap} learners). Admin account created for ${finalAdminEmail} (${
+        requireFirstLoginChange ? 'one-time password — change required on first login' : 'custom initial password set'
+      }).`
     );
 
     return {
@@ -262,9 +275,89 @@ export class PlatformDeveloperService {
         fullName: adminFullName,
         email: finalAdminEmail,
         oneTimePassword: provisionedAdmin.oneTimePassword,
+        mustChangePassword: requireFirstLoginChange,
       },
       auditEntry,
     };
+  }
+
+  listTenantAccounts(actor: TenantUser, tenantId: string): { tenant: Tenant; users: TenantUser[] } {
+    this.assertDeveloperActor(actor);
+    const tenant = this.store.getTenantById(tenantId);
+    const users = this.store.listUsersForTenant(tenant.id);
+    return { tenant, users };
+  }
+
+  async createTenantAccount(
+    actor: TenantUser,
+    tenantId: string,
+    payload: {
+      fullName: string;
+      email: string;
+      phone?: string;
+      role: UserRole;
+      password?: string;
+      requirePasswordChange?: boolean;
+    }
+  ): Promise<{ user: TenantUser; oneTimePassword: string; auditEntry: AdminAuditEntry }> {
+    const verified = this.assertDeveloperActor(actor);
+    const tenant = this.store.getTenantById(tenantId);
+    const created = await this.store.createTenantStaffUser(verified, tenant.id, payload);
+    const auditEntry = this.recordAudit(
+      verified,
+      'MANAGE_TENANT_ACCOUNT',
+      tenant.id,
+      tenant.name,
+      `Created ${created.user.role} account ${created.user.email} for ${tenant.name}.`
+    );
+    return { ...created, auditEntry };
+  }
+
+  async resetTenantAccountPassword(
+    actor: TenantUser,
+    tenantId: string,
+    userId: string,
+    payload: { newPassword?: string; requirePasswordChange?: boolean } = {}
+  ): Promise<{ user: TenantUser; oneTimePassword: string; auditEntry: AdminAuditEntry }> {
+    const verified = this.assertDeveloperActor(actor);
+    const tenant = this.store.getTenantById(tenantId);
+    const customPassword = typeof payload.newPassword === 'string' ? payload.newPassword.trim() : '';
+    const updated = await this.store.updateTenantUserAccess(verified, tenant.id, userId, {
+      resetOneTimePassword: !customPassword,
+      newPassword: customPassword || undefined,
+      requirePasswordChange: customPassword ? payload.requirePasswordChange === true : true,
+    });
+    const auditEntry = this.recordAudit(
+      verified,
+      'MANAGE_TENANT_ACCOUNT',
+      tenant.id,
+      tenant.name,
+      `Reset password for ${updated.user.fullName} (${updated.user.email}, ${updated.user.role}) at ${tenant.name}.`
+    );
+    return {
+      user: updated.user,
+      oneTimePassword: updated.oneTimePassword || '',
+      auditEntry,
+    };
+  }
+
+  async updateTenantAccountStatus(
+    actor: TenantUser,
+    tenantId: string,
+    userId: string,
+    status: 'Active' | 'Disabled'
+  ): Promise<{ user: TenantUser; auditEntry: AdminAuditEntry }> {
+    const verified = this.assertDeveloperActor(actor);
+    const tenant = this.store.getTenantById(tenantId);
+    const updated = await this.store.updateTenantUserAccess(verified, tenant.id, userId, { status });
+    const auditEntry = this.recordAudit(
+      verified,
+      'MANAGE_TENANT_ACCOUNT',
+      tenant.id,
+      tenant.name,
+      `Set account status for ${updated.user.email} at ${tenant.name} to ${status}.`
+    );
+    return { user: updated.user, auditEntry };
   }
 
   updateSubscriptionLifecycle(

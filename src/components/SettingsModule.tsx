@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Building2,
   Calendar,
@@ -9,8 +9,11 @@ import {
   KeyRound,
   Lock,
   LockOpen,
+  Pencil,
   Plus,
   ShieldCheck,
+  SlidersHorizontal,
+  Trash2,
   UserPlus,
   Users,
   X,
@@ -18,13 +21,14 @@ import {
 import { saasApi } from '../lib/api';
 import {
   ALL_TENANT_MODULES,
-  DEFAULT_ROLE_MODULES,
+  getDefaultModulesForTenantRole,
   getEffectiveUserModules,
   KENYAN_CBC_GRADES,
   KENYAN_CBC_SUBJECTS,
   suggestNameEmailLocalPart,
   type AcademicTerm,
   type CurrencyCode,
+  type CustomRoleDefinition,
   type TenantModulePermission,
   type TenantUser,
   type TenantWorkspaceData,
@@ -49,6 +53,27 @@ const STAFF_ROLE_OPTIONS: UserRole[] = [
   'Parent',
 ];
 
+const CUSTOMIZABLE_BUILTIN_ROLES: UserRole[] = [
+  'Admin',
+  'Registrar',
+  'Teacher',
+  'Bursar',
+  'Parent',
+  'Super Admin',
+];
+
+function inferSuggestedRoleForNonTeaching(designation: string): UserRole {
+  const norm = designation.toLowerCase();
+  if (/(bursar|account|finance|cashier|treasurer)/i.test(norm)) return 'Bursar';
+  if (/(principal|head|director|admin|deputy)/i.test(norm)) return 'Admin';
+  if (/(registrar|secretary|admission|clerk|front office)/i.test(norm)) return 'Registrar';
+  return 'Registrar';
+}
+
+function encodeRoleChoice(role: UserRole, customRoleId?: string): string {
+  return customRoleId ? `custom:${customRoleId}` : role;
+}
+
 export function SettingsModule({
   workspace,
   currentRole,
@@ -63,31 +88,56 @@ export function SettingsModule({
   const isDeveloper = currentRole === 'Developer';
   const domainSuffix = tenant.emailDomain || `${tenant.slug}.ac.ke`;
 
+  const customRoles: CustomRoleDefinition[] = useMemo(
+    () => tenant.customRoles || [],
+    [tenant.customRoles]
+  );
+
   const [tenantUsers, setTenantUsers] = useState<TenantUser[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [showAddStaff, setShowAddStaff] = useState(false);
+  const [selectedStaffKey, setSelectedStaffKey] = useState<string>('__manual__');
   const [staffFullName, setStaffFullName] = useState('');
   const [staffEmailHandle, setStaffEmailHandle] = useState('');
   const [staffHandleEdited, setStaffHandleEdited] = useState(false);
   const [staffPhone, setStaffPhone] = useState('');
   const [staffRole, setStaffRole] = useState<UserRole>('Teacher');
-  const [staffModules, setStaffModules] = useState<TenantModulePermission[]>(
-    DEFAULT_ROLE_MODULES.Teacher
+  const [staffCustomRoleId, setStaffCustomRoleId] = useState<string>('');
+  const [staffModules, setStaffModules] = useState<TenantModulePermission[]>(() =>
+    getDefaultModulesForTenantRole(tenant, 'Teacher')
   );
   const [creatingStaff, setCreatingStaff] = useState(false);
   const [issuedStaffOtp, setIssuedStaffOtp] = useState<{
     fullName: string;
     email: string;
-    role: UserRole;
+    role: string;
     oneTimePassword: string;
   } | null>(null);
   const [copiedStaffOtp, setCopiedStaffOtp] = useState(false);
 
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editRole, setEditRole] = useState<UserRole>('Teacher');
+  const [editCustomRoleId, setEditCustomRoleId] = useState<string>('');
   const [editModules, setEditModules] = useState<TenantModulePermission[]>([]);
   const [editStatus, setEditStatus] = useState<'Active' | 'Disabled'>('Active');
   const [savingUserAccess, setSavingUserAccess] = useState(false);
+
+  // Role & Permissions customization panel state
+  const [showManageRoles, setShowManageRoles] = useState(false);
+  const [roleEditorMode, setRoleEditorMode] = useState<'custom' | 'builtin'>('custom');
+  const [editingCustomRoleId, setEditingCustomRoleId] = useState<string | null>(null);
+  const [customRoleName, setCustomRoleName] = useState('');
+  const [customRoleBase, setCustomRoleBase] = useState<UserRole>('Teacher');
+  const [customRoleDesc, setCustomRoleDesc] = useState('');
+  const [customRoleModules, setCustomRoleModules] = useState<TenantModulePermission[]>(() =>
+    getDefaultModulesForTenantRole(tenant, 'Teacher')
+  );
+  const [syncRoleToExisting, setSyncRoleToExisting] = useState(true);
+  const [builtInTargetRole, setBuiltInTargetRole] = useState<UserRole>('Teacher');
+  const [builtInModulesDraft, setBuiltInModulesDraft] = useState<TenantModulePermission[]>(() =>
+    getDefaultModulesForTenantRole(tenant, 'Teacher')
+  );
+  const [savingRoleConfig, setSavingRoleConfig] = useState(false);
 
   const [tenantForm, setTenantForm] = useState({
     name: tenant.name,
@@ -117,11 +167,84 @@ export function SettingsModule({
     });
   }, [tenant]);
 
+  const staffDirectory = useMemo(() => {
+    const provisionedEmails = new Set(tenantUsers.map((u) => u.email.trim().toLowerCase()));
+    const provisionedNames = new Set(tenantUsers.map((u) => u.fullName.trim().toLowerCase()));
+    const teaching = (tenant.teachers || []).map((t) => {
+      const email = (t.email || '').trim();
+      const hasAccount =
+        (email && provisionedEmails.has(email.toLowerCase())) ||
+        provisionedNames.has(t.name.trim().toLowerCase());
+      return {
+        key: `teacher:${t.id}`,
+        category: 'Teaching' as const,
+        id: t.id,
+        name: t.name,
+        email,
+        phone: t.phone || '',
+        designation: t.department ? `Teaching · ${t.department}` : 'Teaching Staff',
+        suggestedRole: 'Teacher' as UserRole,
+        hasAccount,
+      };
+    });
+    const nonTeaching = (tenant.nonTeachingStaff || []).map((n) => {
+      const email = (n.email || '').trim();
+      const hasAccount =
+        (email && provisionedEmails.has(email.toLowerCase())) ||
+        provisionedNames.has(n.name.trim().toLowerCase());
+      return {
+        key: `nonteaching:${n.id}`,
+        category: 'Non-Teaching' as const,
+        id: n.id,
+        name: n.name,
+        email,
+        phone: n.phone || '',
+        designation: n.role || n.department || 'Support Staff',
+        suggestedRole: inferSuggestedRoleForNonTeaching(n.role || n.department || ''),
+        hasAccount,
+      };
+    });
+    return { teaching, nonTeaching, all: [...teaching, ...nonTeaching] };
+  }, [tenant.teachers, tenant.nonTeachingStaff, tenantUsers]);
+
+  const applyStaffDirectorySelection = useCallback(
+    (key: string) => {
+      setSelectedStaffKey(key);
+      if (key === '__manual__') {
+        setStaffFullName('');
+        setStaffEmailHandle('');
+        setStaffHandleEdited(false);
+        setStaffPhone('');
+        return;
+      }
+      const member = staffDirectory.all.find((m) => m.key === key);
+      if (!member) return;
+      setStaffFullName(member.name);
+      setStaffPhone(member.phone || '');
+      setStaffHandleEdited(false);
+      const expectedSuffix = `@${domainSuffix.toLowerCase()}`;
+      const memberEmail = member.email.toLowerCase();
+      if (memberEmail && memberEmail.endsWith(expectedSuffix)) {
+        setStaffEmailHandle(memberEmail.slice(0, memberEmail.length - expectedSuffix.length));
+      } else {
+        setStaffEmailHandle(suggestNameEmailLocalPart(member.name));
+      }
+      setStaffRole(member.suggestedRole);
+      setStaffCustomRoleId('');
+      setStaffModules(getDefaultModulesForTenantRole(tenant, member.suggestedRole));
+    },
+    [staffDirectory.all, domainSuffix, tenant]
+  );
+
   useEffect(() => {
-    if (!staffHandleEdited) {
+    if (selectedStaffKey === '__manual__' && !staffHandleEdited) {
       setStaffEmailHandle(suggestNameEmailLocalPart(staffFullName));
     }
-  }, [staffFullName, staffHandleEdited]);
+  }, [selectedStaffKey, staffFullName, staffHandleEdited]);
+
+  useEffect(() => {
+    setBuiltInModulesDraft(getDefaultModulesForTenantRole(tenant, builtInTargetRole));
+  }, [tenant, builtInTargetRole]);
 
   const loadTenantUsers = useCallback(async () => {
     if (!canMutateTenant) return;
@@ -281,8 +404,51 @@ export function SettingsModule({
     }
   }
 
+  function resolveRoleChoice(value: string): {
+    role: UserRole;
+    customRoleId: string;
+    modules: TenantModulePermission[];
+  } {
+    if (value.startsWith('custom:')) {
+      const id = value.slice('custom:'.length);
+      const found = customRoles.find((r) => r.id === id);
+      if (found) {
+        return {
+          role: found.baseRole,
+          customRoleId: found.id,
+          modules: getDefaultModulesForTenantRole(tenant, found.baseRole, found.id),
+        };
+      }
+    }
+    const role = value as UserRole;
+    return {
+      role,
+      customRoleId: '',
+      modules: getDefaultModulesForTenantRole(tenant, role),
+    };
+  }
+
+  function handleOpenAddStaff() {
+    if (showAddStaff) {
+      setShowAddStaff(false);
+      return;
+    }
+    const firstUnprovisioned =
+      staffDirectory.all.find((m) => !m.hasAccount) || staffDirectory.all[0];
+    if (firstUnprovisioned) {
+      applyStaffDirectorySelection(firstUnprovisioned.key);
+    } else {
+      applyStaffDirectorySelection('__manual__');
+    }
+    setShowAddStaff(true);
+  }
+
   async function handleCreateStaffUser(e: React.FormEvent) {
     e.preventDefault();
+    if (!staffFullName.trim()) {
+      onNotify('Select a staff member or enter their full name.', 'error');
+      return;
+    }
     setCreatingStaff(true);
     setCopiedStaffOtp(false);
     try {
@@ -292,20 +458,23 @@ export function SettingsModule({
         email: `${local}@${domainSuffix}`,
         phone: staffPhone.trim() || undefined,
         role: staffRole,
+        customRoleId: staffCustomRoleId || undefined,
         allowedModules: staffModules,
       });
       setIssuedStaffOtp({
         fullName: res.user.fullName,
         email: res.user.email,
-        role: res.user.role,
+        role: res.user.roleLabel || res.user.role,
         oneTimePassword: res.oneTimePassword,
       });
       setStaffFullName('');
       setStaffEmailHandle('');
       setStaffHandleEdited(false);
       setStaffPhone('');
+      setSelectedStaffKey('__manual__');
       setStaffRole('Teacher');
-      setStaffModules(DEFAULT_ROLE_MODULES.Teacher);
+      setStaffCustomRoleId('');
+      setStaffModules(getDefaultModulesForTenantRole(tenant, 'Teacher'));
       setShowAddStaff(false);
       await loadTenantUsers();
       onNotify(`Added ${res.user.fullName} with 1-time password.`);
@@ -323,6 +492,7 @@ export function SettingsModule({
     }
     setEditingUserId(u.id);
     setEditRole(u.role);
+    setEditCustomRoleId(u.customRoleId || '');
     setEditModules(getEffectiveUserModules(u));
     setEditStatus(u.status);
   }
@@ -333,6 +503,7 @@ export function SettingsModule({
     try {
       const res = await saasApi.updateTenantUserAccess(tenant.id, targetUser.id, {
         role: editRole,
+        customRoleId: editCustomRoleId || undefined,
         allowedModules: editModules,
         status: editStatus,
         resetOneTimePassword: resetOtp,
@@ -341,7 +512,7 @@ export function SettingsModule({
         setIssuedStaffOtp({
           fullName: res.user.fullName,
           email: res.user.email,
-          role: res.user.role,
+          role: res.user.roleLabel || res.user.role,
           oneTimePassword: res.oneTimePassword,
         });
       }
@@ -358,6 +529,93 @@ export function SettingsModule({
       onNotify(err instanceof Error ? err.message : 'Unable to update access rights.', 'error');
     } finally {
       setSavingUserAccess(false);
+    }
+  }
+
+  function startNewCustomRole() {
+    setRoleEditorMode('custom');
+    setEditingCustomRoleId(null);
+    setCustomRoleName('');
+    setCustomRoleBase('Teacher');
+    setCustomRoleDesc('');
+    setCustomRoleModules(getDefaultModulesForTenantRole(tenant, 'Teacher'));
+    setSyncRoleToExisting(true);
+  }
+
+  function startEditCustomRole(cr: CustomRoleDefinition) {
+    setRoleEditorMode('custom');
+    setEditingCustomRoleId(cr.id);
+    setCustomRoleName(cr.name);
+    setCustomRoleBase(cr.baseRole);
+    setCustomRoleDesc(cr.description || '');
+    setCustomRoleModules([...cr.defaultModules]);
+    setSyncRoleToExisting(true);
+  }
+
+  async function handleSaveCustomRole(e: React.FormEvent) {
+    e.preventDefault();
+    if (!customRoleName.trim()) {
+      onNotify('Enter a role name.', 'error');
+      return;
+    }
+    setSavingRoleConfig(true);
+    try {
+      const res = await saasApi.upsertCustomRole(tenant.id, {
+        id: editingCustomRoleId || undefined,
+        name: customRoleName.trim(),
+        baseRole: customRoleBase,
+        defaultModules: customRoleModules,
+        description: customRoleDesc.trim() || undefined,
+        syncExistingUsers: syncRoleToExisting,
+      });
+      await onRefresh();
+      await loadTenantUsers();
+      onNotify(
+        editingCustomRoleId
+          ? `Updated custom role "${res.customRole.name}"${res.updatedUsersCount > 0 ? ` (synced ${res.updatedUsersCount} account(s))` : ''}.`
+          : `Created custom role "${res.customRole.name}".`
+      );
+      startNewCustomRole();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to save custom role.', 'error');
+    } finally {
+      setSavingRoleConfig(false);
+    }
+  }
+
+  async function handleDeleteCustomRole(cr: CustomRoleDefinition) {
+    setSavingRoleConfig(true);
+    try {
+      await saasApi.deleteCustomRole(tenant.id, cr.id);
+      await onRefresh();
+      if (editingCustomRoleId === cr.id) {
+        startNewCustomRole();
+      }
+      onNotify(`Deleted custom role "${cr.name}".`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to delete custom role.', 'error');
+    } finally {
+      setSavingRoleConfig(false);
+    }
+  }
+
+  async function handleSaveBuiltInRoleModules(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingRoleConfig(true);
+    try {
+      const res = await saasApi.updateBuiltInRoleModules(tenant.id, builtInTargetRole, {
+        defaultModules: builtInModulesDraft,
+        syncExistingUsers: syncRoleToExisting,
+      });
+      await onRefresh();
+      await loadTenantUsers();
+      onNotify(
+        `Saved ${builtInTargetRole} role permissions${res.updatedUsersCount > 0 ? ` (synced ${res.updatedUsersCount} account(s))` : ''}.`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to save built-in role.', 'error');
+    } finally {
+      setSavingRoleConfig(false);
     }
   }
 
@@ -715,25 +973,327 @@ export function SettingsModule({
                   Staff Accounts & Access Rights
                 </h2>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
                   @{domainSuffix}
                 </span>
                 {canMutateTenant && (
-                  <button
-                    type="button"
-                    onClick={() => setShowAddStaff((v) => !v)}
-                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
-                  >
-                    <UserPlus className="h-3.5 w-3.5" />
-                    {showAddStaff ? 'Cancel' : 'Add Staff'}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowManageRoles((v) => !v)}
+                      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        showManageRoles
+                          ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500 dark:bg-blue-950/40 dark:text-blue-300'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      <SlidersHorizontal className="h-3.5 w-3.5" />
+                      {showManageRoles ? 'Close Roles' : `Manage Roles (${customRoles.length})`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOpenAddStaff}
+                      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                    >
+                      <UserPlus className="h-3.5 w-3.5" />
+                      {showAddStaff ? 'Cancel' : 'Add Staff'}
+                    </button>
+                  </>
                 )}
               </div>
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Assign roles and control which modules each staff member can access at {tenant.name}.
+              Select staff from your school directory, create or customize roles, and control module access at {tenant.name}.
             </p>
+
+            {canMutateTenant && showManageRoles && (
+              <div className="mt-4 space-y-4 rounded-lg border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/60">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Roles &amp; Access Templates
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Create custom school roles (e.g. Deputy Principal, Senior Accountant, Librarian) or customize built-in role permissions.
+                    </p>
+                  </div>
+                  <div className="inline-flex rounded-lg bg-slate-200/70 p-0.5 dark:bg-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => setRoleEditorMode('custom')}
+                      className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                        roleEditorMode === 'custom'
+                          ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-slate-100'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      Custom Roles ({customRoles.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRoleEditorMode('builtin')}
+                      className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                        roleEditorMode === 'builtin'
+                          ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-slate-100'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      Customize Built-in Roles
+                    </button>
+                  </div>
+                </div>
+
+                {roleEditorMode === 'custom' ? (
+                  <div className="space-y-4">
+                    {customRoles.length > 0 && (
+                      <div className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
+                        {customRoles.map((cr) => (
+                          <div
+                            key={cr.id}
+                            className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                  {cr.name}
+                                </span>
+                                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                  Tier: {cr.baseRole}
+                                </span>
+                              </div>
+                              {cr.description && (
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  {cr.description}
+                                </p>
+                              )}
+                              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                Modules:{' '}
+                                {cr.defaultModules
+                                  .map(
+                                    (id) => ALL_TENANT_MODULES.find((m) => m.id === id)?.label || id
+                                  )
+                                  .join(', ')}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => startEditCustomRole(cr)}
+                                className="inline-flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                              >
+                                <Pencil className="h-3 w-3" />
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                disabled={savingRoleConfig}
+                                onClick={() => handleDeleteCustomRole(cr)}
+                                className="inline-flex items-center gap-1 rounded border border-rose-200 px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-800 dark:text-rose-400 dark:hover:bg-rose-950/40"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <form onSubmit={handleSaveCustomRole} className="space-y-3 border-t border-slate-200 pt-3 dark:border-slate-800">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                          {editingCustomRoleId ? 'Edit Custom Role' : 'Create New Custom Role'}
+                        </span>
+                        {editingCustomRoleId && (
+                          <button
+                            type="button"
+                            onClick={startNewCustomRole}
+                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            + New Role Instead
+                          </button>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                            Role Name *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={customRoleName}
+                            onChange={(e) => setCustomRoleName(e.target.value)}
+                            placeholder="e.g. Deputy Principal, Lab Technician, Matron"
+                            className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                            Base Capability Tier
+                          </label>
+                          <select
+                            value={customRoleBase}
+                            onChange={(e) => {
+                              const nextBase = e.target.value as UserRole;
+                              setCustomRoleBase(nextBase);
+                              if (!editingCustomRoleId) {
+                                setCustomRoleModules(
+                                  getDefaultModulesForTenantRole(tenant, nextBase)
+                                );
+                              } else if (nextBase === 'Admin' && !customRoleModules.includes('settings')) {
+                                setCustomRoleModules([...customRoleModules, 'settings']);
+                              }
+                            }}
+                            className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                          >
+                            {CUSTOMIZABLE_BUILTIN_ROLES.map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                          Role Description (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={customRoleDesc}
+                          onChange={(e) => setCustomRoleDesc(e.target.value)}
+                          placeholder="e.g. Handles discipline, timetables, and attendance oversight"
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <span className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                          Default Module Permissions
+                        </span>
+                        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                          {ALL_TENANT_MODULES.map((mod) => {
+                            const checked = customRoleModules.includes(mod.id);
+                            const locked = customRoleBase === 'Admin' && mod.id === 'settings';
+                            return (
+                              <label
+                                key={mod.id}
+                                className="flex cursor-pointer items-center gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={locked}
+                                  onChange={() =>
+                                    setCustomRoleModules((prev) =>
+                                      toggleModuleSelection(prev, mod.id, customRoleBase)
+                                    )
+                                  }
+                                  className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                                />
+                                <span className="truncate">{mod.label}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={syncRoleToExisting}
+                            onChange={(e) => setSyncRoleToExisting(e.target.checked)}
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                          />
+                          <span>Apply updated modules to existing accounts with this role</span>
+                        </label>
+                        <button
+                          type="submit"
+                          disabled={savingRoleConfig}
+                          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          {savingRoleConfig
+                            ? 'Saving...'
+                            : editingCustomRoleId
+                            ? 'Update Custom Role'
+                            : 'Create Custom Role'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                ) : (
+                  <form onSubmit={handleSaveBuiltInRoleModules} className="space-y-3 border-t border-slate-200 pt-3 dark:border-slate-800">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                        Built-in Role to Customize
+                      </label>
+                      <select
+                        value={builtInTargetRole}
+                        onChange={(e) => setBuiltInTargetRole(e.target.value as UserRole)}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                      >
+                        {CUSTOMIZABLE_BUILTIN_ROLES.map((r) => (
+                          <option key={r} value={r}>
+                            {r}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <span className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                        Module Permissions for {builtInTargetRole}
+                      </span>
+                      <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                        {ALL_TENANT_MODULES.map((mod) => {
+                          const checked = builtInModulesDraft.includes(mod.id);
+                          const locked = builtInTargetRole === 'Admin' && mod.id === 'settings';
+                          return (
+                            <label
+                              key={mod.id}
+                              className="flex cursor-pointer items-center gap-2 rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={locked}
+                                onChange={() =>
+                                  setBuiltInModulesDraft((prev) =>
+                                    toggleModuleSelection(prev, mod.id, builtInTargetRole)
+                                  )
+                                }
+                                className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                              />
+                              <span className="truncate">{mod.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={syncRoleToExisting}
+                          onChange={(e) => setSyncRoleToExisting(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                        />
+                        <span>Sync permissions to existing {builtInTargetRole} accounts</span>
+                      </label>
+                      <button
+                        type="submit"
+                        disabled={savingRoleConfig}
+                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        {savingRoleConfig ? 'Saving...' : `Save ${builtInTargetRole} Permissions`}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            )}
 
             {issuedStaffOtp && (
               <div className="mt-4 rounded-lg border border-emerald-300 bg-emerald-50/70 p-3.5 text-xs dark:border-emerald-800 dark:bg-emerald-950/30">
@@ -783,35 +1343,76 @@ export function SettingsModule({
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                      Staff Full Name
+                      Staff Member ({staffDirectory.all.length} in directory)
                     </label>
-                    <input
-                      type="text"
-                      required
-                      value={staffFullName}
-                      onChange={(e) => setStaffFullName(e.target.value)}
-                      placeholder="e.g. Jane Wanjiku"
+                    <select
+                      value={selectedStaffKey}
+                      onChange={(e) => applyStaffDirectorySelection(e.target.value)}
                       className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                    />
+                    >
+                      {staffDirectory.teaching.length > 0 && (
+                        <optgroup label={`Teaching Staff (${staffDirectory.teaching.length})`}>
+                          {staffDirectory.teaching.map((m) => (
+                            <option key={m.key} value={m.key}>
+                              {m.name} — {m.designation}
+                              {m.hasAccount ? ' (Account Exists)' : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {staffDirectory.nonTeaching.length > 0 && (
+                        <optgroup label={`Non-Teaching / Support Staff (${staffDirectory.nonTeaching.length})`}>
+                          {staffDirectory.nonTeaching.map((m) => (
+                            <option key={m.key} value={m.key}>
+                              {m.name} — {m.designation}
+                              {m.hasAccount ? ' (Account Exists)' : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      <option value="__manual__">Other / Enter Person Manually...</option>
+                    </select>
+                    {selectedStaffKey === '__manual__' && (
+                      <input
+                        type="text"
+                        required
+                        value={staffFullName}
+                        onChange={(e) => setStaffFullName(e.target.value)}
+                        placeholder="e.g. Jane Wanjiku"
+                        className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                      />
+                    )}
                   </div>
                   <div>
                     <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
                       Staff Role
                     </label>
                     <select
-                      value={staffRole}
+                      value={encodeRoleChoice(staffRole, staffCustomRoleId)}
                       onChange={(e) => {
-                        const nextRole = e.target.value as UserRole;
-                        setStaffRole(nextRole);
-                        setStaffModules([...(DEFAULT_ROLE_MODULES[nextRole] || ['analytics'])]);
+                        const resolved = resolveRoleChoice(e.target.value);
+                        setStaffRole(resolved.role);
+                        setStaffCustomRoleId(resolved.customRoleId);
+                        setStaffModules(resolved.modules);
                       }}
                       className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                     >
-                      {STAFF_ROLE_OPTIONS.map((r) => (
-                        <option key={r} value={r}>
-                          {r}
-                        </option>
-                      ))}
+                      <optgroup label="Built-in Roles">
+                        {STAFF_ROLE_OPTIONS.map((r) => (
+                          <option key={r} value={r}>
+                            {r}
+                          </option>
+                        ))}
+                      </optgroup>
+                      {customRoles.length > 0 && (
+                        <optgroup label="Custom Roles">
+                          {customRoles.map((cr) => (
+                            <option key={cr.id} value={`custom:${cr.id}`}>
+                              {cr.name} ({cr.baseRole})
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   </div>
                 </div>
@@ -928,7 +1529,7 @@ export function SettingsModule({
                               {u.fullName}
                             </p>
                             <span className="font-mono text-[11px] font-semibold text-blue-600 dark:text-blue-400">
-                              {u.role}
+                              {u.roleLabel || u.role}
                             </span>
                             {u.status === 'Disabled' && (
                               <span className="font-mono text-[11px] font-semibold text-red-600 dark:text-red-400">
@@ -975,19 +1576,32 @@ export function SettingsModule({
                                 Assigned Role
                               </label>
                               <select
-                                value={editRole}
+                                value={encodeRoleChoice(editRole, editCustomRoleId)}
                                 disabled={isSelf}
                                 onChange={(e) => {
-                                  const nextRole = e.target.value as UserRole;
-                                  setEditRole(nextRole);
+                                  const resolved = resolveRoleChoice(e.target.value);
+                                  setEditRole(resolved.role);
+                                  setEditCustomRoleId(resolved.customRoleId);
+                                  setEditModules(resolved.modules);
                                 }}
                                 className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                               >
-                                {STAFF_ROLE_OPTIONS.map((r) => (
-                                  <option key={r} value={r}>
-                                    {r}
-                                  </option>
-                                ))}
+                                <optgroup label="Built-in Roles">
+                                  {STAFF_ROLE_OPTIONS.map((r) => (
+                                    <option key={r} value={r}>
+                                      {r}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                                {customRoles.length > 0 && (
+                                  <optgroup label="Custom Roles">
+                                    {customRoles.map((cr) => (
+                                      <option key={cr.id} value={`custom:${cr.id}`}>
+                                        {cr.name} ({cr.baseRole})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
                               </select>
                             </div>
                             <div>
@@ -1016,11 +1630,21 @@ export function SettingsModule({
                               <button
                                 type="button"
                                 onClick={() =>
-                                  setEditModules([...(DEFAULT_ROLE_MODULES[editRole] || ['analytics'])])
+                                  setEditModules(
+                                    getDefaultModulesForTenantRole(
+                                      tenant,
+                                      editRole,
+                                      editCustomRoleId || undefined
+                                    )
+                                  )
                                 }
                                 className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
                               >
-                                Apply {editRole} Defaults
+                                Apply{' '}
+                                {editCustomRoleId
+                                  ? customRoles.find((c) => c.id === editCustomRoleId)?.name || editRole
+                                  : editRole}{' '}
+                                Defaults
                               </button>
                             </div>
                             <div className="mt-1.5 grid grid-cols-2 gap-1.5">

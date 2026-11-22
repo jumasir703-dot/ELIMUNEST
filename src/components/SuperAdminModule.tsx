@@ -80,6 +80,8 @@ const AUDIT_ACTION_BADGES: Record<AdminAuditAction, string> = {
     'border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/60 dark:bg-indigo-950/40 dark:text-indigo-300',
   UPDATE_STATUTORY_RATES:
     'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300',
+  MANAGE_TENANT_ACCOUNT:
+    'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300',
 };
 
 const STATUS_BADGE_STYLES: Record<TenantStatus, string> = {

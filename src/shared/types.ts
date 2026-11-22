@@ -412,6 +412,7 @@ export type UserRole =
   | 'Registrar'
   | 'Teacher'
   | 'Bursar'
+  | 'Budget Approver'
   | 'Parent'
   | 'Student';
 
@@ -424,6 +425,9 @@ export type TenantModulePermission =
   | 'fees'
   | 'communications'
   | 'settings';
+
+export type ModuleAccessLevel = 'none' | 'read' | 'edit';
+export type TenantModuleAccessMap = Partial<Record<TenantModulePermission, 'read' | 'edit'>>;
 
 export const ALL_TENANT_MODULES: Array<{
   id: TenantModulePermission;
@@ -440,6 +444,7 @@ export const ALL_TENANT_MODULES: Array<{
 ];
 
 const ALL_MODULE_IDS: TenantModulePermission[] = ALL_TENANT_MODULES.map((m) => m.id);
+const ALL_MODULE_SET = new Set<TenantModulePermission>(ALL_MODULE_IDS);
 
 export const DEFAULT_ROLE_MODULES: Record<UserRole, TenantModulePermission[]> = {
   Developer: [...ALL_MODULE_IDS],
@@ -448,26 +453,199 @@ export const DEFAULT_ROLE_MODULES: Record<UserRole, TenantModulePermission[]> = 
   Registrar: ['analytics', 'admissions', 'attendance', 'communications'],
   Teacher: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
   Bursar: ['analytics', 'fees', 'communications'],
+  'Budget Approver': ['analytics', 'fees', 'communications'],
   Parent: ['analytics', 'exams', 'fees', 'communications'],
   Student: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
 };
 
+export const DEFAULT_ROLE_MODULE_ACCESS: Record<UserRole, TenantModuleAccessMap> = {
+  Developer: Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap,
+  'Super Admin': Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap,
+  Admin: Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap,
+  Registrar: { analytics: 'read', admissions: 'edit', attendance: 'edit', communications: 'edit' },
+  Teacher: {
+    analytics: 'read',
+    timetable: 'edit',
+    attendance: 'edit',
+    exams: 'edit',
+    communications: 'edit',
+  },
+  Bursar: { analytics: 'read', fees: 'edit', communications: 'edit' },
+  'Budget Approver': { analytics: 'read', fees: 'read', communications: 'read' },
+  Parent: { analytics: 'read', exams: 'read', fees: 'read', communications: 'read' },
+  Student: {
+    analytics: 'read',
+    timetable: 'read',
+    attendance: 'read',
+    exams: 'read',
+    communications: 'read',
+  },
+};
+
+export interface CustomRoleDefinition {
+  id: string;
+  name: string;
+  baseRole: UserRole;
+  defaultModules: TenantModulePermission[];
+  defaultModuleAccess?: TenantModuleAccessMap;
+  description?: string;
+}
+
+export function normalizeModuleAccessMap(
+  role: UserRole,
+  rawAccess?: unknown,
+  fallbackModules?: TenantModulePermission[]
+): TenantModuleAccessMap {
+  if (role === 'Developer' || role === 'Super Admin') {
+    return Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap;
+  }
+
+  const defaults = DEFAULT_ROLE_MODULE_ACCESS[role] || { analytics: 'read' as const };
+  const result: TenantModuleAccessMap = {};
+
+  if (rawAccess && typeof rawAccess === 'object' && !Array.isArray(rawAccess)) {
+    for (const modId of ALL_MODULE_IDS) {
+      const level = (rawAccess as Record<string, unknown>)[modId];
+      if (level === 'read' || level === 'edit') {
+        result[modId] = role === 'Parent' || role === 'Student' ? 'read' : level;
+      }
+    }
+  } else if (Array.isArray(fallbackModules)) {
+    for (const modId of fallbackModules) {
+      if (!ALL_MODULE_SET.has(modId)) continue;
+      if (role === 'Parent' || role === 'Student') {
+        result[modId] = 'read';
+      } else {
+        result[modId] = defaults[modId] || 'edit';
+      }
+    }
+  } else {
+    for (const modId of ALL_MODULE_IDS) {
+      const lvl = defaults[modId];
+      if (lvl === 'read' || lvl === 'edit') {
+        result[modId] = lvl;
+      }
+    }
+  }
+
+  if (role === 'Admin') {
+    result.settings = 'edit';
+  }
+  return result;
+}
+
+export function getDefaultModuleAccessForTenantRole(
+  tenant:
+    | Pick<Tenant, 'customRoles' | 'roleModuleOverrides' | 'roleModuleAccessOverrides'>
+    | undefined
+    | null,
+  role: UserRole,
+  customRoleId?: string
+): TenantModuleAccessMap {
+  if (customRoleId && tenant?.customRoles) {
+    const custom = tenant.customRoles.find((r) => r.id === customRoleId);
+    if (custom) {
+      return normalizeModuleAccessMap(
+        custom.baseRole,
+        custom.defaultModuleAccess,
+        custom.defaultModules
+      );
+    }
+  }
+  const accessOverride = tenant?.roleModuleAccessOverrides?.[role];
+  if (accessOverride && typeof accessOverride === 'object') {
+    return normalizeModuleAccessMap(role, accessOverride);
+  }
+  const moduleOverride = tenant?.roleModuleOverrides?.[role];
+  if (Array.isArray(moduleOverride)) {
+    return normalizeModuleAccessMap(role, undefined, moduleOverride);
+  }
+  return normalizeModuleAccessMap(role);
+}
+
+export function getDefaultModulesForTenantRole(
+  tenant:
+    | Pick<Tenant, 'customRoles' | 'roleModuleOverrides' | 'roleModuleAccessOverrides'>
+    | undefined
+    | null,
+  role: UserRole,
+  customRoleId?: string
+): TenantModulePermission[] {
+  const accessMap = getDefaultModuleAccessForTenantRole(tenant, role, customRoleId);
+  return ALL_MODULE_IDS.filter((id) => accessMap[id] === 'read' || accessMap[id] === 'edit');
+}
+
+export function getEffectiveUserModuleAccess(
+  user?: Pick<TenantUser, 'role' | 'allowedModules' | 'moduleAccess'> | null
+): TenantModuleAccessMap {
+  if (!user) return {};
+  if (user.role === 'Developer' || user.role === 'Super Admin') {
+    return Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap;
+  }
+
+  const defaults = DEFAULT_ROLE_MODULE_ACCESS[user.role] || { analytics: 'read' as const };
+  const result: TenantModuleAccessMap = {};
+
+  if (user.moduleAccess && typeof user.moduleAccess === 'object') {
+    const allowedSet = Array.isArray(user.allowedModules) ? new Set(user.allowedModules) : null;
+    for (const modId of ALL_MODULE_IDS) {
+      if (allowedSet && !allowedSet.has(modId)) continue;
+      const lvl = user.moduleAccess[modId];
+      if (lvl === 'read' || lvl === 'edit') {
+        result[modId] = user.role === 'Parent' || user.role === 'Student' ? 'read' : lvl;
+      }
+    }
+    if (allowedSet) {
+      for (const modId of allowedSet) {
+        if (ALL_MODULE_SET.has(modId) && !result[modId]) {
+          result[modId] =
+            user.role === 'Parent' || user.role === 'Student' ? 'read' : defaults[modId] || 'edit';
+        }
+      }
+    }
+  } else if (Array.isArray(user.allowedModules)) {
+    for (const modId of user.allowedModules) {
+      if (!ALL_MODULE_SET.has(modId)) continue;
+      result[modId] =
+        user.role === 'Parent' || user.role === 'Student' ? 'read' : defaults[modId] || 'edit';
+    }
+  } else {
+    for (const modId of ALL_MODULE_IDS) {
+      const lvl = defaults[modId];
+      if (lvl === 'read' || lvl === 'edit') {
+        result[modId] = lvl;
+      }
+    }
+  }
+
+  if (user.role === 'Admin') {
+    result.settings = 'edit';
+  }
+  return result;
+}
+
+export function getModuleAccessLevel(
+  user: Pick<TenantUser, 'role' | 'allowedModules' | 'moduleAccess'> | undefined | null,
+  moduleId: TenantModulePermission
+): ModuleAccessLevel {
+  const map = getEffectiveUserModuleAccess(user);
+  const lvl = map[moduleId];
+  return lvl === 'read' || lvl === 'edit' ? lvl : 'none';
+}
+
+export function canEditModule(
+  user: Pick<TenantUser, 'role' | 'allowedModules' | 'moduleAccess'> | undefined | null,
+  moduleId: TenantModulePermission
+): boolean {
+  return getModuleAccessLevel(user, moduleId) === 'edit';
+}
+
 export function getEffectiveUserModules(
-  user?: Pick<TenantUser, 'role' | 'allowedModules'> | null
+  user?: Pick<TenantUser, 'role' | 'allowedModules' | 'moduleAccess'> | null
 ): TenantModulePermission[] {
   if (!user) return [];
-  if (user.role === 'Developer' || user.role === 'Super Admin') {
-    return [...ALL_MODULE_IDS];
-  }
-  if (Array.isArray(user.allowedModules)) {
-    if (user.role === 'Admin') {
-      const set = new Set<TenantModulePermission>(user.allowedModules);
-      set.add('settings');
-      return Array.from(set);
-    }
-    return user.allowedModules;
-  }
-  return [...(DEFAULT_ROLE_MODULES[user.role] || ['analytics'])];
+  const accessMap = getEffectiveUserModuleAccess(user);
+  return ALL_MODULE_IDS.filter((id) => accessMap[id] === 'read' || accessMap[id] === 'edit');
 }
 
 export type TenantStatus = 'Active' | 'Trial' | 'Suspended';
@@ -764,6 +942,12 @@ export interface Tenant {
   };
   /** Optional per-tenant toggle allowing read-only Student portal logins. */
   studentPortalEnabled?: boolean;
+  /** Tenant-defined custom roles mapped onto foundational capability tiers. */
+  customRoles?: CustomRoleDefinition[];
+  /** Per-tenant module permission template overrides for built-in roles. */
+  roleModuleOverrides?: Partial<Record<UserRole, TenantModulePermission[]>>;
+  /** Per-tenant Read Only / Read & Edit access template overrides for built-in roles. */
+  roleModuleAccessOverrides?: Partial<Record<UserRole, TenantModuleAccessMap>>;
   createdAt: string;
 }
 
@@ -774,12 +958,16 @@ export interface TenantUser {
   email: string;
   phone?: string;
   role: UserRole;
+  customRoleId?: string;
+  roleLabel?: string;
   status: 'Active' | 'Disabled';
   /** Links a Student-role account directly to a Student record in the tenant. */
   studentId?: string;
   mustChangePassword?: boolean;
   tokenVersion?: number;
   allowedModules?: TenantModulePermission[];
+  /** Granular per-module permission ('read' = Read Only, 'edit' = Read & Edit). */
+  moduleAccess?: TenantModuleAccessMap;
   createdAt: string;
   lastLoginAt?: string;
 }
@@ -837,7 +1025,8 @@ export type AdminAuditAction =
   | 'IMPERSONATE_START'
   | 'IMPERSONATE_END'
   | 'RESTORE_DATABASE'
-  | 'UPDATE_STATUTORY_RATES';
+  | 'UPDATE_STATUTORY_RATES'
+  | 'MANAGE_TENANT_ACCOUNT';
 
 export interface AdminAuditEntry {
   id: string;
@@ -1893,7 +2082,7 @@ export interface BudgetAllocation {
   tenantId: string;
   fiscalYear: string;
   term: string;
-  category: ExpenseCategory;
+  category: string;
   allocatedAmount: number;
   status?: BudgetApprovalStatus;
   createdByUserId?: string;

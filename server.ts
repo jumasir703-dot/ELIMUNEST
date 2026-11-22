@@ -1,3 +1,4 @@
+import './server/env.ts';
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -613,6 +614,83 @@ app.patch('/api/auth/users/:userId/access', async (req: AuthenticatedRequest, re
   }
 });
 
+app.post(
+  '/api/auth/roles/custom',
+  requireModule('settings'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const authUser = req.authUser!;
+      if (
+        !isDeveloperRole(authUser.role) &&
+        authUser.role !== 'Super Admin' &&
+        authUser.role !== 'Admin'
+      ) {
+        throw new ConflictError('Forbidden: Only School Admins can manage custom roles.', 403);
+      }
+      const targetTenantId = getTenantId(req);
+      const result = store.upsertTenantCustomRole(authUser, targetTenantId, req.body || {});
+      await store.flushRemotePersist();
+      res.status(req.body?.id ? 200 : 201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/auth/roles/custom/:roleId',
+  requireModule('settings'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const authUser = req.authUser!;
+      if (
+        !isDeveloperRole(authUser.role) &&
+        authUser.role !== 'Super Admin' &&
+        authUser.role !== 'Admin'
+      ) {
+        throw new ConflictError('Forbidden: Only School Admins can delete custom roles.', 403);
+      }
+      const targetTenantId = getTenantId(req);
+      const result = store.deleteTenantCustomRole(
+        authUser,
+        targetTenantId,
+        String(req.params.roleId)
+      );
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.put(
+  '/api/auth/roles/builtin/:role',
+  requireModule('settings'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const authUser = req.authUser!;
+      if (
+        !isDeveloperRole(authUser.role) &&
+        authUser.role !== 'Super Admin' &&
+        authUser.role !== 'Admin'
+      ) {
+        throw new ConflictError('Forbidden: Only School Admins can customize built-in roles.', 403);
+      }
+      const targetTenantId = getTenantId(req);
+      const result = store.updateBuiltInRoleModules(authUser, targetTenantId, {
+        role: decodeURIComponent(String(req.params.role)) as any,
+        defaultModules: req.body?.defaultModules,
+        syncExistingUsers: Boolean(req.body?.syncExistingUsers),
+      });
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Isolated Developer Control Plane Routes (/api/dev/*) with Role & Permission Middleware Protection
 app.get(
   '/api/dev/telemetry',
@@ -681,6 +759,78 @@ app.patch(
         String(req.params.id),
         req.body || {}
       );
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/dev/tenants/:tenantId/users',
+  requireDeveloperAuth('dev:tenants'),
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = developerService.listTenantAccounts(
+        req.authUser!,
+        String(req.params.tenantId)
+      );
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/tenants/:tenantId/users',
+  requireDeveloperAuth('dev:tenants'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = await developerService.createTenantAccount(
+        req.authUser!,
+        String(req.params.tenantId),
+        req.body || {}
+      );
+      await store.flushRemotePersist();
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/dev/tenants/:tenantId/users/:userId/reset-password',
+  requireDeveloperAuth('dev:tenants'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = await developerService.resetTenantAccountPassword(
+        req.authUser!,
+        String(req.params.tenantId),
+        String(req.params.userId),
+        req.body || {}
+      );
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/dev/tenants/:tenantId/users/:userId/status',
+  requireDeveloperAuth('dev:tenants'),
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const result = await developerService.updateTenantAccountStatus(
+        req.authUser!,
+        String(req.params.tenantId),
+        String(req.params.userId),
+        req.body?.status
+      );
+      await store.flushRemotePersist();
       res.json(result);
     } catch (err) {
       next(err);

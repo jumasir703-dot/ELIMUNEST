@@ -831,7 +831,7 @@ export default function App() {
                 className="flex items-center gap-1 text-[11px] font-medium"
               >
                 <UserCheck className="h-3 w-3" />
-                {authSession.user.role}
+                {authSession.user.roleLabel || authSession.user.role}
               </span>
               <button
                 type="button"
@@ -937,7 +937,7 @@ export default function App() {
               <span className="truncate">
                 <strong className="font-semibold">Support Impersonation Active:</strong> Viewing{' '}
                 <span className="font-semibold">{workspace?.tenant.name || authSession.tenantName}</span>{' '}
-                as <span className="font-mono">{authSession.user.email}</span> ({authSession.user.role}) ·{' '}
+                as <span className="font-mono">{authSession.user.email}</span> ({authSession.user.roleLabel || authSession.user.role}) ·{' '}
                 <span className="font-mono font-semibold">
                   {authSession.impersonator.readOnly ? 'Read-Only Safe Mode' : 'Full Support Write Mode'}
                 </span>{' '}

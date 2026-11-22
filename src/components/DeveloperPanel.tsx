@@ -11,6 +11,7 @@ import {
   Database,
   Download,
   Eye,
+  EyeOff,
   KeyRound,
   Landmark,
   Layers,
@@ -29,6 +30,7 @@ import {
   Terminal,
   Upload,
   UserCheck,
+  UserPlus,
   Users,
 } from 'lucide-react';
 import { isDeveloperRoleClient, saasApi } from '../lib/api';
@@ -51,6 +53,9 @@ import {
   type SubscriptionCycle,
   type TenantPlan,
   type TenantStatus,
+  type TenantUser,
+  type UserRole,
+  validatePasswordStrength,
 } from '../shared/types';
 
 export type DevRouteSection =
@@ -188,6 +193,8 @@ export function DeveloperPanel({
   const [obAdminLocal, setObAdminLocal] = useState('');
   const [obAdminLocalEdited, setObAdminLocalEdited] = useState(false);
   const [obAdminPhone, setObAdminPhone] = useState('');
+  const [obAdminPassword, setObAdminPassword] = useState('');
+  const [showObAdminPassword, setShowObAdminPassword] = useState(false);
   const [obContactPhone, setObContactPhone] = useState('');
   const [obContactEmail, setObContactEmail] = useState('');
   const [obPostalAddress, setObPostalAddress] = useState('');
@@ -199,11 +206,12 @@ export function DeveloperPanel({
     domain: string;
     adminEmail: string;
     oneTimePassword: string;
+    mustChangePassword: boolean;
     plan: TenantPlan;
     learnerCap: number;
   } | null>(null);
 
-  // Module 2: Subscriptions & Kill Switch state
+  // Module 2: Subscriptions, Kill Switch & Tenant Accounts state
   const [selectedSubTenantId, setSelectedSubTenantId] = useState<string>('');
   const [editPlan, setEditPlan] = useState<TenantPlan>('Growth');
   const [editCap, setEditCap] = useState<number>(600);
@@ -212,6 +220,20 @@ export function DeveloperPanel({
   const [subSaving, setSubSaving] = useState(false);
   const [killReason, setKillReason] = useState('');
   const [confirmKillTenantId, setConfirmKillTenantId] = useState<string | null>(null);
+  const [tenantAccounts, setTenantAccounts] = useState<TenantUser[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountBusyId, setAccountBusyId] = useState<string | null>(null);
+  const [resetCustomPassword, setResetCustomPassword] = useState('');
+  const [issuedAccountCred, setIssuedAccountCred] = useState<{
+    email: string;
+    password: string;
+    mustChangePassword: boolean;
+  } | null>(null);
+  const [newAccName, setNewAccName] = useState('');
+  const [newAccEmail, setNewAccEmail] = useState('');
+  const [newAccRole, setNewAccRole] = useState<UserRole>('Admin');
+  const [newAccPassword, setNewAccPassword] = useState('');
+  const [creatingAccount, setCreatingAccount] = useState(false);
 
   // Module 3: Safe Impersonation state
   const [impTenantId, setImpTenantId] = useState<string>('');
@@ -364,7 +386,28 @@ export function DeveloperPanel({
     setEditRenewalDate(selectedSubRow.tenant.renewalDate || '2027-08-31');
     setKillReason(selectedSubRow.tenant.suspensionReason || '');
     setConfirmKillTenantId(null);
+    setIssuedAccountCred(null);
+    setResetCustomPassword('');
   }, [selectedSubRow]);
+
+  const loadSelectedTenantAccounts = useCallback(async (tenantId: string) => {
+    if (!tenantId || !isAuthorizedDeveloper) return;
+    setAccountsLoading(true);
+    try {
+      const res = await saasApi.devListTenantAccounts(tenantId);
+      setTenantAccounts(res.users);
+    } catch {
+      setTenantAccounts([]);
+    } finally {
+      setAccountsLoading(false);
+    }
+  }, [isAuthorizedDeveloper]);
+
+  useEffect(() => {
+    if (selectedSubTenantId) {
+      loadSelectedTenantAccounts(selectedSubTenantId);
+    }
+  }, [selectedSubTenantId, loadSelectedTenantAccounts]);
 
   const selectedImpTarget = useMemo(
     () => targets.find((t) => t.tenantId === impTenantId) || targets[0],
@@ -417,6 +460,14 @@ export function DeveloperPanel({
 
   async function handleOnboardSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const trimmedPw = obAdminPassword.trim();
+    if (trimmedPw) {
+      const pwErr = validatePasswordStrength(trimmedPw);
+      if (pwErr) {
+        onNotify(pwErr, 'error');
+        return;
+      }
+    }
     setObSubmitting(true);
     setCopiedOtp(false);
     try {
@@ -442,6 +493,7 @@ export function DeveloperPanel({
         adminFullName: obAdminName.trim() || 'Principal Administrator',
         adminEmail: localPart ? `${localPart}@${cleanDomain}` : undefined,
         adminPhone: obAdminPhone.trim() || undefined,
+        adminPassword: trimmedPw || undefined,
       });
 
       setLastProvisioned({
@@ -450,6 +502,7 @@ export function DeveloperPanel({
         domain: res.tenant.emailDomain || cleanDomain,
         adminEmail: res.adminUser.email,
         oneTimePassword: res.adminUser.oneTimePassword,
+        mustChangePassword: res.adminUser.mustChangePassword !== false,
         plan: res.tenant.plan,
         learnerCap: res.tenant.learnerCap || DEFAULT_TIER_LEARNER_CAPS[res.tenant.plan],
       });
@@ -460,15 +513,109 @@ export function DeveloperPanel({
       setObAdminLocal('');
       setObAdminLocalEdited(false);
       setObAdminPhone('');
+      setObAdminPassword('');
       setObContactPhone('');
       setObContactEmail('');
       setObPostalAddress('');
-      onNotify(`Provisioned ${res.tenant.name} (@${res.tenant.emailDomain}) with 1-time password`, 'success');
+      onNotify(
+        `Provisioned ${res.tenant.name} (@${res.tenant.emailDomain})`,
+        'success'
+      );
       await loadControlPlaneData();
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Tenant onboarding failed.', 'error');
     } finally {
       setObSubmitting(false);
+    }
+  }
+
+  async function handleResetTenantUserPassword(user: TenantUser, useCustomPassword: boolean) {
+    if (!selectedSubRow) return;
+    const customPw = useCustomPassword ? resetCustomPassword.trim() : '';
+    if (useCustomPassword) {
+      const pwErr = validatePasswordStrength(customPw);
+      if (pwErr) {
+        onNotify(pwErr, 'error');
+        return;
+      }
+    }
+    setAccountBusyId(user.id);
+    try {
+      const res = await saasApi.devResetTenantAccountPassword(
+        selectedSubRow.tenant.id,
+        user.id,
+        customPw ? { newPassword: customPw, requirePasswordChange: false } : {}
+      );
+      setIssuedAccountCred({
+        email: res.user.email,
+        password: res.oneTimePassword,
+        mustChangePassword: Boolean(res.user.mustChangePassword),
+      });
+      if (useCustomPassword) setResetCustomPassword('');
+      onNotify(`Updated password for ${res.user.email}`, 'success');
+      await loadSelectedTenantAccounts(selectedSubRow.tenant.id);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to reset user password.', 'error');
+    } finally {
+      setAccountBusyId(null);
+    }
+  }
+
+  async function handleToggleTenantUserStatus(user: TenantUser) {
+    if (!selectedSubRow) return;
+    const nextStatus = user.status === 'Active' ? 'Disabled' : 'Active';
+    setAccountBusyId(user.id);
+    try {
+      await saasApi.devSetTenantAccountStatus(selectedSubRow.tenant.id, user.id, nextStatus);
+      onNotify(`${user.email} is now ${nextStatus}`, 'success');
+      await Promise.all([
+        loadSelectedTenantAccounts(selectedSubRow.tenant.id),
+        loadControlPlaneData(),
+      ]);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to update account status.', 'error');
+    } finally {
+      setAccountBusyId(null);
+    }
+  }
+
+  async function handleCreateTenantAccount(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedSubRow) return;
+    const pw = newAccPassword.trim();
+    if (pw) {
+      const pwErr = validatePasswordStrength(pw);
+      if (pwErr) {
+        onNotify(pwErr, 'error');
+        return;
+      }
+    }
+    setCreatingAccount(true);
+    try {
+      const res = await saasApi.devCreateTenantAccount(selectedSubRow.tenant.id, {
+        fullName: newAccName.trim(),
+        email: newAccEmail.trim(),
+        role: newAccRole,
+        password: pw || undefined,
+        requirePasswordChange: !pw,
+      });
+      setIssuedAccountCred({
+        email: res.user.email,
+        password: res.oneTimePassword,
+        mustChangePassword: Boolean(res.user.mustChangePassword),
+      });
+      setNewAccName('');
+      setNewAccEmail('');
+      setNewAccPassword('');
+      onNotify(`Created ${res.user.role} account ${res.user.email}`, 'success');
+      await Promise.all([
+        loadSelectedTenantAccounts(selectedSubRow.tenant.id),
+        loadControlPlaneData(),
+      ]);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to create tenant account.', 'error');
+    } finally {
+      setCreatingAccount(false);
     }
   }
 
@@ -1423,7 +1570,7 @@ export function DeveloperPanel({
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                              1-Time Password:
+                              {lastProvisioned.mustChangePassword ? '1-Time Password:' : 'Initial Password:'}
                             </span>
                             <span className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono font-bold text-emerald-700 dark:border-slate-700 dark:bg-slate-950 dark:text-emerald-300">
                               {lastProvisioned.oneTimePassword}
@@ -1438,7 +1585,9 @@ export function DeveloperPanel({
                             </button>
                           </div>
                           <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                            School Admin will be prompted to set a permanent password on first login.
+                            {lastProvisioned.mustChangePassword
+                              ? 'School Admin will be prompted to set a permanent password on first login.'
+                              : 'Assigned initial password is active immediately and persisted.'}
                           </span>
                         </div>
                       </div>
@@ -1721,11 +1870,28 @@ export function DeveloperPanel({
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                          Initial Password Policy
+                          Initial Password (optional)
                         </label>
-                        <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
-                          <KeyRound className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
-                          <span>Auto-generated 1-time OTP</span>
+                        <div className="relative mt-1.5">
+                          <input
+                            type={showObAdminPassword ? 'text' : 'password'}
+                            value={obAdminPassword}
+                            onChange={(e) => setObAdminPassword(e.target.value)}
+                            placeholder="Leave blank for 1-time OTP"
+                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-950"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowObAdminPassword((v) => !v)}
+                            aria-label={showObAdminPassword ? 'Hide password' : 'Show password'}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                          >
+                            {showObAdminPassword ? (
+                              <EyeOff className="h-3.5 w-3.5" />
+                            ) : (
+                              <Eye className="h-3.5 w-3.5" />
+                            )}
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -2033,6 +2199,179 @@ export function DeveloperPanel({
                           )}
                         </div>
                       )}
+                    </div>
+                    {/* Tenant Accounts & Password Control */}
+                    <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-slate-100">
+                            <KeyRound className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                            Tenant Accounts & Password Recovery
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                            Accounts and passwords for {selectedSubRow.tenant.name} are stored permanently. Issue a 1-time reset or set a new password below.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => loadSelectedTenantAccounts(selectedSubRow.tenant.id)}
+                          disabled={accountsLoading}
+                          className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-medium hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                        >
+                          {accountsLoading ? 'Loading...' : 'Refresh'}
+                        </button>
+                      </div>
+
+                      {issuedAccountCred && (
+                        <div className="rounded-lg border border-emerald-300 bg-emerald-50/70 p-3 text-xs dark:border-emerald-800 dark:bg-emerald-950/30">
+                          <div className="font-semibold text-emerald-900 dark:text-emerald-200">
+                            Credentials Ready for {issuedAccountCred.email}
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                            <span className="rounded border border-emerald-200 bg-white px-2 py-0.5 font-mono font-bold text-emerald-700 dark:border-emerald-800 dark:bg-slate-950 dark:text-emerald-300">
+                              {issuedAccountCred.password}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyOtp(issuedAccountCred.password)}
+                              className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-200"
+                            >
+                              <Copy className="h-3 w-3" />
+                              Copy
+                            </button>
+                            <span className="text-[11px] text-emerald-800 dark:text-emerald-300">
+                              {issuedAccountCred.mustChangePassword
+                                ? '(1-time OTP: must change on next login)'
+                                : '(Active password)'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                          Optional Custom Password for Reset (leave empty to auto-generate 1-time OTP)
+                        </label>
+                        <input
+                          type="text"
+                          value={resetCustomPassword}
+                          onChange={(e) => setResetCustomPassword(e.target.value)}
+                          placeholder="Min 10 chars with letter & number (optional)"
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
+                        />
+                      </div>
+
+                      <div className="max-h-56 divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
+                        {tenantAccounts.length === 0 ? (
+                          <div className="p-3 text-center text-xs text-slate-500">
+                            {accountsLoading ? 'Loading tenant accounts...' : 'No accounts created for this tenant yet.'}
+                          </div>
+                        ) : (
+                          tenantAccounts.map((acc) => (
+                            <div
+                              key={acc.id}
+                              className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
+                                  <span className="truncate">{acc.fullName}</span>
+                                  <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                                    {acc.role}
+                                  </span>
+                                  {acc.mustChangePassword && (
+                                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                                      OTP Pending
+                                    </span>
+                                  )}
+                                  {acc.status === 'Disabled' && (
+                                    <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-950/60 dark:text-red-300">
+                                      Disabled
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="truncate font-mono text-[11px] text-slate-500">
+                                  {acc.email}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={accountBusyId === acc.id}
+                                  onClick={() =>
+                                    handleResetTenantUserPassword(
+                                      acc,
+                                      Boolean(resetCustomPassword.trim())
+                                    )
+                                  }
+                                  className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
+                                >
+                                  {resetCustomPassword.trim() ? 'Set Password' : 'Reset OTP'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={accountBusyId === acc.id}
+                                  onClick={() => handleToggleTenantUserStatus(acc)}
+                                  className="rounded border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                                >
+                                  {acc.status === 'Active' ? 'Disable' : 'Enable'}
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <form onSubmit={handleCreateTenantAccount} className="space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                          <UserPlus className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                          Create Account for {selectedSubRow.tenant.name}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            type="text"
+                            required
+                            value={newAccName}
+                            onChange={(e) => setNewAccName(e.target.value)}
+                            placeholder="Full Name"
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
+                          />
+                          <input
+                            type="text"
+                            required
+                            value={newAccEmail}
+                            onChange={(e) => setNewAccEmail(e.target.value)}
+                            placeholder={`handle@${selectedSubRow.tenant.emailDomain || 'school'}`}
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-950"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <select
+                            value={newAccRole}
+                            onChange={(e) => setNewAccRole(e.target.value as UserRole)}
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
+                          >
+                            <option value="Admin">Admin</option>
+                            <option value="Super Admin">Super Admin</option>
+                            <option value="Registrar">Registrar</option>
+                            <option value="Teacher">Teacher</option>
+                            <option value="Bursar">Bursar</option>
+                          </select>
+                          <input
+                            type="text"
+                            value={newAccPassword}
+                            onChange={(e) => setNewAccPassword(e.target.value)}
+                            placeholder="Password (blank = OTP)"
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={creatingAccount}
+                          className="w-full rounded-lg border border-slate-300 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:border-slate-700 dark:bg-blue-600 dark:hover:bg-blue-700"
+                        >
+                          {creatingAccount ? 'Creating Account...' : 'Add Tenant Account'}
+                        </button>
+                      </form>
                     </div>
                   </div>
                 )}

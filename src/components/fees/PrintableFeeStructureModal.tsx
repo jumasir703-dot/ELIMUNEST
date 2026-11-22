@@ -42,7 +42,6 @@ export function PrintableFeeStructureModal({
   onAddIndependentVoteline,
 }: PrintableFeeStructureModalProps) {
   const modalLines = getStructureVotelines(structure);
-  const safeTotal = Math.max(1, structure.totalFee);
   const independentSummary = summarizeIndependentVotelinesForStructure(
     structure,
     independentVotelines
@@ -113,7 +112,6 @@ export function PrintableFeeStructureModal({
               <tr>
                 <th className="w-10 px-3.5 py-2.5">#</th>
                 <th className="px-3.5 py-2.5">Votehead / Voteline Description</th>
-                <th className="px-3.5 py-2.5 text-right">Share</th>
                 <th className="px-3.5 py-2.5 text-right">
                   Amount ({tenant.currency})
                 </th>
@@ -128,9 +126,6 @@ export function PrintableFeeStructureModal({
                   <td className="px-3.5 py-2 font-medium text-slate-900 dark:text-slate-100">
                     {line.name}
                   </td>
-                  <td className="px-3.5 py-2 text-right font-mono text-slate-500 tabular-nums dark:text-slate-400">
-                    {((line.amount / safeTotal) * 100).toFixed(1)}%
-                  </td>
                   <td className="px-3.5 py-2 text-right font-mono font-semibold text-slate-900 tabular-nums dark:text-slate-100">
                     {formatCurrency(line.amount, tenant.currency)}
                   </td>
@@ -139,7 +134,7 @@ export function PrintableFeeStructureModal({
             </tbody>
             <tfoot className="border-t border-slate-200 bg-slate-50/80 font-bold dark:border-slate-800 dark:bg-slate-800/60">
               <tr>
-                <td colSpan={3} className="px-3.5 py-3 text-slate-900 dark:text-slate-100">
+                <td colSpan={2} className="px-3.5 py-3 text-slate-900 dark:text-slate-100">
                   Total Term Fee ({structure.grade} · {structure.term})
                 </td>
                 <td className="px-3.5 py-3 text-right font-mono text-sm text-blue-700 tabular-nums dark:text-blue-400">

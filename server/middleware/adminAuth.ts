@@ -2,7 +2,7 @@ import { createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { NextFunction, Request, Response } from 'express';
 import {
-  getEffectiveUserModules,
+  getModuleAccessLevel,
   type AuthSessionInfo,
   type ImpersonatorMeta,
   type TenantModulePermission,
@@ -119,6 +119,7 @@ const DEVELOPER_ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<DeveloperPermissi
   Registrar: new Set<DeveloperPermission>(),
   Teacher: new Set<DeveloperPermission>(),
   Bursar: new Set<DeveloperPermission>(),
+  'Budget Approver': new Set<DeveloperPermission>(),
   Parent: new Set<DeveloperPermission>(),
   Student: new Set<DeveloperPermission>(),
 };
@@ -411,17 +412,27 @@ export function requireRole(...allowedRoles: UserRole[]) {
   };
 }
 
-export function requireModule(moduleId: TenantModulePermission) {
+export function requireModule(
+  moduleId: TenantModulePermission,
+  options?: { allowReadOnlyMutation?: boolean }
+) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     const authUser = req.authUser;
     if (!authUser) {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
-    const effective = getEffectiveUserModules(authUser);
-    if (!effective.includes(moduleId)) {
+    const level = getModuleAccessLevel(authUser, moduleId);
+    if (level === 'none') {
       res.status(403).json({
         error: `Forbidden: Account lacks access permission to module "${moduleId}".`,
+      });
+      return;
+    }
+    const isReadMethod = req.method === 'GET' || req.method === 'HEAD';
+    if (!isReadMethod && !options?.allowReadOnlyMutation && level !== 'edit') {
+      res.status(403).json({
+        error: `Forbidden: Read-only access for module "${moduleId}" does not permit editing.`,
       });
       return;
     }

@@ -1,13 +1,15 @@
-import type { FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { formatCurrency } from '../../lib/format';
-import type {
-  CurrencyCode,
-  FeeInvoice,
-  FeeWaiverKind,
-  FeeWaiverMode,
-  IndependentVotelineItem,
-  PaymentRecord,
-  Student,
+import {
+  getStreamsForGrade,
+  type CurrencyCode,
+  type FeeInvoice,
+  type FeeWaiverKind,
+  type FeeWaiverMode,
+  type IndependentVotelineItem,
+  type PaymentRecord,
+  type Student,
+  type Tenant,
 } from '../../shared/types';
 
 export interface WaiverFormState {
@@ -34,6 +36,7 @@ export interface CarryForwardFormState {
 
 interface FeeAdjustmentsModalsProps {
   currency: CurrencyCode;
+  tenant?: Tenant;
   students: Student[];
   saving: boolean;
 
@@ -78,6 +81,7 @@ interface FeeAdjustmentsModalsProps {
 
 export function FeeAdjustmentsModals({
   currency,
+  tenant,
   students,
   saving,
   voidPaymentTarget,
@@ -113,6 +117,59 @@ export function FeeAdjustmentsModals({
   onCloseIvlVoid,
   onSubmitIvlVoid,
 }: FeeAdjustmentsModalsProps) {
+  const [waiverGradeFilter, setWaiverGradeFilter] = useState<string>('All');
+  const [waiverStreamFilter, setWaiverStreamFilter] = useState<string>('All');
+
+  const waiverGradeOptions = useMemo(() => {
+    const present = new Set(students.map((s) => s.grade));
+    const ordered = (tenant?.grades || []).filter((g) => present.has(g));
+    present.forEach((g) => {
+      if (!ordered.includes(g)) ordered.push(g);
+    });
+    return ordered;
+  }, [students, tenant?.grades]);
+
+  const waiverStreamOptions = useMemo(() => {
+    const relevant =
+      waiverGradeFilter === 'All'
+        ? students
+        : students.filter((s) => s.grade === waiverGradeFilter);
+    const configured = tenant
+      ? waiverGradeFilter === 'All'
+        ? waiverGradeOptions.flatMap((g) => getStreamsForGrade(tenant, g))
+        : getStreamsForGrade(tenant, waiverGradeFilter)
+      : [];
+    const set = new Set<string>(configured);
+    relevant.forEach((s) => {
+      if (s.section) set.add(s.section);
+    });
+    return Array.from(set);
+  }, [students, tenant, waiverGradeFilter, waiverGradeOptions]);
+
+  useEffect(() => {
+    if (waiverStreamFilter !== 'All' && !waiverStreamOptions.includes(waiverStreamFilter)) {
+      setWaiverStreamFilter('All');
+    }
+  }, [waiverStreamFilter, waiverStreamOptions]);
+
+  const filteredWaiverStudents = useMemo(() => {
+    return students.filter((st) => {
+      if (waiverGradeFilter !== 'All' && st.grade !== waiverGradeFilter) return false;
+      if (waiverStreamFilter !== 'All' && st.section !== waiverStreamFilter) return false;
+      return true;
+    });
+  }, [students, waiverGradeFilter, waiverStreamFilter]);
+
+  useEffect(() => {
+    if (!waiverModalOpen) return;
+    if (
+      filteredWaiverStudents.length > 0 &&
+      !filteredWaiverStudents.some((s) => s.id === waiverForm.studentId)
+    ) {
+      setWaiverForm({ ...waiverForm, studentId: filteredWaiverStudents[0].id });
+    }
+  }, [waiverModalOpen, filteredWaiverStudents, waiverForm, setWaiverForm]);
+
   return (
     <>
       {voidPaymentTarget && (
@@ -233,20 +290,58 @@ export function FeeAdjustmentsModals({
               Apply Fee Waiver / Bursary / Scholarship
             </h3>
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Filter by Grade
+                </label>
+                <select
+                  value={waiverGradeFilter}
+                  onChange={(e) => setWaiverGradeFilter(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                >
+                  <option value="All">All Grades</option>
+                  {waiverGradeOptions.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Filter by Stream
+                </label>
+                <select
+                  value={waiverStreamFilter}
+                  onChange={(e) => setWaiverStreamFilter(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                >
+                  <option value="All">All Streams</option>
+                  {waiverStreamOptions.map((sec) => (
+                    <option key={sec} value={sec}>
+                      Stream {sec}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div className="sm:col-span-2">
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Student *
+                  Student * ({filteredWaiverStudents.length} matching)
                 </label>
                 <select
                   value={waiverForm.studentId}
                   onChange={(e) => setWaiverForm({ ...waiverForm, studentId: e.target.value })}
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
                 >
-                  {students.map((st) => (
-                    <option key={st.id} value={st.id}>
-                      {st.fullName} ({st.studentCode} · {st.grade})
-                    </option>
-                  ))}
+                  {filteredWaiverStudents.length === 0 ? (
+                    <option value="">No students match selected Grade / Stream</option>
+                  ) : (
+                    filteredWaiverStudents.map((st) => (
+                      <option key={st.id} value={st.id}>
+                        {st.fullName} ({st.studentCode} · {st.grade} · Stream {st.section})
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
               <div>

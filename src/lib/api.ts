@@ -17,6 +17,7 @@ import type {
   CbcClusterId,
   CreditNoteRecord,
   CurrencyCode,
+  CustomRoleDefinition,
   DayOfWeek,
   DevImpersonationTarget,
   DevPlatformTelemetry,
@@ -410,6 +411,7 @@ export const saasApi = {
       email: string;
       phone?: string;
       role: UserRole;
+      customRoleId?: string;
       allowedModules?: TenantModulePermission[];
     }
   ) {
@@ -425,6 +427,7 @@ export const saasApi = {
     userId: string,
     payload: {
       role?: UserRole;
+      customRoleId?: string | null;
       phone?: string;
       allowedModules?: TenantModulePermission[];
       status?: 'Active' | 'Disabled';
@@ -439,6 +442,58 @@ export const saasApi = {
         body: JSON.stringify(payload),
       }
     );
+  },
+
+  upsertCustomRole(
+    tenantId: string,
+    payload: {
+      id?: string;
+      name: string;
+      baseRole: UserRole;
+      defaultModules: TenantModulePermission[];
+      description?: string;
+      syncExistingUsers?: boolean;
+    }
+  ) {
+    return apiRequest<{
+      customRole: CustomRoleDefinition;
+      tenant: Tenant;
+      updatedUsersCount: number;
+    }>('/api/auth/roles/custom', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteCustomRole(tenantId: string, roleId: string) {
+    return apiRequest<{ deleted: boolean; tenant: Tenant }>(
+      `/api/auth/roles/custom/${encodeURIComponent(roleId)}`,
+      {
+        method: 'DELETE',
+        tenantId,
+      }
+    );
+  },
+
+  updateBuiltInRoleModules(
+    tenantId: string,
+    role: UserRole,
+    payload: {
+      defaultModules: TenantModulePermission[];
+      syncExistingUsers?: boolean;
+    }
+  ) {
+    return apiRequest<{
+      role: UserRole;
+      defaultModules: TenantModulePermission[];
+      tenant: Tenant;
+      updatedUsersCount: number;
+    }>(`/api/auth/roles/builtin/${encodeURIComponent(role)}`, {
+      method: 'PUT',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
   },
 
   getWorkspace(tenantId?: string) {
@@ -1859,12 +1914,67 @@ export const saasApi = {
   }) {
     return devApiRequest<{
       tenant: Tenant;
-      adminUser: { fullName: string; email: string; oneTimePassword: string };
+      adminUser: {
+        fullName: string;
+        email: string;
+        oneTimePassword: string;
+        mustChangePassword?: boolean;
+      };
       auditEntry: AdminAuditEntry;
     }>('/api/dev/tenants', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  devListTenantAccounts(tenantId: string) {
+    return devApiRequest<{ tenant: Tenant; users: TenantUser[] }>(
+      `/api/dev/tenants/${tenantId}/users`
+    );
+  },
+
+  devCreateTenantAccount(
+    tenantId: string,
+    payload: {
+      fullName: string;
+      email: string;
+      phone?: string;
+      role: UserRole;
+      password?: string;
+      requirePasswordChange?: boolean;
+    }
+  ) {
+    return devApiRequest<{ user: TenantUser; oneTimePassword: string; auditEntry: AdminAuditEntry }>(
+      `/api/dev/tenants/${tenantId}/users`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  devResetTenantAccountPassword(
+    tenantId: string,
+    userId: string,
+    payload: { newPassword?: string; requirePasswordChange?: boolean } = {}
+  ) {
+    return devApiRequest<{ user: TenantUser; oneTimePassword: string; auditEntry: AdminAuditEntry }>(
+      `/api/dev/tenants/${tenantId}/users/${userId}/reset-password`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  devSetTenantAccountStatus(tenantId: string, userId: string, status: 'Active' | 'Disabled') {
+    return devApiRequest<{ user: TenantUser; auditEntry: AdminAuditEntry }>(
+      `/api/dev/tenants/${tenantId}/users/${userId}/status`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      }
+    );
   },
 
   devUpdateSubscription(
