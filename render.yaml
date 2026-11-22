@@ -13,6 +13,11 @@ services:
         value: 22
       - key: DATA_DIR
         value: /var/data
+      - key: SEED_DEMO_DATA
+        # Loads the sample schools (Oakridge, Westfield, St Jude) the first time the
+        # app starts with an empty disk. It never touches an existing database.
+        # Set to "false" before onboarding real schools if you don't want demo tenants.
+        value: "true"
       - key: GEMINI_API_KEY
         sync: false # set this in the Render dashboard
       - key: APP_URL

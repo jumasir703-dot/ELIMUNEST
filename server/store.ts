@@ -173,16 +173,18 @@ import {
 import { isSmsProviderConfigured, sendSms, SmsNotConfiguredError } from './lib/sms.ts';
 import { solveTimetable, type SolverDay, type SolverPlacement } from './lib/timetableSolver.ts';
 
-// Set DATA_DIR to a persistent disk path in production (e.g. /var/data on Render).
-// On Vercel the filesystem is read-only except /tmp, which is per-instance and
-// temporary unless backed by KV_REST_API_URL + KV_REST_API_TOKEN (or UPSTASH_REDIS_REST_*).
-const DATA_DIR = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : process.env.VERCEL
-  ? '/tmp/elimunest-data'
-  : path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'elimunest-db.json');
-const LEGACY_DB_FILE = path.join(DATA_DIR, 'scholara-db.json');
+// Data paths and the sample-data policy live in ./dataConfig.ts (see its header
+// for the full data layout).
+import {
+  BACKUP_DIR,
+  DAILY_BACKUPS_TO_KEEP,
+  DATA_DIR,
+  DB_FILE,
+  LEGACY_DB_FILE,
+  shouldSeedDemoData,
+} from './dataConfig.ts';
+import { rotateDailyBackup } from './lib/dbBackup.ts';
+
 const KV_STATE_KEY = process.env.ELIMUNEST_KV_KEY?.trim() || 'elimunest:db:v1';
 
 interface KvRestConfig {
@@ -308,16 +310,17 @@ export class TenantStore {
   }
 
   private async initializeFreshDatabase(): Promise<void> {
-    const isProd = process.env.NODE_ENV === 'production';
-    const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
-    const { state, devCredentials } = await createSeedDatabase({ empty: isProd || isTest });
+    // Sample schools are only loaded into a database that does not exist yet,
+    // so they can never overwrite real data. See shouldSeedDemoData().
+    const seedDemo = shouldSeedDemoData();
+    const { state, devCredentials } = await createSeedDatabase({ empty: !seedDemo });
     // Only apply if no data was loaded in the meantime
     if (this.state.tenants.length === 0 && this.state.users.length === 0) {
       this.state = state;
-      if (!isProd && !isTest) {
+      if (seedDemo) {
         this.persist(state);
         if (devCredentials.length > 0) {
-          console.log('[elimuNest] Seeded development demo accounts (one-time random passwords, change required on first login):');
+          console.log('[elimuNest] Seeded sample schools and demo accounts (one-time random passwords, change required on first login):');
           for (const cred of devCredentials) {
             console.log(`  - ${cred.role.padEnd(11)} | ${cred.email} | ${cred.password}`);
           }
@@ -465,6 +468,8 @@ export class TenantStore {
       const candidateFiles = [DB_FILE, LEGACY_DB_FILE].filter(Boolean);
       const sourceFile = candidateFiles.find((filePath) => fs.existsSync(filePath)) || null;
       if (sourceFile) {
+        // Keep a rotating daily copy before anything (including migrations) touches the file.
+        rotateDailyBackup(sourceFile, BACKUP_DIR, DAILY_BACKUPS_TO_KEEP);
         const raw = fs.readFileSync(sourceFile, 'utf-8');
         const parsed = JSON.parse(raw) as DatabaseState;
         if (parsed && Array.isArray(parsed.tenants)) {
