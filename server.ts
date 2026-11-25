@@ -681,6 +681,7 @@ app.put(
       const result = store.updateBuiltInRoleModules(authUser, targetTenantId, {
         role: decodeURIComponent(String(req.params.role)) as any,
         defaultModules: req.body?.defaultModules,
+        defaultModuleAccess: req.body?.defaultModuleAccess,
         syncExistingUsers: Boolean(req.body?.syncExistingUsers),
       });
       await store.flushRemotePersist();
@@ -1647,6 +1648,25 @@ app.post(
 );
 
 app.post(
+  '/api/attendance/teacher-lessons',
+  ...attendanceGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const records = store.saveTeacherLessonAttendanceBatch(
+        tenantId,
+        req.body || {},
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ records });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
   '/api/attendance/leave-chits',
   ...attendanceGuard,
   (req: AuthenticatedRequest, res, next) => {
@@ -1741,6 +1761,55 @@ app.post(
         req.authUser!
       );
       res.json({ cycle });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/exams/progressive-reports',
+  ...examsWriteGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const entry = store.upsertProgressiveReportEntry(tenantId, req.body || {}, req.authUser!);
+      await store.flushRemotePersist();
+      res.status(201).json({ entry });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/exams/progressive-reports/import',
+  ...examsWriteGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.importProgressiveReportsBatch(tenantId, req.body || {}, req.authUser!);
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/exams/progressive-reports/:id',
+  ...examsWriteGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.deleteProgressiveReportEntry(
+        tenantId,
+        String(req.params.id),
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json(result);
     } catch (err) {
       next(err);
     }
@@ -1945,6 +2014,214 @@ app.delete(
     try {
       const tenantId = getTenantId(req);
       const result = store.deleteLessonPlan(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/records-of-work',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const recordOfWork = store.upsertRecordOfWork(tenantId, req.body || {}, req.authUser!);
+      await store.flushRemotePersist();
+      res.status(201).json({ recordOfWork });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.put(
+  '/api/academics/records-of-work/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const recordOfWork = store.upsertRecordOfWork(
+        tenantId,
+        { ...(req.body || {}), id: String(req.params.id) },
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ recordOfWork });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/records-of-work/:id/submit',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const recordOfWork = store.submitRecordOfWork(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json({ recordOfWork });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/records-of-work/:id/review',
+  ...academicsAdminGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const recordOfWork = store.reviewRecordOfWork(
+        tenantId,
+        String(req.params.id),
+        req.body || {},
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ recordOfWork });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/academics/records-of-work/:id/parent-visibility',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const recordOfWork = store.setRecordOfWorkParentVisibility(
+        tenantId,
+        String(req.params.id),
+        Boolean(req.body?.parentVisible),
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ recordOfWork });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/academics/records-of-work/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.deleteRecordOfWork(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/lesson-notes',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonNote = store.upsertLessonNote(tenantId, req.body || {}, req.authUser!);
+      await store.flushRemotePersist();
+      res.status(201).json({ lessonNote });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.put(
+  '/api/academics/lesson-notes/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonNote = store.upsertLessonNote(
+        tenantId,
+        { ...(req.body || {}), id: String(req.params.id) },
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ lessonNote });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/lesson-notes/:id/submit',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonNote = store.submitLessonNote(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json({ lessonNote });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/lesson-notes/:id/review',
+  ...academicsAdminGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonNote = store.reviewLessonNote(
+        tenantId,
+        String(req.params.id),
+        req.body || {},
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ lessonNote });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/academics/lesson-notes/:id/parent-visibility',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonNote = store.setLessonNoteParentVisibility(
+        tenantId,
+        String(req.params.id),
+        Boolean(req.body?.parentVisible),
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ lessonNote });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/academics/lesson-notes/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.deleteLessonNote(tenantId, String(req.params.id), req.authUser!);
       await store.flushRemotePersist();
       res.json(result);
     } catch (err) {

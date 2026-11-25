@@ -1,11 +1,21 @@
 import {
   CLASS_TEACHER_SUBJECT_TOKEN,
+  computeAssessmentGrade,
   getStreamsForGrade,
+  getStudentRegisteredSubjects,
   getSubjectsForGrade,
   type AcademicSubmissionDeadlineConfig,
+  type CbcLearnerMasteryLevel,
+  type LearnerProgressiveEntry,
+  type LessonNote,
   type LessonPlan,
+  type ProgressiveReportSubjectScore,
+  type RecordOfWork,
+  type RecordOfWorkCoverageStatus,
   type SchemeOfWork,
   type SchemeOfWorkWeek,
+  type Student,
+  type TeacherLessonAttendanceRecord,
   type TeacherProfile,
   type Tenant,
   type TimetableSlot,
@@ -377,6 +387,8 @@ export function buildDefaultAcademicsForTenant(
 ): {
   schemesOfWork: SchemeOfWork[];
   lessonPlans: LessonPlan[];
+  recordsOfWork: RecordOfWork[];
+  lessonNotes: LessonNote[];
   config: AcademicSubmissionDeadlineConfig;
 } {
   const config = getDefaultAcademicSubmissionConfig(tenant);
@@ -385,6 +397,8 @@ export function buildDefaultAcademicsForTenant(
   const reviewerName = tenant.teachers?.[0]?.name || 'School Principal';
   const schemesOfWork: SchemeOfWork[] = [];
   const lessonPlans: LessonPlan[] = [];
+  const recordsOfWork: RecordOfWork[] = [];
+  const lessonNotes: LessonNote[] = [];
 
   const teacherLimit = options?.maxTeachers ?? (tenant.teachers.length > 20 ? 18 : tenant.teachers.length);
   // Always ensure named portal teachers (like Tabitha, John, Juma, Kamau, Priya) are included first
@@ -534,8 +548,363 @@ export function buildDefaultAcademicsForTenant(
         createdAt: '2026-11-13T09:00:00Z',
         updatedAt: '2026-11-15T08:45:00Z',
       });
+
+      const masteryLevels: CbcLearnerMasteryLevel[] = [
+        'Meeting Expectations',
+        'Exceeding Expectations',
+        'Approaching Expectations',
+      ];
+      const coverageStatuses: RecordOfWorkCoverageStatus[] = [
+        'Completed',
+        'Completed',
+        'Partially Covered',
+        'Carried Forward',
+      ];
+
+      // Completed prior week (Week currentWeekNumber - 1) + active week record
+      const prevWeek = Math.max(1, lpWeek - 1);
+      const prevWeekObj = weeks.find((w) => w.weekNumber === prevWeek) || weeks[0];
+      const activeWeekObj = weeks.find((w) => w.weekNumber === lpWeek) || weeks[weeks.length - 1];
+      const idSlug = tenant.id.replace(/[^a-z0-9]/gi, '').slice(0, 10);
+
+      recordsOfWork.push({
+        id: `row-${idSlug}-${tIdx + 1}-${pIdx + 1}-w${prevWeek}`,
+        tenantId: tenant.id,
+        schemeOfWorkId: schemeId,
+        academicYear,
+        term,
+        weekNumber: prevWeek,
+        dateCovered: `2026-11-${String(9 + ((tIdx + pIdx) % 5)).padStart(2, '0')}`,
+        grade,
+        section,
+        subject,
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        strand: prevWeekObj.strand,
+        subStrand: prevWeekObj.subStrand,
+        workCovered: `Covered ${prevWeekObj.subStrand}: ${prevWeekObj.learningActivities}`,
+        lessonsTaughtCount: 4,
+        lessonsPlannedCount: 4,
+        learnerMastery: masteryLevels[(tIdx + pIdx) % 2],
+        coverageStatus: 'Completed',
+        challengesAndRemediation:
+          'Three learners needed additional guided practice; scheduled short peer-coaching recap at the start of Week 8.',
+        remarks: 'Syllabus pacing on track for Term assessment.',
+        parentSummary: `Completed ${prevWeekObj.strand} (${prevWeekObj.subStrand}) with practical class exercises.`,
+        status: 'Approved',
+        parentVisible: parentVisible || pIdx === 0,
+        dueDate: '2026-11-13',
+        submittedAt: '2026-11-13T15:30:00Z',
+        reviewedByName: reviewerName,
+        reviewedAt: '2026-11-14T09:10:00Z',
+        reviewFeedback: 'Weekly coverage verified against Scheme of Work.',
+        createdAt: '2026-11-13T15:00:00Z',
+        updatedAt: '2026-11-14T09:10:00Z',
+      });
+
+      const activeCovStatus = coverageStatuses[(tIdx + pIdx) % coverageStatuses.length];
+      recordsOfWork.push({
+        id: `row-${idSlug}-${tIdx + 1}-${pIdx + 1}-w${lpWeek}`,
+        tenantId: tenant.id,
+        schemeOfWorkId: schemeId,
+        lessonPlanId: `lp-${idSlug}-${tIdx + 1}-${pIdx + 1}-w${lpWeek}`,
+        academicYear,
+        term,
+        weekNumber: lpWeek,
+        dateCovered: `2026-11-${String(16 + ((tIdx + pIdx) % 5)).padStart(2, '0')}`,
+        grade,
+        section,
+        subject,
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        strand: activeWeekObj.strand,
+        subStrand: activeWeekObj.subStrand,
+        workCovered:
+          activeCovStatus === 'Completed'
+            ? `Taught ${activeWeekObj.subStrand} and assessed learners using ${activeWeekObj.assessmentMethod}.`
+            : activeCovStatus === 'Partially Covered'
+            ? `Introduced ${activeWeekObj.subStrand}; practical demonstration completed, remaining drill items scheduled next period.`
+            : `Carried forward ${activeWeekObj.subStrand} due to mid-week co-curricular assembly; reschedule in Lesson 1 next week.`,
+        lessonsTaughtCount: activeCovStatus === 'Completed' ? 4 : activeCovStatus === 'Partially Covered' ? 3 : 1,
+        lessonsPlannedCount: 4,
+        learnerMastery: masteryLevels[(tIdx + pIdx + 1) % masteryLevels.length],
+        coverageStatus: activeCovStatus,
+        challengesAndRemediation:
+          activeCovStatus === 'Completed'
+            ? 'All core competencies demonstrated; extension prompts given to early finishers.'
+            : 'Schedule 15-minute consolidation recap before moving to next sub-strand.',
+        remarks:
+          activeCovStatus === 'Completed'
+            ? 'Covered as scheduled.'
+            : 'Carry forward remainder to next week.',
+        parentSummary: `Week ${lpWeek} focus on ${activeWeekObj.subStrand} (${activeCovStatus.toLowerCase()}).`,
+        status: lpStatus,
+        parentVisible: lpStatus === 'Approved' && parentVisible,
+        dueDate: '2026-11-20',
+        submittedAt: lpStatus === 'Draft' ? undefined : '2026-11-20T16:00:00Z',
+        reviewedByName:
+          lpStatus === 'Approved' || lpStatus === 'Revision Requested' ? reviewerName : undefined,
+        reviewedAt:
+          lpStatus === 'Approved' || lpStatus === 'Revision Requested'
+            ? '2026-11-21T09:00:00Z'
+            : undefined,
+        reviewFeedback:
+          lpStatus === 'Revision Requested'
+            ? 'Please specify exact remedial plan for learners approaching expectations.'
+            : lpStatus === 'Approved'
+            ? 'Coverage logged and verified.'
+            : undefined,
+        createdAt: '2026-11-19T14:00:00Z',
+        updatedAt: '2026-11-21T09:00:00Z',
+      });
+
+      const noteIdSlug = tenant.id.replace(/[^a-z0-9]/gi, '').slice(0, 10);
+      const linkedLpId = `lp-${noteIdSlug}-${tIdx + 1}-${pIdx + 1}-w${lpWeek}`;
+      const noteDate = `2026-11-${String(16 + ((tIdx + pIdx) % 5)).padStart(2, '0')}`;
+      const noteSubmitted = lpStatus === 'Approved' || lpStatus === 'Submitted';
+      lessonNotes.push({
+        id: `ln-${noteIdSlug}-${tIdx + 1}-${pIdx + 1}-w${lpWeek}`,
+        tenantId: tenant.id,
+        schemeOfWorkId: schemeId,
+        lessonPlanId: linkedLpId,
+        academicYear,
+        term,
+        weekNumber: lpWeek,
+        lessonDate: noteDate,
+        grade,
+        section,
+        subject,
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        submissionStatus: noteSubmitted ? 'Submitted' : 'Not Submitted',
+        remarks: noteSubmitted
+          ? 'Lesson notes file checked and verified for Week ' + lpWeek + '.'
+          : 'Pending final example sheets; expected before Friday check.',
+        status: noteSubmitted ? 'Submitted' : 'Draft',
+        parentVisible: false,
+        dueDate: '2026-11-16',
+        submittedAt: noteSubmitted ? '2026-11-15T17:20:00Z' : undefined,
+        createdAt: '2026-11-15T14:00:00Z',
+        updatedAt: '2026-11-16T08:30:00Z',
+      });
     }
   });
 
-  return { schemesOfWork, lessonPlans, config };
+  return { schemesOfWork, lessonPlans, recordsOfWork, lessonNotes, config };
+}
+
+export function buildDefaultTeacherLessonAttendanceForTenant(
+  tenant: Tenant,
+  timetable: TimetableSlot[]
+): TeacherLessonAttendanceRecord[] {
+  const tenantSlots = timetable.filter((s) => s.tenantId === tenant.id);
+  const mondaySlots = tenantSlots.filter((s) => s.day === 'Monday').slice(0, 10);
+  if (mondaySlots.length === 0 || tenant.teachers.length === 0) return [];
+
+  const sampleDate = '2026-11-16'; // Monday
+  const slug = tenant.id.replace(/[^a-z0-9]/gi, '').slice(0, 8);
+
+  return mondaySlots.map((slot, idx) => {
+    const delegateTeacher =
+      tenant.teachers.find((t) => t.id !== slot.teacherId) || tenant.teachers[0];
+    const mode = idx % 5;
+    if (mode === 1 && delegateTeacher && delegateTeacher.id !== slot.teacherId) {
+      return {
+        id: `tla-${slug}-${idx + 1}`,
+        tenantId: tenant.id,
+        date: sampleDate,
+        dayOfWeek: slot.day,
+        timetableSlotId: slot.id,
+        periodNumber: slot.period,
+        timeSlot: `${slot.startTime}–${slot.endTime}`,
+        grade: slot.grade,
+        section: slot.section,
+        subject: slot.subject,
+        scheduledTeacherId: slot.teacherId,
+        scheduledTeacherName: slot.teacherName,
+        status: 'Delegated',
+        delegatedTeacherId: delegateTeacher.id,
+        delegatedTeacherName: delegateTeacher.name,
+        delegationNotes: 'Mandated while scheduled teacher attends sub-county CBC workshop.',
+        topicCovered: `${slot.subject} guided problem solving & workbook check`,
+        remarks: `Mandate formally assigned to ${delegateTeacher.name}.`,
+        recordedBy: 'Academic Office',
+        createdAt: '2026-11-16T08:15:00Z',
+        updatedAt: '2026-11-16T08:15:00Z',
+      };
+    }
+    if (mode === 2) {
+      return {
+        id: `tla-${slug}-${idx + 1}`,
+        tenantId: tenant.id,
+        date: sampleDate,
+        dayOfWeek: slot.day,
+        timetableSlotId: slot.id,
+        periodNumber: slot.period,
+        timeSlot: `${slot.startTime}–${slot.endTime}`,
+        grade: slot.grade,
+        section: slot.section,
+        subject: slot.subject,
+        scheduledTeacherId: slot.teacherId,
+        scheduledTeacherName: slot.teacherName,
+        status: 'Recovered',
+        originalMissedDate: '2026-11-12',
+        recoveredDate: sampleDate,
+        recoveredPeriod: slot.period,
+        recoveredByTeacherId: slot.teacherId,
+        recoveredByTeacherName: slot.teacherName,
+        topicCovered: `Make-up lesson covering missed ${slot.subject} strand`,
+        remarks: 'Recovered afternoon remedial block; full syllabus parity restored.',
+        recordedBy: slot.teacherName,
+        createdAt: '2026-11-16T15:30:00Z',
+        updatedAt: '2026-11-16T15:30:00Z',
+      };
+    }
+    if (mode === 4) {
+      return {
+        id: `tla-${slug}-${idx + 1}`,
+        tenantId: tenant.id,
+        date: sampleDate,
+        dayOfWeek: slot.day,
+        timetableSlotId: slot.id,
+        periodNumber: slot.period,
+        timeSlot: `${slot.startTime}–${slot.endTime}`,
+        grade: slot.grade,
+        section: slot.section,
+        subject: slot.subject,
+        scheduledTeacherId: slot.teacherId,
+        scheduledTeacherName: slot.teacherName,
+        status: 'Missed',
+        remarks: 'Class rescheduled for recovery later in the week.',
+        recordedBy: 'Academic Office',
+        createdAt: '2026-11-16T12:00:00Z',
+        updatedAt: '2026-11-16T12:00:00Z',
+      };
+    }
+    return {
+      id: `tla-${slug}-${idx + 1}`,
+      tenantId: tenant.id,
+      date: sampleDate,
+      dayOfWeek: slot.day,
+      timetableSlotId: slot.id,
+      periodNumber: slot.period,
+      timeSlot: `${slot.startTime}–${slot.endTime}`,
+      grade: slot.grade,
+      section: slot.section,
+      subject: slot.subject,
+      scheduledTeacherId: slot.teacherId,
+      scheduledTeacherName: slot.teacherName,
+      status: 'Attended',
+      topicCovered: `${slot.subject} scheduled curriculum lesson delivered`,
+      remarks: 'Conducted on schedule.',
+      recordedBy: slot.teacherName,
+      createdAt: '2026-11-16T09:00:00Z',
+      updatedAt: '2026-11-16T09:00:00Z',
+    };
+  });
+}
+
+export function buildDefaultProgressiveReportsForTenant(
+  tenant: Tenant,
+  students: Student[]
+): LearnerProgressiveEntry[] {
+  const tenantActive = students.filter((s) => s.tenantId === tenant.id && !s.deleted);
+  const parentLinked = tenantActive.filter((s) => Boolean(s.parentUserId));
+  const seenIds = new Set<string>();
+  const activeStudents: Student[] = [];
+  for (const stu of [...parentLinked, ...tenantActive.slice(0, 12)]) {
+    if (seenIds.has(stu.id)) continue;
+    seenIds.add(stu.id);
+    activeStudents.push(stu);
+  }
+  if (activeStudents.length === 0) return [];
+
+  const slug = tenant.id.replace(/[^a-z0-9]/gi, '').slice(0, 8);
+  const checkpoints = [
+    {
+      label: 'CAT 1 Formative Check',
+      date: '2026-09-25',
+      term: tenant.currentTerm || 'Term 1',
+      academicYear: tenant.academicYear || '2026–2027',
+      seq: 1,
+      offset: -4,
+      source: 'import' as const,
+    },
+    {
+      label: 'CAT 2 Progressive Review',
+      date: '2026-10-30',
+      term: tenant.currentTerm || 'Term 1',
+      academicYear: tenant.academicYear || '2026–2027',
+      seq: 2,
+      offset: 2,
+      source: 'manual' as const,
+    },
+  ];
+
+  const entries: LearnerProgressiveEntry[] = [];
+  activeStudents.forEach((stu, sIdx) => {
+    const subs = getStudentRegisteredSubjects(tenant, stu).slice(0, 6);
+    if (subs.length === 0) return;
+
+    checkpoints.forEach((cp, cIdx) => {
+      const subjectRows: ProgressiveReportSubjectScore[] = subs.map((sub, subIdx) => {
+        const base = 66 + ((sIdx * 5 + subIdx * 3) % 26) + cp.offset;
+        const clamped = Math.max(38, Math.min(98, base));
+        const graded = computeAssessmentGrade(clamped, stu.grade);
+        const mastery: CbcLearnerMasteryLevel =
+          clamped >= 80
+            ? 'Exceeding Expectations'
+            : clamped >= 65
+            ? 'Meeting Expectations'
+            : clamped >= 50
+            ? 'Approaching Expectations'
+            : 'Below Expectations';
+        return {
+          subject: sub,
+          score: clamped,
+          maxScore: 100,
+          resultStatus: 'Scored',
+          letterGrade: graded.letterGrade,
+          gpaPoints: graded.gpaPoints,
+          masteryLevel: mastery,
+          remarks: clamped >= 80 ? 'Strong mastery demonstrated' : 'Steady term growth',
+        };
+      });
+
+      const totalScore = subjectRows.reduce((sum, r) => sum + (r.score ?? 0), 0);
+      const maxPossible = subjectRows.length * 100;
+      const meanScore = Number((totalScore / subjectRows.length).toFixed(1));
+      const meanGraded = computeAssessmentGrade(meanScore, stu.grade);
+
+      entries.push({
+        id: `prog-${slug}-${stu.id.slice(-6)}-${cIdx + 1}`,
+        tenantId: tenant.id,
+        studentId: stu.id,
+        studentName: stu.fullName,
+        studentCode: stu.studentCode,
+        grade: stu.grade,
+        section: stu.section,
+        academicYear: cp.academicYear,
+        term: cp.term,
+        assessmentLabel: cp.label,
+        assessmentDate: cp.date,
+        sequenceOrder: cp.seq,
+        subjects: subjectRows,
+        totalScore,
+        maxPossible,
+        meanScore,
+        meanGrade: meanGraded.letterGrade,
+        classTeacherRemarks:
+          cIdx === 1
+            ? 'Notable upward trajectory between CAT 1 and CAT 2 checkpoints.'
+            : 'Solid early-term foundation; continue consistent homework follow-up.',
+        source: cp.source,
+        recordedByName: tenant.teachers[0]?.name || 'Academic Office',
+        createdAt: `${cp.date}T12:00:00Z`,
+        updatedAt: `${cp.date}T12:00:00Z`,
+      });
+    });
+  });
+
+  return entries;
 }

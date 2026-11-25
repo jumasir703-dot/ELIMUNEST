@@ -68,6 +68,7 @@ import {
   type BudgetApprovalStatus,
   type CalendarEntityStatus,
   type CbcClusterId,
+  type CbcLearnerMasteryLevel,
   type CreditNoteRecord,
   type CurrencyCode,
   type CustomRoleDefinition,
@@ -96,6 +97,9 @@ import {
   type IndependentVotelineItem,
   type IndependentVotelinePayment,
   type LeaveOutChit,
+  type LearnerProgressiveEntry,
+  type LessonNote,
+  type LessonNoteSubmissionStatus,
   type LessonPlan,
   type LifecycleAuditAction,
   type LifecycleAuditEntry,
@@ -112,6 +116,7 @@ import {
   type PayrollEntry,
   type PayrollStatutoryRateSchedule,
   type PayrollStatus,
+  type ProgressiveReportSubjectScore,
   type PromotionAction,
   type PromotionExecuteItem,
   type PromotionExecuteResult,
@@ -120,6 +125,8 @@ import {
   type ReconciliationChannel,
   type ReconciliationLine,
   type ReconciliationStatus,
+  type RecordOfWork,
+  type RecordOfWorkCoverageStatus,
   type SchemeOfWork,
   type SchemeOfWorkWeek,
   type SchoolExpense,
@@ -133,6 +140,8 @@ import {
   type SubscriptionCycle,
   type SuperAdminTenantSummary,
   type TeacherClassAssignment,
+  type TeacherLessonAttendanceRecord,
+  type TeacherLessonAttendanceStatus,
   type TeacherProfile,
   type Tenant,
   type TenantBranding,
@@ -152,6 +161,8 @@ import {
 } from '../src/shared/types.ts';
 import {
   buildDefaultAcademicsForTenant,
+  buildDefaultProgressiveReportsForTenant,
+  buildDefaultTeacherLessonAttendanceForTenant,
   buildWeeksFromSubjectTemplate,
   getDefaultAcademicSubmissionConfig,
 } from './seedAcademics.ts';
@@ -511,6 +522,10 @@ export class TenantStore {
   ): { state: DatabaseState; dirty: boolean } {
     let dirty = initiallyDirty;
     const hadAcademics = Array.isArray(parsed.schemesOfWork);
+    const hadRecordsOfWork = Array.isArray(parsed.recordsOfWork);
+    const hadLessonNotes = Array.isArray(parsed.lessonNotes);
+    const hadTeacherLessonAttendance = Array.isArray(parsed.teacherLessonAttendance);
+    const hadProgressiveReports = Array.isArray(parsed.progressiveReports);
 
     if (!Array.isArray(parsed.students)) {
       parsed.students = [];
@@ -532,6 +547,10 @@ export class TenantStore {
       parsed.staffAttendance = [];
       dirty = true;
     }
+    if (!Array.isArray(parsed.teacherLessonAttendance)) {
+      parsed.teacherLessonAttendance = [];
+      dirty = true;
+    }
     if (!Array.isArray(parsed.leaveOutChits)) {
       parsed.leaveOutChits = [];
       dirty = true;
@@ -542,6 +561,10 @@ export class TenantStore {
     }
     if (!Array.isArray(parsed.examResults)) {
       parsed.examResults = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.progressiveReports)) {
+      parsed.progressiveReports = [];
       dirty = true;
     }
     if (!Array.isArray(parsed.feeStructures)) {
@@ -570,6 +593,14 @@ export class TenantStore {
     }
     if (!Array.isArray(parsed.lessonPlans)) {
       parsed.lessonPlans = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.recordsOfWork)) {
+      parsed.recordsOfWork = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.lessonNotes)) {
+      parsed.lessonNotes = [];
       dirty = true;
     }
 
@@ -1385,6 +1416,43 @@ export class TenantStore {
           const built = buildDefaultAcademicsForTenant(t, { timetable: parsed.timetable });
           parsed.schemesOfWork!.push(...built.schemesOfWork);
           parsed.lessonPlans!.push(...built.lessonPlans);
+          parsed.recordsOfWork!.push(...built.recordsOfWork);
+          parsed.lessonNotes!.push(...built.lessonNotes);
+          dirty = true;
+        }
+      } else {
+        if (!hadRecordsOfWork) {
+          const hasTenantRecords = parsed.recordsOfWork!.some((r) => r.tenantId === t.id);
+          if (!hasTenantRecords) {
+            const built = buildDefaultAcademicsForTenant(t, { timetable: parsed.timetable });
+            parsed.recordsOfWork!.push(...built.recordsOfWork);
+            dirty = true;
+          }
+        }
+        if (!hadLessonNotes) {
+          const hasTenantNotes = parsed.lessonNotes!.some((n) => n.tenantId === t.id);
+          if (!hasTenantNotes) {
+            const built = buildDefaultAcademicsForTenant(t, { timetable: parsed.timetable });
+            parsed.lessonNotes!.push(...built.lessonNotes);
+            dirty = true;
+          }
+        }
+      }
+      if (!hadTeacherLessonAttendance) {
+        const hasTenantTla = parsed.teacherLessonAttendance!.some((r) => r.tenantId === t.id);
+        if (!hasTenantTla) {
+          parsed.teacherLessonAttendance!.push(
+            ...buildDefaultTeacherLessonAttendanceForTenant(t, parsed.timetable)
+          );
+          dirty = true;
+        }
+      }
+      if (!hadProgressiveReports) {
+        const hasTenantProg = parsed.progressiveReports!.some((r) => r.tenantId === t.id);
+        if (!hasTenantProg) {
+          parsed.progressiveReports!.push(
+            ...buildDefaultProgressiveReportsForTenant(t, parsed.students)
+          );
           dirty = true;
         }
       }
@@ -1623,9 +1691,11 @@ export class TenantStore {
       ['timetable', this.state.timetable],
       ['attendance', this.state.attendance],
       ['staffAttendance', this.state.staffAttendance],
+      ['teacherLessonAttendance', this.state.teacherLessonAttendance || []],
       ['leaveOutChits', this.state.leaveOutChits],
       ['examCycles', this.state.examCycles],
       ['examResults', this.state.examResults],
+      ['progressiveReports', this.state.progressiveReports || []],
       ['feeStructures', this.state.feeStructures],
       ['invoices', this.state.invoices],
       ['creditNotes', this.state.creditNotes || []],
@@ -1646,6 +1716,8 @@ export class TenantStore {
       ['notifications', this.state.notifications],
       ['schemesOfWork', this.state.schemesOfWork || []],
       ['lessonPlans', this.state.lessonPlans || []],
+      ['recordsOfWork', this.state.recordsOfWork || []],
+      ['lessonNotes', this.state.lessonNotes || []],
       ['adminAuditLogs', this.state.adminAuditLogs || []],
     ];
 
@@ -1909,9 +1981,15 @@ export class TenantStore {
     const allTimetable = this.state.timetable.filter((t) => t.tenantId === tenantId);
     const allAttendance = this.state.attendance.filter((a) => a.tenantId === tenantId);
     const allStaffAttendance = this.state.staffAttendance.filter((a) => a.tenantId === tenantId);
+    const allTeacherLessonAttendance = (this.state.teacherLessonAttendance || []).filter(
+      (a) => a.tenantId === tenantId
+    );
     const allLeaveChits = this.state.leaveOutChits.filter((c) => c.tenantId === tenantId);
     const allExamCycles = this.state.examCycles.filter((e) => e.tenantId === tenantId);
     const allExamResults = this.state.examResults.filter((r) => r.tenantId === tenantId);
+    const allProgressiveReports = (this.state.progressiveReports || []).filter(
+      (p) => p.tenantId === tenantId
+    );
     const allFeeStructures = this.state.feeStructures.filter((f) => f.tenantId === tenantId);
     const allInvoices = this.state.invoices.filter((i) => i.tenantId === tenantId);
     const allCreditNotes = (this.state.creditNotes || []).filter((c) => c.tenantId === tenantId);
@@ -1936,6 +2014,16 @@ export class TenantStore {
     const allNotifications = this.state.notifications.filter((n) => n.tenantId === tenantId);
     const allSchemes = (this.state.schemesOfWork || []).filter((s) => s.tenantId === tenantId);
     const allLessonPlans = (this.state.lessonPlans || []).filter((l) => l.tenantId === tenantId);
+    const allRecordsOfWork = (this.state.recordsOfWork || []).filter((r) => r.tenantId === tenantId);
+    const allLessonNotes = (this.state.lessonNotes || [])
+      .filter((n) => n.tenantId === tenantId)
+      .map((n) => ({
+        ...n,
+        submissionStatus:
+          n.submissionStatus ||
+          (n.status === 'Submitted' || n.status === 'Approved' ? 'Submitted' : 'Not Submitted'),
+        remarks: n.remarks ?? n.reviewFeedback ?? undefined,
+      }));
 
     const sanitizeSchemeForParentOrStudent = (s: SchemeOfWork): SchemeOfWork => ({
       ...s,
@@ -1950,6 +2038,29 @@ export class TenantStore {
       reviewFeedback: undefined,
       reviewedByUserId: undefined,
       createdByUserId: undefined,
+    });
+
+    const sanitizeRecordOfWorkForParentOrStudent = (r: RecordOfWork): RecordOfWork => ({
+      ...r,
+      challengesAndRemediation: undefined,
+      reviewFeedback: undefined,
+      reviewedByUserId: undefined,
+      createdByUserId: undefined,
+    });
+
+    const sanitizeLessonNoteForParentOrStudent = (n: LessonNote): LessonNote => ({
+      ...n,
+      internalTeacherGuide: undefined,
+      reviewFeedback: undefined,
+      reviewedByUserId: undefined,
+      createdByUserId: undefined,
+    });
+
+    const sanitizeProgressiveForParentOrStudent = (
+      p: LearnerProgressiveEntry
+    ): LearnerProgressiveEntry => ({
+      ...p,
+      recordedByUserId: undefined,
     });
 
     const matchesStudentScope = (
@@ -1989,11 +2100,15 @@ export class TenantStore {
         ),
         attendance: allAttendance.filter((a) => ownIds.has(a.studentId)),
         staffAttendance: [],
+        teacherLessonAttendance: [],
         leaveOutChits: allLeaveChits.filter((c) => ownIds.has(c.studentId)),
         examCycles: publishedCycles,
         examResults: allExamResults.filter(
           (r) => ownIds.has(r.studentId) && publishedCycleIds.has(r.examCycleId)
         ),
+        progressiveReports: allProgressiveReports
+          .filter((p) => ownIds.has(p.studentId))
+          .map(sanitizeProgressiveForParentOrStudent),
         feeStructures: [],
         invoices: [],
         creditNotes: [],
@@ -2041,6 +2156,18 @@ export class TenantStore {
                 )
                 .map(sanitizeLessonPlanForParentOrStudent)
             : [],
+        recordsOfWork:
+          canReadAcademics && ownStudent
+            ? allRecordsOfWork
+                .filter(
+                  (r) =>
+                    r.status === 'Approved' &&
+                    r.parentVisible === true &&
+                    matchesStudentScope(ownStudent, r)
+                )
+                .map(sanitizeRecordOfWorkForParentOrStudent)
+            : [],
+        lessonNotes: [],
       };
     }
 
@@ -2067,11 +2194,15 @@ export class TenantStore {
         ),
         attendance: allAttendance.filter((a) => childIds.has(a.studentId)),
         staffAttendance: [],
+        teacherLessonAttendance: [],
         leaveOutChits: allLeaveChits.filter((c) => childIds.has(c.studentId)),
         examCycles: publishedCycles,
         examResults: allExamResults.filter(
           (r) => childIds.has(r.studentId) && publishedCycleIds.has(r.examCycleId)
         ),
+        progressiveReports: allProgressiveReports
+          .filter((p) => childIds.has(p.studentId))
+          .map(sanitizeProgressiveForParentOrStudent),
         feeStructures: allFeeStructures.filter((f) => childGrades.has(f.grade)),
         invoices: allInvoices.filter((i) => childIds.has(i.studentId)),
         creditNotes: allCreditNotes.filter((c) => childIds.has(c.studentId)),
@@ -2115,6 +2246,17 @@ export class TenantStore {
               )
               .map(sanitizeLessonPlanForParentOrStudent)
           : [],
+        recordsOfWork: canReadAcademics
+          ? allRecordsOfWork
+              .filter(
+                (r) =>
+                  r.status === 'Approved' &&
+                  r.parentVisible === true &&
+                  linkedStudents.some((child) => matchesStudentScope(child, r))
+              )
+              .map(sanitizeRecordOfWorkForParentOrStudent)
+          : [],
+        lessonNotes: [],
       };
     }
 
@@ -2151,11 +2293,21 @@ export class TenantStore {
           ? allAttendance
           : allAttendance.filter((a) => teacherStudentIds.has(a.studentId)),
         staffAttendance: [],
+        teacherLessonAttendance: teacherProfile
+          ? allTeacherLessonAttendance.filter(
+              (r) =>
+                r.scheduledTeacherId === teacherProfile.id ||
+                r.delegatedTeacherId === teacherProfile.id ||
+                r.recoveredByTeacherId === teacherProfile.id ||
+                isTeacherAssignedToCohort(teacherProfile, r.grade, r.section, allTimetable)
+            )
+          : [],
         leaveOutChits: canReadAdmissions
           ? allLeaveChits
           : allLeaveChits.filter((c) => teacherStudentIds.has(c.studentId)),
         examCycles: allExamCycles,
         examResults: allExamResults.filter((r) => teacherStudentIds.has(r.studentId)),
+        progressiveReports: allProgressiveReports.filter((p) => teacherStudentIds.has(p.studentId)),
         feeStructures: canReadFees ? allFeeStructures : [],
         invoices: canReadFees ? allInvoices : [],
         creditNotes: canReadFees ? allCreditNotes : [],
@@ -2185,6 +2337,14 @@ export class TenantStore {
               .filter((lp) => isOwnAcademicItem(lp) || lp.status === 'Approved')
               .map((lp) => (isOwnAcademicItem(lp) ? lp : sanitizeLessonPlanForParentOrStudent(lp)))
           : [],
+        recordsOfWork: canReadAcademics
+          ? allRecordsOfWork
+              .filter((r) => isOwnAcademicItem(r) || r.status === 'Approved')
+              .map((r) => (isOwnAcademicItem(r) ? r : sanitizeRecordOfWorkForParentOrStudent(r)))
+          : [],
+        lessonNotes: canReadAcademics
+          ? allLessonNotes.filter((n) => isOwnAcademicItem(n))
+          : [],
       };
     }
 
@@ -2206,9 +2366,11 @@ export class TenantStore {
         timetable: canReadTimetable ? allTimetable : [],
         attendance: canReadAttendance ? allAttendance : [],
         staffAttendance: [],
+        teacherLessonAttendance: [],
         leaveOutChits: canReadAttendance ? allLeaveChits : [],
         examCycles: canReadExams ? allExamCycles : [],
         examResults: canReadExams ? allExamResults : [],
+        progressiveReports: canReadExams ? allProgressiveReports : [],
         feeStructures: allFeeStructures,
         invoices: allInvoices,
         creditNotes: allCreditNotes,
@@ -2228,6 +2390,8 @@ export class TenantStore {
         notifications: allNotifications,
         schemesOfWork: canReadAcademics ? allSchemes : [],
         lessonPlans: canReadAcademics ? allLessonPlans : [],
+        recordsOfWork: canReadAcademics ? allRecordsOfWork : [],
+        lessonNotes: canReadAcademics ? allLessonNotes : [],
       };
     }
 
@@ -2246,9 +2410,11 @@ export class TenantStore {
         timetable: allTimetable,
         attendance: allAttendance,
         staffAttendance: [],
+        teacherLessonAttendance: [],
         leaveOutChits: allLeaveChits,
         examCycles: allExamCycles,
         examResults: allExamResults,
+        progressiveReports: allProgressiveReports,
         feeStructures: canReadFees ? allFeeStructures : [],
         invoices: canReadFees ? allInvoices : [],
         creditNotes: canReadFees ? allCreditNotes : [],
@@ -2270,6 +2436,8 @@ export class TenantStore {
           : allNotifications.filter((n) => n.category !== 'fee'),
         schemesOfWork: canReadAcademics ? allSchemes : [],
         lessonPlans: canReadAcademics ? allLessonPlans : [],
+        recordsOfWork: canReadAcademics ? allRecordsOfWork : [],
+        lessonNotes: canReadAcademics ? allLessonNotes : [],
       };
     }
 
@@ -2285,9 +2453,11 @@ export class TenantStore {
       timetable: allTimetable,
       attendance: allAttendance,
       staffAttendance: allStaffAttendance,
+      teacherLessonAttendance: allTeacherLessonAttendance,
       leaveOutChits: allLeaveChits,
       examCycles: allExamCycles,
       examResults: allExamResults,
+      progressiveReports: allProgressiveReports,
       feeStructures: allFeeStructures,
       invoices: allInvoices,
       creditNotes: allCreditNotes,
@@ -2308,6 +2478,8 @@ export class TenantStore {
       notifications: allNotifications,
       schemesOfWork: allSchemes,
       lessonPlans: allLessonPlans,
+      recordsOfWork: allRecordsOfWork,
+      lessonNotes: allLessonNotes,
     };
   }
 
@@ -13454,6 +13626,16 @@ export class TenantStore {
         lp.schemeOfWorkId = undefined;
       }
     });
+    (this.state.recordsOfWork || []).forEach((row) => {
+      if (row.tenantId === tenantId && row.schemeOfWorkId === schemeId) {
+        row.schemeOfWorkId = undefined;
+      }
+    });
+    (this.state.lessonNotes || []).forEach((ln) => {
+      if (ln.tenantId === tenantId && ln.schemeOfWorkId === schemeId) {
+        ln.schemeOfWorkId = undefined;
+      }
+    });
     this.persist();
     this.syncTenant(tenantId, 'academics:scheme-deleted');
     return { deleted: true };
@@ -13891,8 +14073,477 @@ export class TenantStore {
       }
     }
     list.splice(idx, 1);
+    (this.state.recordsOfWork || []).forEach((row) => {
+      if (row.tenantId === tenantId && row.lessonPlanId === lessonPlanId) {
+        row.lessonPlanId = undefined;
+      }
+    });
+    (this.state.lessonNotes || []).forEach((ln) => {
+      if (ln.tenantId === tenantId && ln.lessonPlanId === lessonPlanId) {
+        ln.lessonPlanId = undefined;
+      }
+    });
     this.persist();
     this.syncTenant(tenantId, 'academics:lesson-plan-deleted');
+    return { deleted: true };
+  }
+
+  upsertRecordOfWork(
+    tenantId: string,
+    input: {
+      id?: string;
+      schemeOfWorkId?: string;
+      lessonPlanId?: string;
+      academicYear?: string;
+      term?: string;
+      weekNumber: number;
+      dateCovered: string;
+      grade?: string;
+      section?: string;
+      subject?: string;
+      teacherId?: string;
+      strand?: string;
+      subStrand?: string;
+      workCovered: string;
+      lessonsTaughtCount?: number;
+      lessonsPlannedCount?: number;
+      learnerMastery?: CbcLearnerMasteryLevel;
+      coverageStatus?: RecordOfWorkCoverageStatus;
+      challengesAndRemediation?: string;
+      remarks?: string;
+      parentSummary?: string;
+      parentVisible?: boolean;
+      submitNow?: boolean;
+      status?: AcademicDocumentStatus;
+    },
+    authUser: TenantUser
+  ): RecordOfWork {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.recordsOfWork)) this.state.recordsOfWork = [];
+
+    const existing = input.id
+      ? this.state.recordsOfWork.find((r) => r.id === input.id && r.tenantId === tenantId)
+      : undefined;
+    if (input.id && !existing) {
+      throw new ConflictError('Record of Work not found.', 404);
+    }
+
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (existing && !isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only edit your own Records of Work.', 403);
+      }
+    }
+
+    const linkedScheme = input.schemeOfWorkId
+      ? (this.state.schemesOfWork || []).find(
+          (s) => s.id === input.schemeOfWorkId && s.tenantId === tenantId
+        )
+      : undefined;
+    if (input.schemeOfWorkId && !linkedScheme) {
+      throw new ConflictError('Linked Scheme of Work not found in this school.', 404);
+    }
+
+    const linkedLessonPlan = input.lessonPlanId
+      ? (this.state.lessonPlans || []).find(
+          (l) => l.id === input.lessonPlanId && l.tenantId === tenantId
+        )
+      : undefined;
+    if (input.lessonPlanId && !linkedLessonPlan) {
+      throw new ConflictError('Linked Lesson Plan not found in this school.', 404);
+    }
+
+    const grade = String(
+      input.grade || linkedLessonPlan?.grade || linkedScheme?.grade || existing?.grade || ''
+    ).trim();
+    const section = String(
+      input.section || linkedLessonPlan?.section || linkedScheme?.section || existing?.section || 'A'
+    ).trim();
+    const subject = String(
+      input.subject || linkedLessonPlan?.subject || linkedScheme?.subject || existing?.subject || ''
+    ).trim();
+    if (!grade || !subject) {
+      throw new ConflictError('Grade and Subject are required for a Record of Work.', 400);
+    }
+
+    const teacher = this.resolveAcademicsTeacherActor(
+      tenant,
+      authUser,
+      input.teacherId || existing?.teacherId
+    );
+    if (!isAdmin && teacher) {
+      this.assertTeacherCohortAccessForAcademics(tenant, teacher, grade, section, subject);
+    }
+
+    const weekNumber = Math.max(
+      1,
+      Math.min(14, Math.round(Number(input.weekNumber ?? existing?.weekNumber) || 1))
+    );
+    const dateCovered = String(input.dateCovered || existing?.dateCovered || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateCovered)) {
+      throw new ConflictError('Date Covered must use YYYY-MM-DD format.', 400);
+    }
+
+    const schemeWeekMatch = linkedScheme?.weeks.find((w) => w.weekNumber === weekNumber);
+    const strand = String(
+      input.strand || linkedLessonPlan?.strand || schemeWeekMatch?.strand || existing?.strand || ''
+    ).trim();
+    const subStrand = String(
+      input.subStrand ||
+        linkedLessonPlan?.subStrand ||
+        schemeWeekMatch?.subStrand ||
+        existing?.subStrand ||
+        ''
+    ).trim();
+    const workCovered = String(input.workCovered || existing?.workCovered || '').trim();
+
+    if (!strand || !subStrand || !workCovered) {
+      throw new ConflictError(
+        'Strand, Sub-Strand, and Work Covered are required for a Record of Work.',
+        400
+      );
+    }
+
+    const lessonsTaughtCount = Math.max(
+      0,
+      Math.min(30, Math.round(Number(input.lessonsTaughtCount ?? existing?.lessonsTaughtCount ?? 1)))
+    );
+    const rawPlanned = input.lessonsPlannedCount ?? existing?.lessonsPlannedCount;
+    const lessonsPlannedCount =
+      typeof rawPlanned === 'number' && Number.isFinite(rawPlanned) && rawPlanned > 0
+        ? Math.max(1, Math.min(30, Math.round(rawPlanned)))
+        : undefined;
+
+    const validCoverage: RecordOfWorkCoverageStatus[] = [
+      'Completed',
+      'Partially Covered',
+      'Carried Forward',
+    ];
+    const coverageStatus: RecordOfWorkCoverageStatus = validCoverage.includes(
+      input.coverageStatus as RecordOfWorkCoverageStatus
+    )
+      ? (input.coverageStatus as RecordOfWorkCoverageStatus)
+      : existing?.coverageStatus || 'Completed';
+
+    const validMastery: CbcLearnerMasteryLevel[] = [
+      'Exceeding Expectations',
+      'Meeting Expectations',
+      'Approaching Expectations',
+      'Below Expectations',
+    ];
+    const learnerMastery: CbcLearnerMasteryLevel = validMastery.includes(
+      input.learnerMastery as CbcLearnerMasteryLevel
+    )
+      ? (input.learnerMastery as CbcLearnerMasteryLevel)
+      : existing?.learnerMastery || 'Meeting Expectations';
+
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    const nowIso = new Date().toISOString();
+    let nextStatus: AcademicDocumentStatus;
+    if (isAdmin && input.status) {
+      nextStatus = input.status;
+    } else if (input.submitNow) {
+      nextStatus = 'Submitted';
+    } else if (existing && existing.status === 'Approved' && !isAdmin) {
+      nextStatus = 'Draft';
+    } else if (existing && existing.status !== 'Revision Requested') {
+      nextStatus = existing.status;
+    } else {
+      nextStatus = 'Draft';
+    }
+
+    const rawParentVisible =
+      typeof input.parentVisible === 'boolean'
+        ? input.parentVisible
+        : existing?.parentVisible ?? false;
+    const parentVisible =
+      cfg.requireApprovalForParentVisibility && nextStatus !== 'Approved'
+        ? false
+        : Boolean(rawParentVisible);
+
+    const academicYear = String(
+      input.academicYear ||
+        linkedScheme?.academicYear ||
+        existing?.academicYear ||
+        tenant.academicYear ||
+        '2026–2027'
+    ).trim();
+    const term = String(
+      input.term || linkedScheme?.term || existing?.term || tenant.currentTerm || 'Term 1'
+    ).trim();
+    const matchedTerm = (this.state.academicTerms || []).find(
+      (t) => t.tenantId === tenantId && t.name.toLowerCase() === term.toLowerCase()
+    );
+
+    const teacherId = teacher?.id || existing?.teacherId || `staff-${authUser.id}`;
+    const teacherName = teacher?.name || existing?.teacherName || authUser.fullName;
+
+    const record: RecordOfWork = {
+      id: existing?.id || `row-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      schemeOfWorkId:
+        linkedScheme?.id || (input.schemeOfWorkId === '' ? undefined : existing?.schemeOfWorkId),
+      lessonPlanId:
+        linkedLessonPlan?.id || (input.lessonPlanId === '' ? undefined : existing?.lessonPlanId),
+      academicYear,
+      termId: matchedTerm?.id || existing?.termId,
+      term,
+      weekNumber,
+      dateCovered,
+      grade,
+      section,
+      subject,
+      teacherId,
+      teacherName,
+      createdByUserId: existing?.createdByUserId || authUser.id,
+      strand,
+      subStrand,
+      workCovered,
+      lessonsTaughtCount,
+      lessonsPlannedCount,
+      learnerMastery,
+      coverageStatus,
+      challengesAndRemediation:
+        String(input.challengesAndRemediation ?? existing?.challengesAndRemediation ?? '').trim() ||
+        undefined,
+      remarks: String(input.remarks ?? existing?.remarks ?? '').trim() || undefined,
+      parentSummary:
+        String(input.parentSummary ?? existing?.parentSummary ?? '').trim() || undefined,
+      status: nextStatus,
+      parentVisible,
+      dueDate: existing?.dueDate || dateCovered,
+      submittedAt:
+        nextStatus === 'Submitted'
+          ? existing?.status === 'Submitted' && existing.submittedAt
+            ? existing.submittedAt
+            : nowIso
+          : nextStatus === 'Approved'
+          ? existing?.submittedAt || nowIso
+          : undefined,
+      reviewedByUserId:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedByUserId || authUser.id
+            : existing?.reviewedByUserId
+          : undefined,
+      reviewedByName:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedByName || authUser.fullName
+            : existing?.reviewedByName
+          : undefined,
+      reviewedAt:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedAt || nowIso
+            : existing?.reviewedAt
+          : undefined,
+      reviewFeedback:
+        nextStatus === 'Draft' || nextStatus === 'Submitted' ? undefined : existing?.reviewFeedback,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (existing) {
+      const idx = this.state.recordsOfWork.findIndex((r) => r.id === existing.id);
+      if (idx !== -1) this.state.recordsOfWork[idx] = record;
+    } else {
+      this.state.recordsOfWork.unshift(record);
+    }
+
+    this.persist();
+    if (record.status === 'Submitted' && existing?.status !== 'Submitted') {
+      this.pushNotification(
+        tenantId,
+        'academics',
+        `Record of Work Submitted: ${record.grade} ${record.section} ${record.subject}`,
+        `${record.teacherName} submitted Week ${record.weekNumber} Record of Work (${record.coverageStatus}).`,
+        'academics'
+      );
+    }
+    this.syncTenant(tenantId, 'academics:record-of-work-saved');
+    return record;
+  }
+
+  submitRecordOfWork(tenantId: string, recordId: string, authUser: TenantUser): RecordOfWork {
+    this.requireTenant(tenantId);
+    const list = this.state.recordsOfWork || [];
+    const idx = list.findIndex((r) => r.id === recordId && r.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Record of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only submit your own Records of Work.', 403);
+      }
+    }
+    const nowIso = new Date().toISOString();
+    const updated: RecordOfWork = {
+      ...existing,
+      status: 'Submitted',
+      parentVisible: false,
+      submittedAt: nowIso,
+      reviewedByUserId: undefined,
+      reviewedByName: undefined,
+      reviewedAt: undefined,
+      reviewFeedback: undefined,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Record of Work Submitted: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${updated.teacherName} submitted Week ${updated.weekNumber} Record of Work (${updated.coverageStatus}).`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:record-of-work-submitted');
+    return updated;
+  }
+
+  reviewRecordOfWork(
+    tenantId: string,
+    recordId: string,
+    input: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    },
+    authUser: TenantUser
+  ): RecordOfWork {
+    this.requireTenant(tenantId);
+    if (!this.isPrivilegedAcademicsActor(authUser)) {
+      throw new ConflictError('Forbidden: Only School Admins can review Records of Work.', 403);
+    }
+    if (input.decision !== 'Approved' && input.decision !== 'Revision Requested') {
+      throw new ConflictError('Review decision must be "Approved" or "Revision Requested".', 400);
+    }
+    const feedback = String(input.reviewFeedback || '').trim();
+    if (input.decision === 'Revision Requested' && !feedback) {
+      throw new ConflictError('Provide revision feedback explaining what needs to be updated.', 400);
+    }
+    const list = this.state.recordsOfWork || [];
+    const idx = list.findIndex((r) => r.id === recordId && r.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Record of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const nowIso = new Date().toISOString();
+    const nextParentVisible =
+      input.decision === 'Approved'
+        ? typeof input.parentVisible === 'boolean'
+          ? input.parentVisible
+          : existing.parentVisible
+        : false;
+
+    const updated: RecordOfWork = {
+      ...existing,
+      status: input.decision,
+      parentVisible: nextParentVisible,
+      reviewedByUserId: authUser.id,
+      reviewedByName: authUser.fullName || authUser.email,
+      reviewedAt: nowIso,
+      reviewFeedback: feedback || (input.decision === 'Approved' ? 'Coverage verified.' : undefined),
+      submittedAt: existing.submittedAt || nowIso,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Record of Work ${input.decision}: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${authUser.fullName} marked Week ${updated.weekNumber} Record of Work as ${input.decision}${
+        updated.parentVisible ? ' (visible to parents)' : ''
+      }.`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:record-of-work-reviewed');
+    return updated;
+  }
+
+  setRecordOfWorkParentVisibility(
+    tenantId: string,
+    recordId: string,
+    parentVisible: boolean,
+    authUser: TenantUser
+  ): RecordOfWork {
+    const tenant = this.requireTenant(tenantId);
+    const list = this.state.recordsOfWork || [];
+    const idx = list.findIndex((r) => r.id === recordId && r.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Record of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError(
+          'Forbidden: You can only update parent visibility for your own Records of Work.',
+          403
+        );
+      }
+    }
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    if (parentVisible && cfg.requireApprovalForParentVisibility && existing.status !== 'Approved') {
+      throw new ConflictError(
+        'Only Approved Records of Work can be shared with parents while approval governance is enabled.',
+        409
+      );
+    }
+    const updated: RecordOfWork = {
+      ...existing,
+      parentVisible: Boolean(parentVisible),
+      updatedAt: new Date().toISOString(),
+    };
+    list[idx] = updated;
+    this.persist();
+    this.syncTenant(tenantId, 'academics:record-of-work-visibility');
+    return updated;
+  }
+
+  deleteRecordOfWork(tenantId: string, recordId: string, authUser: TenantUser): { deleted: true } {
+    this.requireTenant(tenantId);
+    const list = this.state.recordsOfWork || [];
+    const idx = list.findIndex((r) => r.id === recordId && r.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Record of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only delete your own Records of Work.', 403);
+      }
+      if (existing.status === 'Approved') {
+        throw new ConflictError(
+          'Approved Records of Work cannot be deleted by teachers. Ask a School Admin.',
+          409
+        );
+      }
+    }
+    list.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'academics:record-of-work-deleted');
     return { deleted: true };
   }
 
@@ -13978,7 +14629,7 @@ export class TenantStore {
     const customMsg = String(input.message || '').trim();
     const description =
       customMsg ||
-      `Reminder to ${targetNames}${validTeacherIds.length > 3 ? ` (+${validTeacherIds.length - 3} more)` : ''}: submit pending Schemes of Work and Week ${cfg.currentWeekNumber} Lesson Plans before review cutoff (${cfg.schemeDueDate}).`;
+      `Reminder to ${targetNames}${validTeacherIds.length > 3 ? ` (+${validTeacherIds.length - 3} more)` : ''}: submit pending Schemes of Work, Week ${cfg.currentWeekNumber} Lesson Plans, Lesson Notes, and Records of Work before review cutoff (${cfg.schemeDueDate}).`;
 
     const notification = this.pushNotification(
       tenantId,
@@ -13989,5 +14640,976 @@ export class TenantStore {
     );
     this.syncTenant(tenantId, 'academics:reminder-sent');
     return { ok: true, recipientCount, notification };
+  }
+
+  // =========================================================================
+  // Teacher Lesson Attendance (Scheduled, Delegated Mandate, Recovered, Missed)
+  // =========================================================================
+
+  saveTeacherLessonAttendanceBatch(
+    tenantId: string,
+    input: {
+      date: string;
+      entries: Array<{
+        id?: string;
+        timetableSlotId?: string;
+        periodNumber?: number;
+        timeSlot?: string;
+        grade: string;
+        section: string;
+        subject: string;
+        scheduledTeacherId: string;
+        status: TeacherLessonAttendanceStatus;
+        delegatedTeacherId?: string;
+        delegationNotes?: string;
+        originalMissedDate?: string;
+        recoveredDate?: string;
+        recoveredPeriod?: number;
+        recoveredByTeacherId?: string;
+        topicCovered?: string;
+        remarks?: string;
+      }>;
+    },
+    authUser: TenantUser
+  ): TeacherLessonAttendanceRecord[] {
+    const tenant = this.requireTenant(tenantId);
+    const isAdmin =
+      authUser.role === 'Developer' ||
+      authUser.role === 'Super Admin' ||
+      authUser.role === 'Admin';
+    const isTeacher = authUser.role === 'Teacher';
+    if (!isAdmin && !isTeacher) {
+      throw new ConflictError(
+        'Forbidden: Only School Admins and Teachers can log teacher lesson attendance.',
+        403
+      );
+    }
+
+    const date = String(input.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new ConflictError('Lesson attendance date must use YYYY-MM-DD format.', 400);
+    }
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      date,
+      actionLabel: `Recording teacher lesson attendance for ${date}`,
+    });
+
+    if (!Array.isArray(input.entries) || input.entries.length === 0) {
+      throw new ConflictError('Provide at least one lesson attendance entry.', 400);
+    }
+
+    const ownTeacher = isTeacher ? this.findTeacherProfileForUser(tenantId, authUser) : undefined;
+    if (isTeacher && !ownTeacher) {
+      throw new ConflictError(
+        'No teaching profile matches your email in the faculty roster.',
+        403
+      );
+    }
+
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const parsedDt = new Date(`${date}T00:00:00Z`);
+    const dayOfWeek = dayNames[parsedDt.getUTCDay()] || 'Monday';
+
+    if (!Array.isArray(this.state.teacherLessonAttendance)) {
+      this.state.teacherLessonAttendance = [];
+    }
+
+    const tenantTimetable = this.state.timetable.filter((s) => s.tenantId === tenantId);
+    const validStatuses: TeacherLessonAttendanceStatus[] = [
+      'Attended',
+      'Delegated',
+      'Recovered',
+      'Missed',
+    ];
+    const nowIso = new Date().toISOString();
+    const saved: TeacherLessonAttendanceRecord[] = [];
+    const alerts: string[] = [];
+
+    for (const entry of input.entries) {
+      const grade = String(entry.grade || '').trim();
+      const section = String(entry.section || '').trim() || 'A';
+      const subject = String(entry.subject || '').trim();
+      if (!grade || !subject) {
+        throw new ConflictError('Grade and Subject are required for every lesson entry.', 400);
+      }
+
+      const scheduledTeacher = tenant.teachers.find((t) => t.id === entry.scheduledTeacherId);
+      if (!scheduledTeacher) {
+        throw new ConflictError(
+          `Scheduled teacher (${entry.scheduledTeacherId}) was not found in this school roster.`,
+          404
+        );
+      }
+
+      if (!validStatuses.includes(entry.status)) {
+        throw new ConflictError(`Invalid lesson delivery status: ${entry.status}.`, 400);
+      }
+
+      let delegatedTeacher: TeacherProfile | undefined;
+      if (entry.status === 'Delegated') {
+        const delId = String(entry.delegatedTeacherId || '').trim();
+        if (!delId) {
+          throw new ConflictError(
+            `Select the teacher given the mandate for delegated lesson (${grade} ${section} ${subject}).`,
+            400
+          );
+        }
+        delegatedTeacher = tenant.teachers.find((t) => t.id === delId);
+        if (!delegatedTeacher) {
+          throw new ConflictError('Selected delegated teacher was not found in this school.', 404);
+        }
+        if (delegatedTeacher.id === scheduledTeacher.id) {
+          throw new ConflictError(
+            'Delegated mandate teacher must be different from the scheduled teacher.',
+            400
+          );
+        }
+      }
+
+      let originalMissedDate: string | undefined;
+      let recoveredDate: string | undefined;
+      let recoveredByTeacher: TeacherProfile | undefined;
+      if (entry.status === 'Recovered') {
+        originalMissedDate = String(entry.originalMissedDate || '').trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(originalMissedDate)) {
+          throw new ConflictError(
+            `Recovered lesson (${grade} ${section} ${subject}) must specify the Original Missed Date (YYYY-MM-DD).`,
+            400
+          );
+        }
+        recoveredDate = String(entry.recoveredDate || date).trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(recoveredDate)) {
+          throw new ConflictError('Recovered Date must use YYYY-MM-DD format.', 400);
+        }
+        if (entry.recoveredByTeacherId) {
+          recoveredByTeacher = tenant.teachers.find((t) => t.id === entry.recoveredByTeacherId);
+          if (!recoveredByTeacher) {
+            throw new ConflictError('Selected recovery teacher was not found in this school.', 404);
+          }
+        } else {
+          recoveredByTeacher = scheduledTeacher;
+        }
+      }
+
+      if (isTeacher && ownTeacher) {
+        const permitted =
+          scheduledTeacher.id === ownTeacher.id ||
+          delegatedTeacher?.id === ownTeacher.id ||
+          recoveredByTeacher?.id === ownTeacher.id ||
+          isTeacherAssignedToCohort(ownTeacher, grade, section, tenantTimetable);
+        if (!permitted) {
+          throw new ConflictError(
+            `Forbidden: You can only record lesson attendance for your own scheduled, delegated, or recovered lessons (${grade} ${section} ${subject}).`,
+            403
+          );
+        }
+      }
+
+      const existing = entry.id
+        ? this.state.teacherLessonAttendance.find(
+            (r) => r.id === entry.id && r.tenantId === tenantId
+          )
+        : entry.timetableSlotId
+        ? this.state.teacherLessonAttendance.find(
+            (r) =>
+              r.tenantId === tenantId &&
+              r.date === date &&
+              r.timetableSlotId === entry.timetableSlotId
+          )
+        : undefined;
+
+      const periodNumber =
+        typeof entry.periodNumber === 'number' && Number.isFinite(entry.periodNumber)
+          ? Math.max(1, Math.min(12, Math.round(entry.periodNumber)))
+          : existing?.periodNumber;
+
+      const record: TeacherLessonAttendanceRecord = {
+        id: existing?.id || `tla-${randomUUID().slice(0, 8)}`,
+        tenantId,
+        termId: resolvedTerm?.id || existing?.termId,
+        date,
+        dayOfWeek,
+        timetableSlotId: entry.timetableSlotId || existing?.timetableSlotId,
+        periodNumber,
+        timeSlot: String(entry.timeSlot ?? existing?.timeSlot ?? '').trim() || undefined,
+        grade,
+        section,
+        subject,
+        scheduledTeacherId: scheduledTeacher.id,
+        scheduledTeacherName: scheduledTeacher.name,
+        status: entry.status,
+        delegatedTeacherId: delegatedTeacher?.id,
+        delegatedTeacherName: delegatedTeacher?.name,
+        delegationNotes:
+          entry.status === 'Delegated'
+            ? String(entry.delegationNotes || '').trim() || undefined
+            : undefined,
+        originalMissedDate,
+        recoveredDate,
+        recoveredPeriod:
+          entry.status === 'Recovered' &&
+          typeof entry.recoveredPeriod === 'number' &&
+          Number.isFinite(entry.recoveredPeriod)
+            ? Math.max(1, Math.min(12, Math.round(entry.recoveredPeriod)))
+            : undefined,
+        recoveredByTeacherId: recoveredByTeacher?.id,
+        recoveredByTeacherName: recoveredByTeacher?.name,
+        topicCovered: String(entry.topicCovered || '').trim() || undefined,
+        remarks: String(entry.remarks || '').trim() || undefined,
+        recordedBy: authUser.fullName || authUser.email,
+        recordedByUserId: authUser.id,
+        createdAt: existing?.createdAt || nowIso,
+        updatedAt: nowIso,
+      };
+
+      if (existing) {
+        const idx = this.state.teacherLessonAttendance.findIndex((r) => r.id === existing.id);
+        if (idx !== -1) this.state.teacherLessonAttendance[idx] = record;
+      } else {
+        this.state.teacherLessonAttendance.unshift(record);
+      }
+      saved.push(record);
+
+      if (record.status === 'Missed') {
+        alerts.push(`${record.scheduledTeacherName} missed ${record.grade} ${record.section} ${record.subject}`);
+      } else if (record.status === 'Delegated') {
+        alerts.push(
+          `${record.scheduledTeacherName} delegated ${record.grade} ${record.section} ${record.subject} to ${record.delegatedTeacherName}`
+        );
+      }
+    }
+
+    this.persist();
+    if (alerts.length > 0) {
+      this.pushNotification(
+        tenantId,
+        'attendance',
+        `Teacher Lesson Delivery Update (${date})`,
+        alerts.slice(0, 3).join('; '),
+        'attendance'
+      );
+    }
+    this.syncTenant(tenantId, 'teacher-lesson-attendance:saved');
+    return saved;
+  }
+
+  // =========================================================================
+  // Learners Progressive Report (Manual Entry & Bulk Spreadsheet Import)
+  // =========================================================================
+
+  private computeMasteryForScore(
+    score: number | null,
+    status: ExamResultStatus
+  ): CbcLearnerMasteryLevel | undefined {
+    if (status !== 'Scored' || score === null) return undefined;
+    if (score >= 80) return 'Exceeding Expectations';
+    if (score >= 65) return 'Meeting Expectations';
+    if (score >= 50) return 'Approaching Expectations';
+    return 'Below Expectations';
+  }
+
+  private normalizeProgressiveSubjectsAndTotals(
+    tenant: Tenant,
+    student: Student,
+    rawSubjects: Array<{
+      subject: string;
+      score?: number | null;
+      resultStatus?: ExamResultStatus;
+      masteryLevel?: CbcLearnerMasteryLevel;
+      remarks?: string;
+    }>,
+    authUser: TenantUser
+  ): ProgressiveReportSubjectScore[] {
+    if (!Array.isArray(rawSubjects) || rawSubjects.length === 0) {
+      throw new ConflictError('Provide at least one subject assessment score.', 400);
+    }
+    const validMastery: CbcLearnerMasteryLevel[] = [
+      'Exceeding Expectations',
+      'Meeting Expectations',
+      'Approaching Expectations',
+      'Below Expectations',
+    ];
+    const normalized: ProgressiveReportSubjectScore[] = [];
+    const seen = new Set<string>();
+
+    for (const item of rawSubjects) {
+      const subject = String(item.subject || '').trim();
+      if (!subject) continue;
+      const key = subject.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      if (authUser.role === 'Teacher') {
+        this.assertTeacherCanGradeSubject(
+          tenant,
+          authUser,
+          undefined,
+          student.grade,
+          student.section,
+          subject
+        );
+      }
+
+      const parsed = this.parseStrictExamScore(
+        item.score,
+        student.fullName,
+        subject,
+        item.resultStatus
+      );
+      const graded =
+        parsed.status === 'Absent'
+          ? { letterGrade: 'ABS', gpaPoints: 0 }
+          : parsed.status === 'Exempt'
+          ? { letterGrade: 'EXM', gpaPoints: 0 }
+          : computeLetterGrade(parsed.score, student.grade);
+
+      const masteryLevel = validMastery.includes(item.masteryLevel as CbcLearnerMasteryLevel)
+        ? (item.masteryLevel as CbcLearnerMasteryLevel)
+        : this.computeMasteryForScore(parsed.status === 'Scored' ? parsed.score : null, parsed.status);
+
+      normalized.push({
+        subject,
+        score: parsed.status === 'Scored' ? parsed.score : null,
+        maxScore: 100,
+        resultStatus: parsed.status,
+        letterGrade: graded.letterGrade,
+        gpaPoints: graded.gpaPoints,
+        masteryLevel,
+        remarks: String(item.remarks || '').trim() || undefined,
+      });
+    }
+
+    if (normalized.length === 0) {
+      throw new ConflictError('No valid subjects provided for the progressive report.', 400);
+    }
+    return normalized;
+  }
+
+  private recomputeProgressiveAggregates(
+    subjects: ProgressiveReportSubjectScore[],
+    grade: string
+  ): { totalScore: number; maxPossible: number; meanScore: number; meanGrade: string } {
+    const scored = subjects.filter((s) => s.resultStatus !== 'Absent' && s.resultStatus !== 'Exempt' && typeof s.score === 'number');
+    const totalScore = scored.reduce((sum, s) => sum + (s.score || 0), 0);
+    const maxPossible = scored.length * 100;
+    const meanScore = scored.length > 0 ? Number((totalScore / scored.length).toFixed(1)) : 0;
+    const meanGrade = scored.length > 0 ? computeLetterGrade(meanScore, grade).letterGrade : '—';
+    return { totalScore, maxPossible, meanScore, meanGrade };
+  }
+
+  upsertProgressiveReportEntry(
+    tenantId: string,
+    input: {
+      id?: string;
+      studentId: string;
+      academicYear?: string;
+      term?: string;
+      assessmentLabel: string;
+      assessmentDate: string;
+      sequenceOrder?: number;
+      subjects: Array<{
+        subject: string;
+        score?: number | null;
+        resultStatus?: ExamResultStatus;
+        masteryLevel?: CbcLearnerMasteryLevel;
+        remarks?: string;
+      }>;
+      classTeacherRemarks?: string;
+      source?: 'manual' | 'import';
+      mergeSubjects?: boolean;
+    },
+    authUser: TenantUser
+  ): LearnerProgressiveEntry {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.progressiveReports)) {
+      this.state.progressiveReports = [];
+    }
+
+    const student = this.state.students.find(
+      (s) => s.id === input.studentId && s.tenantId === tenantId && !s.deleted
+    );
+    if (!student) {
+      throw new ConflictError('Learner not found in this school.', 404);
+    }
+
+    const assessmentLabel = String(input.assessmentLabel || '').trim();
+    if (!assessmentLabel) {
+      throw new ConflictError('Assessment Label is required (e.g. "CAT 1", "Prior Term Check").', 400);
+    }
+    const assessmentDate = String(input.assessmentDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(assessmentDate)) {
+      throw new ConflictError('Assessment Date must use YYYY-MM-DD format.', 400);
+    }
+
+    const academicYear = String(input.academicYear || tenant.academicYear || '2026–2027').trim();
+    const term = String(input.term || tenant.currentTerm || 'Term 1').trim();
+
+    const existing = input.id
+      ? this.state.progressiveReports.find((p) => p.id === input.id && p.tenantId === tenantId)
+      : this.state.progressiveReports.find(
+          (p) =>
+            p.tenantId === tenantId &&
+            p.studentId === student.id &&
+            p.academicYear.toLowerCase() === academicYear.toLowerCase() &&
+            p.term.toLowerCase() === term.toLowerCase() &&
+            p.assessmentLabel.toLowerCase() === assessmentLabel.toLowerCase()
+        );
+
+    const validatedSubjects = this.normalizeProgressiveSubjectsAndTotals(
+      tenant,
+      student,
+      input.subjects,
+      authUser
+    );
+
+    const shouldMerge = input.mergeSubjects !== false && Boolean(existing);
+    let finalSubjects: ProgressiveReportSubjectScore[];
+    if (shouldMerge && existing) {
+      const mergedMap = new Map<string, ProgressiveReportSubjectScore>();
+      existing.subjects.forEach((s) => mergedMap.set(s.subject.toLowerCase(), s));
+      validatedSubjects.forEach((s) => mergedMap.set(s.subject.toLowerCase(), s));
+      finalSubjects = Array.from(mergedMap.values());
+    } else if (existing && authUser.role === 'Teacher') {
+      // Teachers cannot drop subjects outside their scope when updating an existing progressive entry
+      const incomingKeys = new Set(validatedSubjects.map((s) => s.subject.toLowerCase()));
+      const retainedOtherSubjects = existing.subjects.filter(
+        (s) => !incomingKeys.has(s.subject.toLowerCase())
+      );
+      finalSubjects = [...retainedOtherSubjects, ...validatedSubjects];
+    } else {
+      finalSubjects = validatedSubjects;
+    }
+
+    const aggregates = this.recomputeProgressiveAggregates(finalSubjects, student.grade);
+    const nowIso = new Date().toISOString();
+
+    const record: LearnerProgressiveEntry = {
+      id: existing?.id || `prog-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      studentId: student.id,
+      studentName: student.fullName,
+      studentCode: student.studentCode,
+      grade: student.grade,
+      section: student.section,
+      academicYear,
+      term,
+      assessmentLabel,
+      assessmentDate,
+      sequenceOrder:
+        typeof input.sequenceOrder === 'number' && Number.isFinite(input.sequenceOrder)
+          ? Math.max(1, Math.round(input.sequenceOrder))
+          : existing?.sequenceOrder,
+      subjects: finalSubjects,
+      totalScore: aggregates.totalScore,
+      maxPossible: aggregates.maxPossible,
+      meanScore: aggregates.meanScore,
+      meanGrade: aggregates.meanGrade,
+      classTeacherRemarks:
+        input.classTeacherRemarks !== undefined
+          ? String(input.classTeacherRemarks || '').trim() || undefined
+          : existing?.classTeacherRemarks,
+      source: input.source === 'import' ? 'import' : existing?.source || 'manual',
+      recordedByName: authUser.fullName || authUser.email,
+      recordedByUserId: authUser.id,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (existing) {
+      const idx = this.state.progressiveReports.findIndex((p) => p.id === existing.id);
+      if (idx !== -1) this.state.progressiveReports[idx] = record;
+    } else {
+      this.state.progressiveReports.unshift(record);
+    }
+
+    this.persist();
+    this.syncTenant(tenantId, 'exams:progressive-report-saved');
+    return record;
+  }
+
+  importProgressiveReportsBatch(
+    tenantId: string,
+    input: {
+      academicYear?: string;
+      term?: string;
+      assessmentLabel: string;
+      assessmentDate: string;
+      rows: Array<{
+        studentCode?: string;
+        studentId?: string;
+        studentName?: string;
+        subjects: Array<{
+          subject: string;
+          score?: number | null;
+          resultStatus?: ExamResultStatus;
+          masteryLevel?: CbcLearnerMasteryLevel;
+          remarks?: string;
+        }>;
+        classTeacherRemarks?: string;
+      }>;
+    },
+    authUser: TenantUser
+  ): {
+    savedCount: number;
+    skippedRows: number;
+    errors: Array<{ rowIndex: number; identifier: string; reason: string }>;
+    entries: LearnerProgressiveEntry[];
+  } {
+    this.requireTenant(tenantId);
+    const assessmentLabel = String(input.assessmentLabel || '').trim();
+    const assessmentDate = String(input.assessmentDate || '').trim();
+    if (!assessmentLabel) {
+      throw new ConflictError('Assessment Label is required for progressive report import.', 400);
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(assessmentDate)) {
+      throw new ConflictError('Assessment Date must use YYYY-MM-DD format.', 400);
+    }
+    if (!Array.isArray(input.rows) || input.rows.length === 0) {
+      throw new ConflictError('Provide at least one learner row to import.', 400);
+    }
+
+    const tenantStudents = this.state.students.filter((s) => s.tenantId === tenantId && !s.deleted);
+    const byId = new Map(tenantStudents.map((s) => [s.id.toLowerCase(), s]));
+    const byCode = new Map(tenantStudents.map((s) => [s.studentCode.trim().toLowerCase(), s]));
+    const byName = new Map(tenantStudents.map((s) => [s.fullName.trim().toLowerCase(), s]));
+
+    const entries: LearnerProgressiveEntry[] = [];
+    const errors: Array<{ rowIndex: number; identifier: string; reason: string }> = [];
+
+    input.rows.forEach((row, idx) => {
+      const identifier =
+        String(row.studentCode || row.studentId || row.studentName || `Row ${idx + 1}`).trim();
+      const stu =
+        (row.studentId && byId.get(row.studentId.trim().toLowerCase())) ||
+        (row.studentCode && byCode.get(row.studentCode.trim().toLowerCase())) ||
+        (row.studentName && byName.get(row.studentName.trim().toLowerCase()));
+
+      if (!stu) {
+        errors.push({
+          rowIndex: idx + 1,
+          identifier,
+          reason: `No active learner found matching "${identifier}".`,
+        });
+        return;
+      }
+
+      try {
+        const saved = this.upsertProgressiveReportEntry(
+          tenantId,
+          {
+            studentId: stu.id,
+            academicYear: input.academicYear,
+            term: input.term,
+            assessmentLabel,
+            assessmentDate,
+            subjects: row.subjects,
+            classTeacherRemarks: row.classTeacherRemarks,
+            source: 'import',
+            mergeSubjects: true,
+          },
+          authUser
+        );
+        entries.push(saved);
+      } catch (err) {
+        errors.push({
+          rowIndex: idx + 1,
+          identifier: `${stu.studentCode} (${stu.fullName})`,
+          reason: err instanceof Error ? err.message : 'Invalid row data.',
+        });
+      }
+    });
+
+    if (entries.length === 0 && errors.length > 0) {
+      throw new ConflictError(
+        `Progressive report import failed: ${errors[0].identifier} — ${errors[0].reason}`,
+        errors[0].reason.toLowerCase().includes('not assigned') ? 403 : 400
+      );
+    }
+
+    return {
+      savedCount: entries.length,
+      skippedRows: errors.length,
+      errors,
+      entries,
+    };
+  }
+
+  deleteProgressiveReportEntry(
+    tenantId: string,
+    entryId: string,
+    authUser: TenantUser
+  ): { deleted: true } {
+    this.requireTenant(tenantId);
+    const list = this.state.progressiveReports || [];
+    const idx = list.findIndex((p) => p.id === entryId && p.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Progressive report entry not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin =
+      authUser.role === 'Developer' ||
+      authUser.role === 'Super Admin' ||
+      authUser.role === 'Admin';
+    if (!isAdmin && existing.recordedByUserId !== authUser.id) {
+      throw new ConflictError(
+        'Forbidden: Only a School Admin or the recording staff member can delete this progressive entry.',
+        403
+      );
+    }
+    list.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'exams:progressive-report-deleted');
+    return { deleted: true };
+  }
+
+  // =========================================================================
+  // Teacher Academics: Lesson Notes (Submitted / Not Submitted + Remarks)
+  // =========================================================================
+
+  upsertLessonNote(
+    tenantId: string,
+    input: {
+      id?: string;
+      schemeOfWorkId?: string;
+      lessonPlanId?: string;
+      academicYear?: string;
+      term?: string;
+      weekNumber: number;
+      lessonDate: string;
+      grade?: string;
+      section?: string;
+      subject?: string;
+      teacherId?: string;
+      submissionStatus?: LessonNoteSubmissionStatus;
+      remarks?: string;
+      submitNow?: boolean;
+    },
+    authUser: TenantUser
+  ): LessonNote {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.lessonNotes)) this.state.lessonNotes = [];
+
+    const existing = input.id
+      ? this.state.lessonNotes.find((n) => n.id === input.id && n.tenantId === tenantId)
+      : undefined;
+    if (input.id && !existing) {
+      throw new ConflictError('Lesson Notes entry not found.', 404);
+    }
+
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (existing && !isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only edit your own Lesson Notes.', 403);
+      }
+    }
+
+    const linkedScheme = input.schemeOfWorkId
+      ? (this.state.schemesOfWork || []).find(
+          (s) => s.id === input.schemeOfWorkId && s.tenantId === tenantId
+        )
+      : undefined;
+    if (input.schemeOfWorkId && !linkedScheme) {
+      throw new ConflictError('Linked Scheme of Work not found in this school.', 404);
+    }
+
+    const linkedLessonPlan = input.lessonPlanId
+      ? (this.state.lessonPlans || []).find(
+          (l) => l.id === input.lessonPlanId && l.tenantId === tenantId
+        )
+      : undefined;
+    if (input.lessonPlanId && !linkedLessonPlan) {
+      throw new ConflictError('Linked Lesson Plan not found in this school.', 404);
+    }
+
+    const grade = String(
+      input.grade || linkedLessonPlan?.grade || linkedScheme?.grade || existing?.grade || ''
+    ).trim();
+    const section = String(
+      input.section || linkedLessonPlan?.section || linkedScheme?.section || existing?.section || 'A'
+    ).trim();
+    const subject = String(
+      input.subject || linkedLessonPlan?.subject || linkedScheme?.subject || existing?.subject || ''
+    ).trim();
+    if (!grade || !subject) {
+      throw new ConflictError('Grade and Subject are required for Lesson Notes.', 400);
+    }
+
+    const teacher = this.resolveAcademicsTeacherActor(
+      tenant,
+      authUser,
+      input.teacherId || existing?.teacherId
+    );
+    if (!isAdmin && teacher) {
+      this.assertTeacherCohortAccessForAcademics(tenant, teacher, grade, section, subject);
+    }
+
+    const weekNumber = Math.max(
+      1,
+      Math.min(14, Math.round(Number(input.weekNumber ?? existing?.weekNumber) || 1))
+    );
+    const lessonDate = String(input.lessonDate || existing?.lessonDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(lessonDate)) {
+      throw new ConflictError('Lesson Date must use YYYY-MM-DD format.', 400);
+    }
+
+    const rawSubmission =
+      input.submissionStatus ??
+      (typeof input.submitNow === 'boolean'
+        ? input.submitNow
+          ? 'Submitted'
+          : 'Not Submitted'
+        : existing?.submissionStatus);
+    if (rawSubmission !== 'Submitted' && rawSubmission !== 'Not Submitted') {
+      throw new ConflictError(
+        'Lesson Notes status must be either "Submitted" or "Not Submitted".',
+        400
+      );
+    }
+    const submissionStatus: LessonNoteSubmissionStatus = rawSubmission;
+    const nextStatus: AcademicDocumentStatus =
+      submissionStatus === 'Submitted' ? 'Submitted' : 'Draft';
+    const remarks = String(input.remarks ?? existing?.remarks ?? '').trim() || undefined;
+
+    const nowIso = new Date().toISOString();
+    const academicYear = String(
+      input.academicYear ||
+        linkedScheme?.academicYear ||
+        existing?.academicYear ||
+        tenant.academicYear ||
+        '2026–2027'
+    ).trim();
+    const term = String(
+      input.term || linkedScheme?.term || existing?.term || tenant.currentTerm || 'Term 1'
+    ).trim();
+    const matchedTerm = (this.state.academicTerms || []).find(
+      (t) => t.tenantId === tenantId && t.name.toLowerCase() === term.toLowerCase()
+    );
+
+    const teacherId = teacher?.id || existing?.teacherId || `staff-${authUser.id}`;
+    const teacherName = teacher?.name || existing?.teacherName || authUser.fullName;
+
+    const record: LessonNote = {
+      id: existing?.id || `ln-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      schemeOfWorkId:
+        linkedScheme?.id || (input.schemeOfWorkId === '' ? undefined : existing?.schemeOfWorkId),
+      lessonPlanId:
+        linkedLessonPlan?.id || (input.lessonPlanId === '' ? undefined : existing?.lessonPlanId),
+      academicYear,
+      termId: matchedTerm?.id || existing?.termId,
+      term,
+      weekNumber,
+      lessonDate,
+      grade,
+      section,
+      subject,
+      teacherId,
+      teacherName,
+      createdByUserId: existing?.createdByUserId || authUser.id,
+      submissionStatus,
+      remarks,
+      status: nextStatus,
+      parentVisible: false,
+      dueDate: existing?.dueDate || lessonDate,
+      submittedAt:
+        submissionStatus === 'Submitted' ? existing?.submittedAt || nowIso : undefined,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (existing) {
+      const idx = this.state.lessonNotes.findIndex((n) => n.id === existing.id);
+      if (idx !== -1) this.state.lessonNotes[idx] = record;
+    } else {
+      this.state.lessonNotes.unshift(record);
+    }
+
+    this.persist();
+    if (record.submissionStatus === 'Submitted' && existing?.submissionStatus !== 'Submitted') {
+      this.pushNotification(
+        tenantId,
+        'academics',
+        `Lesson Notes Submitted: ${record.grade} ${record.section} ${record.subject}`,
+        `${record.teacherName} marked Week ${record.weekNumber} Lesson Notes as Submitted.${
+          record.remarks ? ` Remarks: ${record.remarks}` : ''
+        }`,
+        'academics'
+      );
+    }
+    this.syncTenant(tenantId, 'academics:lesson-note-saved');
+    return record;
+  }
+
+  submitLessonNote(tenantId: string, noteId: string, authUser: TenantUser): LessonNote {
+    this.requireTenant(tenantId);
+    const list = this.state.lessonNotes || [];
+    const idx = list.findIndex((n) => n.id === noteId && n.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Notes entry not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only update your own Lesson Notes.', 403);
+      }
+    }
+    const nowIso = new Date().toISOString();
+    const updated: LessonNote = {
+      ...existing,
+      submissionStatus: 'Submitted',
+      status: 'Submitted',
+      parentVisible: false,
+      submittedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Lesson Notes Submitted: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${updated.teacherName} marked Week ${updated.weekNumber} Lesson Notes as Submitted.`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:lesson-note-submitted');
+    return updated;
+  }
+
+  reviewLessonNote(
+    tenantId: string,
+    noteId: string,
+    input: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    },
+    authUser: TenantUser
+  ): LessonNote {
+    this.requireTenant(tenantId);
+    if (!this.isPrivilegedAcademicsActor(authUser)) {
+      throw new ConflictError('Forbidden: Only School Admins can review Lesson Notes.', 403);
+    }
+    if (input.decision !== 'Approved' && input.decision !== 'Revision Requested') {
+      throw new ConflictError('Review decision must be "Approved" or "Revision Requested".', 400);
+    }
+    const feedback = String(input.reviewFeedback || '').trim();
+    if (input.decision === 'Revision Requested' && !feedback) {
+      throw new ConflictError('Provide revision feedback explaining what needs to be updated.', 400);
+    }
+    const list = this.state.lessonNotes || [];
+    const idx = list.findIndex((n) => n.id === noteId && n.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Notes entry not found.', 404);
+    }
+    const existing = list[idx];
+    const nowIso = new Date().toISOString();
+    const nextParentVisible =
+      input.decision === 'Approved'
+        ? typeof input.parentVisible === 'boolean'
+          ? input.parentVisible
+          : existing.parentVisible
+        : false;
+
+    const updated: LessonNote = {
+      ...existing,
+      status: input.decision,
+      parentVisible: nextParentVisible,
+      reviewedByUserId: authUser.id,
+      reviewedByName: authUser.fullName || authUser.email,
+      reviewedAt: nowIso,
+      reviewFeedback: feedback || (input.decision === 'Approved' ? 'Lesson notes verified.' : undefined),
+      submittedAt: existing.submittedAt || nowIso,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Lesson Notes ${input.decision}: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${authUser.fullName} marked Week ${updated.weekNumber} Lesson Notes as ${input.decision}${
+        updated.parentVisible ? ' (visible to parents)' : ''
+      }.`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:lesson-note-reviewed');
+    return updated;
+  }
+
+  setLessonNoteParentVisibility(
+    tenantId: string,
+    noteId: string,
+    parentVisible: boolean,
+    authUser: TenantUser
+  ): LessonNote {
+    const tenant = this.requireTenant(tenantId);
+    const list = this.state.lessonNotes || [];
+    const idx = list.findIndex((n) => n.id === noteId && n.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Notes entry not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError(
+          'Forbidden: You can only update parent visibility for your own Lesson Notes.',
+          403
+        );
+      }
+    }
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    if (parentVisible && cfg.requireApprovalForParentVisibility && existing.status !== 'Approved') {
+      throw new ConflictError(
+        'Only Approved Lesson Notes can be shared with parents while approval governance is enabled.',
+        409
+      );
+    }
+    const updated: LessonNote = {
+      ...existing,
+      parentVisible: Boolean(parentVisible),
+      updatedAt: new Date().toISOString(),
+    };
+    list[idx] = updated;
+    this.persist();
+    this.syncTenant(tenantId, 'academics:lesson-note-visibility');
+    return updated;
+  }
+
+  deleteLessonNote(tenantId: string, noteId: string, authUser: TenantUser): { deleted: true } {
+    this.requireTenant(tenantId);
+    const list = this.state.lessonNotes || [];
+    const idx = list.findIndex((n) => n.id === noteId && n.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Notes entry not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only delete your own Lesson Notes.', 403);
+      }
+    }
+    list.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'academics:lesson-note-deleted');
+    return { deleted: true };
   }
 }

@@ -25,6 +25,8 @@ import {
   type FeeWaiverRecord,
   type IndependentVotelineItem,
   type LeaveOutChit,
+  type LearnerProgressiveEntry,
+  type LessonNote,
   type LessonPlan,
   type MpesaTransactionLog,
   type NonTeachingStaffProfile,
@@ -32,17 +34,23 @@ import {
   type PayrollEntry,
   type PayrollStatutoryRateSchedule,
   type ReconciliationLine,
+  type RecordOfWork,
   type SchemeOfWork,
   type SchoolExpense,
   type Student,
   type TeacherClassAssignment,
+  type TeacherLessonAttendanceRecord,
   type TeacherProfile,
   type Tenant,
   type TenantUser,
   type TimetableSlot,
 } from '../src/shared/types.ts';
 import { hashPassword } from './middleware/adminAuth.ts';
-import { buildDefaultAcademicsForTenant } from './seedAcademics.ts';
+import {
+  buildDefaultAcademicsForTenant,
+  buildDefaultProgressiveReportsForTenant,
+  buildDefaultTeacherLessonAttendanceForTenant,
+} from './seedAcademics.ts';
 
 export const ST_RAPHAEL_TENANT_ID = 'tenant-st-raphael-ddd9';
 
@@ -165,9 +173,11 @@ export interface StRaphaelSeedBundle {
   students: Student[];
   timetable: TimetableSlot[];
   attendance: AttendanceRecord[];
+  teacherLessonAttendance: TeacherLessonAttendanceRecord[];
   leaveOutChits: LeaveOutChit[];
   examCycles: ExamCycle[];
   examResults: ExamResult[];
+  progressiveReports: LearnerProgressiveEntry[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
   feeWaivers: FeeWaiverRecord[];
@@ -183,6 +193,8 @@ export interface StRaphaelSeedBundle {
   notifications: NotificationItem[];
   schemesOfWork: SchemeOfWork[];
   lessonPlans: LessonPlan[];
+  recordsOfWork: RecordOfWork[];
+  lessonNotes: LessonNote[];
   mpesaTransactions: MpesaTransactionLog[];
   webhookHash: string;
   counters: {
@@ -1527,6 +1539,8 @@ export async function buildStRaphaelSeedData(
     timetable,
   });
   tenant.academicSubmissionConfig = academicsBuilt.config;
+  const teacherLessonAttendance = buildDefaultTeacherLessonAttendanceForTenant(tenant, timetable);
+  const progressiveReports = buildDefaultProgressiveReportsForTenant(tenant, students);
 
   return {
     tenant,
@@ -1537,9 +1551,11 @@ export async function buildStRaphaelSeedData(
     students,
     timetable,
     attendance,
+    teacherLessonAttendance,
     leaveOutChits,
     examCycles,
     examResults,
+    progressiveReports,
     feeStructures,
     invoices,
     feeWaivers,
@@ -1555,6 +1571,8 @@ export async function buildStRaphaelSeedData(
     notifications,
     schemesOfWork: academicsBuilt.schemesOfWork,
     lessonPlans: academicsBuilt.lessonPlans,
+    recordsOfWork: academicsBuilt.recordsOfWork,
+    lessonNotes: academicsBuilt.lessonNotes,
     mpesaTransactions,
     webhookHash: helpers.hashWebhook(helpers.webhookSecret),
     counters: {

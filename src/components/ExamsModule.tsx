@@ -15,6 +15,7 @@ import {
   Plus,
   Printer,
   Search,
+  TrendingUp,
   Trophy,
   Unlock,
   X,
@@ -54,12 +55,15 @@ import {
   ExamResultsEntryPanel,
   type ExamEntryPrefillTarget,
 } from './ExamResultsEntryPanel';
+import { ProgressiveReportsPanel } from './ProgressiveReportsPanel';
 import { TenantDocumentHeader } from './TenantDocumentHeader';
 import { ZerakiExamAnalyticsPanel } from './ZerakiExamAnalyticsPanel';
 
 interface ExamsModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
+  currentUserId?: string;
+  currentUserEmail?: string;
   readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
@@ -96,6 +100,8 @@ function getGradeBadgeColor(letterGrade: string, is844: boolean): string {
 export function ExamsModule({
   workspace,
   currentRole = 'Teacher',
+  currentUserId,
+  currentUserEmail,
   readOnly = false,
   onRefresh,
   onNotify,
@@ -109,7 +115,7 @@ export function ExamsModule({
     [examCycles]
   );
 
-  const [activeTab, setActiveTab] = useState<'results' | 'analytics' | 'entry'>('results');
+  const [activeTab, setActiveTab] = useState<'results' | 'analytics' | 'progressive' | 'entry'>('results');
   const [selectedCycleId, setSelectedCycleId] = useState<string>(
     orderedCycles.find((c) => /mid[- ]?term/i.test(c.title))?.id || orderedCycles[0]?.id || ''
   );
@@ -912,6 +918,18 @@ export function ExamsModule({
               <BarChart3 className="h-3.5 w-3.5" />
               Class Analytics
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('progressive')}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'progressive'
+                  ? 'bg-slate-900 text-white dark:bg-blue-600'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              <TrendingUp className="h-3.5 w-3.5" />
+              Progressive Reports
+            </button>
             {!isReadOnlyViewer && (
               <button
                 type="button"
@@ -1036,6 +1054,16 @@ export function ExamsModule({
             setActiveTab('entry');
           }}
           onOpenReportCard={(studentId) => openReportCardModal(studentId, false)}
+          onNotify={onNotify}
+        />
+      ) : activeTab === 'progressive' ? (
+        <ProgressiveReportsPanel
+          workspace={workspace}
+          currentRole={currentRole}
+          currentUserId={currentUserId}
+          currentUserEmail={currentUserEmail}
+          readOnly={readOnly}
+          onRefresh={onRefresh}
           onNotify={onNotify}
         />
       ) : (

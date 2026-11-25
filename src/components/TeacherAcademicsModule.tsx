@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
 import {
   Bell,
+  BookMarked,
   BookOpen,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Clock,
   Copy,
   Eye,
@@ -30,7 +32,12 @@ import {
   getTeacherAssignedSubjectsForCohort,
   type AcademicDocumentStatus,
   type AcademicSubmissionDeadlineConfig,
+  type CbcLearnerMasteryLevel,
+  type LessonNote,
+  type LessonNoteSubmissionStatus,
   type LessonPlan,
+  type RecordOfWork,
+  type RecordOfWorkCoverageStatus,
   type SchemeOfWork,
   type SchemeOfWorkWeek,
   type TeacherProfile,
@@ -50,7 +57,13 @@ interface TeacherAcademicsModuleProps {
   onNotify: (msg: string, tone?: 'success' | 'error' | 'info') => void;
 }
 
-type AcademicsTab = 'schemes' | 'lesson-plans' | 'tracking' | 'parent-preview';
+type AcademicsTab =
+  | 'schemes'
+  | 'lesson-plans'
+  | 'lesson-notes'
+  | 'record-of-work'
+  | 'tracking'
+  | 'parent-preview';
 
 const STATUS_BADGE_MAP: Record<AcademicDocumentStatus, string> = {
   Approved: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800',
@@ -58,6 +71,25 @@ const STATUS_BADGE_MAP: Record<AcademicDocumentStatus, string> = {
   'Revision Requested': 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800',
   Draft: 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700',
 };
+
+const COVERAGE_BADGE_MAP: Record<RecordOfWorkCoverageStatus, string> = {
+  Completed: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800',
+  'Partially Covered': 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800',
+  'Carried Forward': 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/50 dark:text-rose-300 dark:border-rose-800',
+};
+
+const COVERAGE_OPTIONS: RecordOfWorkCoverageStatus[] = [
+  'Completed',
+  'Partially Covered',
+  'Carried Forward',
+];
+
+const MASTERY_OPTIONS: CbcLearnerMasteryLevel[] = [
+  'Exceeding Expectations',
+  'Meeting Expectations',
+  'Approaching Expectations',
+  'Below Expectations',
+];
 
 function generateClientSchemeWeeks(subject: string, count = 8): SchemeOfWorkWeek[] {
   const cleanCount = Math.max(1, Math.min(14, Math.round(count)));
@@ -319,6 +351,8 @@ export function TeacherAcademicsModule({
   const { tenant, students, timetable } = workspace;
   const schemes = workspace.schemesOfWork || [];
   const lessonPlans = workspace.lessonPlans || [];
+  const lessonNotes = workspace.lessonNotes || [];
+  const recordsOfWork = workspace.recordsOfWork || [];
 
   const submissionConfig: Required<AcademicSubmissionDeadlineConfig> = {
     schemeDueDate: tenant.academicSubmissionConfig?.schemeDueDate || '2026-09-07',
@@ -347,7 +381,7 @@ export function TeacherAcademicsModule({
     return undefined;
   }, [tenant.teachers, isTeacher, currentUserEmail]);
 
-  const isOwnDoc = (doc: Pick<SchemeOfWork, 'teacherId' | 'createdByUserId'>) =>
+  const isOwnDoc = (doc: { teacherId: string; createdByUserId?: string }) =>
     isAdmin ||
     Boolean(
       (ownTeacherProfile && doc.teacherId === ownTeacherProfile.id) ||
@@ -366,7 +400,7 @@ export function TeacherAcademicsModule({
 
   // Parent / Student specific view state
   const [parentChildId, setParentChildId] = useState<string>(students[0]?.id || '');
-  const [parentTab, setParentTab] = useState<'schemes' | 'lessons'>('schemes');
+  const [parentTab, setParentTab] = useState<'schemes' | 'lessons' | 'covered'>('schemes');
   const [expandedSchemeId, setExpandedSchemeId] = useState<string | null>(null);
 
   // Parent Preview filters (staff tab)
@@ -378,6 +412,7 @@ export function TeacherAcademicsModule({
   // Detail / Review modal state
   const [inspectScheme, setInspectScheme] = useState<SchemeOfWork | null>(null);
   const [inspectLessonPlan, setInspectLessonPlan] = useState<LessonPlan | null>(null);
+  const [inspectRecordOfWork, setInspectRecordOfWork] = useState<RecordOfWork | null>(null);
   const [reviewFeedbackInput, setReviewFeedbackInput] = useState('');
   const [reviewShareWithParents, setReviewShareWithParents] = useState(true);
   const [submittingAction, setSubmittingAction] = useState(false);
@@ -429,6 +464,58 @@ export function TeacherAcademicsModule({
   const [lpHomework, setLpHomework] = useState('');
   const [lpReflection, setLpReflection] = useState('');
 
+  // Record of Work Create/Edit Modal state
+  const [rowModalOpen, setRowModalOpen] = useState(false);
+  const [editingRowId, setEditingRowId] = useState<string | undefined>(undefined);
+  const [rowSchemeId, setRowSchemeId] = useState('');
+  const [rowLessonPlanId, setRowLessonPlanId] = useState('');
+  const [rowGrade, setRowGrade] = useState(tenant.grades[0] || 'Grade 7');
+  const [rowSection, setRowSection] = useState(
+    getStreamsForGrade(tenant, tenant.grades[0] || 'Grade 7')[0] || 'A'
+  );
+  const [rowSubject, setRowSubject] = useState(
+    getSubjectsForGrade(tenant, tenant.grades[0] || 'Grade 7')[0] || 'Mathematics'
+  );
+  const [rowTeacherId, setRowTeacherId] = useState(
+    ownTeacherProfile?.id || tenant.teachers[0]?.id || ''
+  );
+  const [rowWeekNumber, setRowWeekNumber] = useState(submissionConfig.currentWeekNumber);
+  const [rowDateCovered, setRowDateCovered] = useState('2026-11-20');
+  const [rowStrand, setRowStrand] = useState('');
+  const [rowSubStrand, setRowSubStrand] = useState('');
+  const [rowWorkCovered, setRowWorkCovered] = useState('');
+  const [rowLessonsTaught, setRowLessonsTaught] = useState(4);
+  const [rowLessonsPlanned, setRowLessonsPlanned] = useState(4);
+  const [rowMastery, setRowMastery] = useState<CbcLearnerMasteryLevel>('Meeting Expectations');
+  const [rowCoverageStatus, setRowCoverageStatus] = useState<RecordOfWorkCoverageStatus>('Completed');
+  const [rowChallenges, setRowChallenges] = useState('');
+  const [rowRemarks, setRowRemarks] = useState('');
+  const [rowParentSummary, setRowParentSummary] = useState('');
+
+  // Lesson Notes Create Modal + Inline Radio/Remarks Drafts
+  const [lnModalOpen, setLnModalOpen] = useState(false);
+  const [editingLnId, setEditingLnId] = useState<string | undefined>(undefined);
+  const [lnSchemeId, setLnSchemeId] = useState('');
+  const [lnLessonPlanId, setLnLessonPlanId] = useState('');
+  const [lnGrade, setLnGrade] = useState(tenant.grades[0] || 'Grade 7');
+  const [lnSection, setLnSection] = useState(
+    getStreamsForGrade(tenant, tenant.grades[0] || 'Grade 7')[0] || 'A'
+  );
+  const [lnSubject, setLnSubject] = useState(
+    getSubjectsForGrade(tenant, tenant.grades[0] || 'Grade 7')[0] || 'Mathematics'
+  );
+  const [lnTeacherId, setLnTeacherId] = useState(
+    ownTeacherProfile?.id || tenant.teachers[0]?.id || ''
+  );
+  const [lnWeekNumber, setLnWeekNumber] = useState(submissionConfig.currentWeekNumber);
+  const [lnLessonDate, setLnLessonDate] = useState('2026-11-18');
+  const [lnSubmissionStatus, setLnSubmissionStatus] =
+    useState<LessonNoteSubmissionStatus>('Submitted');
+  const [lnRemarks, setLnRemarks] = useState('');
+  const [lnRowDrafts, setLnRowDrafts] = useState<
+    Record<string, { submissionStatus: LessonNoteSubmissionStatus; remarks: string }>
+  >({});
+
   // Deadline Config Modal (Admin)
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [cfgDueDate, setCfgDueDate] = useState(submissionConfig.schemeDueDate);
@@ -472,8 +559,18 @@ export function TeacherAcademicsModule({
       const expected = resolveExpectedCohortsForTeacher(tenant, tc, timetable);
       const tcSchemes = schemes.filter((s) => s.teacherId === tc.id);
       const tcPlans = lessonPlans.filter((l) => l.teacherId === tc.id);
+      const tcNotes = lessonNotes.filter((n) => n.teacherId === tc.id);
+      const tcRecords = recordsOfWork.filter((r) => r.teacherId === tc.id);
       const activeWeekPlans = tcPlans.filter(
         (l) => l.weekNumber === submissionConfig.currentWeekNumber
+      );
+      const activeWeekNotes = tcNotes.filter(
+        (n) =>
+          n.weekNumber === submissionConfig.currentWeekNumber &&
+          (n.submissionStatus || (n.status === 'Submitted' || n.status === 'Approved' ? 'Submitted' : 'Not Submitted')) === 'Submitted'
+      );
+      const activeWeekRecords = tcRecords.filter(
+        (r) => r.weekNumber === submissionConfig.currentWeekNumber
       );
 
       let approvedCount = 0;
@@ -513,6 +610,10 @@ export function TeacherAcademicsModule({
         lateCount,
         activeWeekPlansCount: activeWeekPlans.length,
         totalPlansCount: tcPlans.length,
+        activeWeekNotesCount: activeWeekNotes.length,
+        totalNotesCount: tcNotes.length,
+        activeWeekRecordsCount: activeWeekRecords.length,
+        totalRecordsCount: tcRecords.length,
         missingCohorts,
       };
     });
@@ -548,6 +649,8 @@ export function TeacherAcademicsModule({
     timetable,
     schemes,
     lessonPlans,
+    lessonNotes,
+    recordsOfWork,
     submissionConfig.currentWeekNumber,
     submissionConfig.schemeDueDate,
     isTeacher,
@@ -561,32 +664,61 @@ export function TeacherAcademicsModule({
     const visiblePlans = isTeacher && ownTeacherProfile
       ? lessonPlans.filter(isOwnDoc)
       : lessonPlans;
+    const visibleNotes = isTeacher && ownTeacherProfile
+      ? lessonNotes.filter(isOwnDoc)
+      : lessonNotes;
+    const visibleRecords = isTeacher && ownTeacherProfile
+      ? recordsOfWork.filter(isOwnDoc)
+      : recordsOfWork;
 
     const submittedSchemes = visibleSchemes.filter(
       (s) => s.status === 'Approved' || s.status === 'Submitted'
     ).length;
     const pendingSchemes = visibleSchemes.filter((s) => s.status === 'Submitted').length;
     const pendingPlans = visiblePlans.filter((l) => l.status === 'Submitted').length;
+    const pendingRecords = visibleRecords.filter((r) => r.status === 'Submitted').length;
     const revisionCount =
       visibleSchemes.filter((s) => s.status === 'Revision Requested').length +
-      visiblePlans.filter((l) => l.status === 'Revision Requested').length;
+      visiblePlans.filter((l) => l.status === 'Revision Requested').length +
+      visibleRecords.filter((r) => r.status === 'Revision Requested').length;
     const activeWeekPlans = visiblePlans.filter(
       (l) => l.weekNumber === submissionConfig.currentWeekNumber
     ).length;
+    const activeWeekNotes = visibleNotes.filter(
+      (n) =>
+        n.weekNumber === submissionConfig.currentWeekNumber &&
+        (n.submissionStatus || (n.status === 'Submitted' || n.status === 'Approved' ? 'Submitted' : 'Not Submitted')) === 'Submitted'
+    ).length;
+    const activeWeekRecords = visibleRecords.filter(
+      (r) => r.weekNumber === submissionConfig.currentWeekNumber
+    ).length;
     const parentSharedCount =
       visibleSchemes.filter((s) => s.status === 'Approved' && s.parentVisible).length +
-      visiblePlans.filter((l) => l.status === 'Approved' && l.parentVisible).length;
+      visiblePlans.filter((l) => l.status === 'Approved' && l.parentVisible).length +
+      visibleRecords.filter((r) => r.status === 'Approved' && r.parentVisible).length;
 
     return {
       submittedSchemes,
       totalSchemes: visibleSchemes.length,
-      pendingReview: pendingSchemes + pendingPlans,
+      pendingReview: pendingSchemes + pendingPlans + pendingRecords,
       revisionCount,
       activeWeekPlans,
       totalPlans: visiblePlans.length,
+      activeWeekNotes,
+      totalNotes: visibleNotes.length,
+      activeWeekRecords,
+      totalRecords: visibleRecords.length,
       parentSharedCount,
     };
-  }, [schemes, lessonPlans, isTeacher, ownTeacherProfile, submissionConfig.currentWeekNumber]);
+  }, [
+    schemes,
+    lessonPlans,
+    lessonNotes,
+    recordsOfWork,
+    isTeacher,
+    ownTeacherProfile,
+    submissionConfig.currentWeekNumber,
+  ]);
 
   const filteredSchemes = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
@@ -638,12 +770,79 @@ export function TeacherAcademicsModule({
     filterWeek,
   ]);
 
+  const filteredRecordsOfWork = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return recordsOfWork.filter((r) => {
+      if (filterGrade !== 'ALL' && r.grade !== filterGrade) return false;
+      if (filterStream !== 'ALL' && r.section !== filterStream) return false;
+      if (filterSubject !== 'ALL' && r.subject !== filterSubject) return false;
+      if (filterStatus !== 'ALL' && r.status !== filterStatus) return false;
+      if (filterTeacherId !== 'ALL' && r.teacherId !== filterTeacherId) return false;
+      if (filterWeek !== 'ALL' && String(r.weekNumber) !== filterWeek) return false;
+      if (
+        q &&
+        !`${r.workCovered} ${r.strand} ${r.subStrand} ${r.subject} ${r.teacherName} ${r.grade}`
+          .toLowerCase()
+          .includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [
+    recordsOfWork,
+    searchTerm,
+    filterGrade,
+    filterStream,
+    filterSubject,
+    filterStatus,
+    filterTeacherId,
+    filterWeek,
+  ]);
+
+  const resolveLessonNoteStatus = (ln: LessonNote): LessonNoteSubmissionStatus =>
+    ln.submissionStatus ||
+    (ln.status === 'Submitted' || ln.status === 'Approved' ? 'Submitted' : 'Not Submitted');
+
+  const filteredLessonNotes = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return lessonNotes.filter((ln) => {
+      const subStat = resolveLessonNoteStatus(ln);
+      if (filterGrade !== 'ALL' && ln.grade !== filterGrade) return false;
+      if (filterStream !== 'ALL' && ln.section !== filterStream) return false;
+      if (filterSubject !== 'ALL' && ln.subject !== filterSubject) return false;
+      if (filterStatus !== 'ALL' && subStat !== filterStatus) return false;
+      if (filterTeacherId !== 'ALL' && ln.teacherId !== filterTeacherId) return false;
+      if (filterWeek !== 'ALL' && String(ln.weekNumber) !== filterWeek) return false;
+      if (
+        q &&
+        !`${ln.remarks || ''} ${ln.subject} ${ln.teacherName} ${ln.grade} ${ln.section}`
+          .toLowerCase()
+          .includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [
+    lessonNotes,
+    searchTerm,
+    filterGrade,
+    filterStream,
+    filterSubject,
+    filterStatus,
+    filterTeacherId,
+    filterWeek,
+  ]);
+
   const distinctSubjects = useMemo(() => {
     const set = new Set<string>(tenant.subjects);
     schemes.forEach((s) => set.add(s.subject));
     lessonPlans.forEach((l) => set.add(l.subject));
+    lessonNotes.forEach((n) => set.add(n.subject));
+    recordsOfWork.forEach((r) => set.add(r.subject));
     return Array.from(set).sort();
-  }, [tenant.subjects, schemes, lessonPlans]);
+  }, [tenant.subjects, schemes, lessonPlans, lessonNotes, recordsOfWork]);
 
   // Modal openers
   const openCreateSchemeModal = (prefill?: { grade?: string; section?: string; subject?: string }) => {
@@ -769,6 +968,203 @@ export function TeacherAcademicsModule({
     }
   };
 
+  const openCreateRecordOfWorkModal = (prefill?: {
+    linkedScheme?: SchemeOfWork;
+    linkedLessonPlan?: LessonPlan;
+  }) => {
+    const lp = prefill?.linkedLessonPlan;
+    const linkedScheme =
+      prefill?.linkedScheme ||
+      (lp?.schemeOfWorkId ? schemes.find((s) => s.id === lp.schemeOfWorkId) : undefined);
+
+    const g =
+      lp?.grade ||
+      linkedScheme?.grade ||
+      availableGradesForEditor[0] ||
+      tenant.grades[0] ||
+      'Grade 7';
+    const sec = lp?.section || linkedScheme?.section || getStreamsForGrade(tenant, g)[0] || 'A';
+    const allowedSubs = getAllowedSubjectsForEditor(g, sec);
+    const sub =
+      lp?.subject ||
+      linkedScheme?.subject ||
+      allowedSubs[0] ||
+      tenant.subjects[0] ||
+      'Mathematics';
+    const weekNum = lp?.weekNumber || submissionConfig.currentWeekNumber;
+    const weekMatch =
+      linkedScheme?.weeks.find((w) => w.weekNumber === weekNum) || linkedScheme?.weeks[0];
+
+    setEditingRowId(undefined);
+    setRowSchemeId(linkedScheme?.id || '');
+    setRowLessonPlanId(lp?.id || '');
+    setRowGrade(g);
+    setRowSection(sec);
+    setRowSubject(sub);
+    setRowTeacherId(
+      lp?.teacherId ||
+        linkedScheme?.teacherId ||
+        ownTeacherProfile?.id ||
+        tenant.teachers[0]?.id ||
+        ''
+    );
+    setRowWeekNumber(weekNum);
+    setRowDateCovered(lp?.lessonDate || '2026-11-20');
+    setRowStrand(lp?.strand || weekMatch?.strand || 'Foundational Concepts');
+    setRowSubStrand(lp?.subStrand || weekMatch?.subStrand || 'Core Inquiry');
+    setRowWorkCovered(
+      lp
+        ? `Taught "${lp.lessonTitle}". Covered ${lp.learningOutcomes}`
+        : weekMatch
+        ? `Covered ${weekMatch.subStrand}: ${weekMatch.learningOutcomes} Learners completed ${weekMatch.learningActivities.toLowerCase()}`
+        : ''
+    );
+    setRowLessonsTaught(4);
+    setRowLessonsPlanned(4);
+    setRowMastery('Meeting Expectations');
+    setRowCoverageStatus('Completed');
+    setRowChallenges('');
+    setRowRemarks('');
+    setRowParentSummary(
+      weekMatch
+        ? `Learners completed Week ${weekNum} on ${weekMatch.subStrand} through guided practice and class exercises.`
+        : ''
+    );
+    setRowModalOpen(true);
+  };
+
+  const openEditRecordOfWorkModal = (r: RecordOfWork) => {
+    setEditingRowId(r.id);
+    setRowSchemeId(r.schemeOfWorkId || '');
+    setRowLessonPlanId(r.lessonPlanId || '');
+    setRowGrade(r.grade);
+    setRowSection(r.section);
+    setRowSubject(r.subject);
+    setRowTeacherId(r.teacherId);
+    setRowWeekNumber(r.weekNumber);
+    setRowDateCovered(r.dateCovered);
+    setRowStrand(r.strand);
+    setRowSubStrand(r.subStrand);
+    setRowWorkCovered(r.workCovered);
+    setRowLessonsTaught(r.lessonsTaughtCount);
+    setRowLessonsPlanned(r.lessonsPlannedCount ?? 4);
+    setRowMastery(r.learnerMastery);
+    setRowCoverageStatus(r.coverageStatus);
+    setRowChallenges(r.challengesAndRemediation || '');
+    setRowRemarks(r.remarks || '');
+    setRowParentSummary(r.parentSummary || '');
+    setRowModalOpen(true);
+  };
+
+  const handleApplyLinkedSchemeToRow = (schemeId: string, weekNum: number) => {
+    setRowSchemeId(schemeId);
+    const found = schemes.find((s) => s.id === schemeId);
+    if (!found) return;
+    setRowGrade(found.grade);
+    setRowSection(found.section);
+    setRowSubject(found.subject);
+    if (isAdmin) setRowTeacherId(found.teacherId);
+    const wk = found.weeks.find((w) => w.weekNumber === weekNum) || found.weeks[0];
+    if (wk) {
+      setRowStrand(wk.strand);
+      setRowSubStrand(wk.subStrand);
+      setRowWorkCovered(
+        `Covered ${wk.subStrand}: ${wk.learningOutcomes} Class completed ${wk.learningActivities.toLowerCase()}`
+      );
+      setRowParentSummary(
+        `Week ${weekNum} covered ${wk.subStrand} with guided class activities and assessment.`
+      );
+    }
+  };
+
+  const handleApplyLinkedLessonPlanToRow = (lpId: string) => {
+    setRowLessonPlanId(lpId);
+    const lp = lessonPlans.find((item) => item.id === lpId);
+    if (!lp) return;
+    if (lp.schemeOfWorkId) setRowSchemeId(lp.schemeOfWorkId);
+    setRowGrade(lp.grade);
+    setRowSection(lp.section);
+    setRowSubject(lp.subject);
+    if (isAdmin) setRowTeacherId(lp.teacherId);
+    setRowWeekNumber(lp.weekNumber);
+    setRowDateCovered(lp.lessonDate);
+    setRowStrand(lp.strand);
+    setRowSubStrand(lp.subStrand);
+    setRowWorkCovered(`Taught "${lp.lessonTitle}". Covered ${lp.learningOutcomes}`);
+    setRowParentSummary(
+      `Covered ${lp.subStrand} (${lp.lessonTitle}).${lp.extendedHomework ? ` Home follow-up: ${lp.extendedHomework}` : ''}`
+    );
+  };
+
+  const openCreateLessonNoteModal = (prefill?: {
+    linkedScheme?: SchemeOfWork;
+    linkedLessonPlan?: LessonPlan;
+  }) => {
+    const lp = prefill?.linkedLessonPlan;
+    const linkedScheme =
+      prefill?.linkedScheme ||
+      (lp?.schemeOfWorkId ? schemes.find((s) => s.id === lp.schemeOfWorkId) : undefined);
+
+    const g =
+      lp?.grade ||
+      linkedScheme?.grade ||
+      availableGradesForEditor[0] ||
+      tenant.grades[0] ||
+      'Grade 7';
+    const sec = lp?.section || linkedScheme?.section || getStreamsForGrade(tenant, g)[0] || 'A';
+    const allowedSubs = getAllowedSubjectsForEditor(g, sec);
+    const sub =
+      lp?.subject ||
+      linkedScheme?.subject ||
+      allowedSubs[0] ||
+      tenant.subjects[0] ||
+      'Mathematics';
+    const weekNum = lp?.weekNumber || submissionConfig.currentWeekNumber;
+
+    setEditingLnId(undefined);
+    setLnSchemeId(linkedScheme?.id || '');
+    setLnLessonPlanId(lp?.id || '');
+    setLnGrade(g);
+    setLnSection(sec);
+    setLnSubject(sub);
+    setLnTeacherId(
+      lp?.teacherId ||
+        linkedScheme?.teacherId ||
+        ownTeacherProfile?.id ||
+        tenant.teachers[0]?.id ||
+        ''
+    );
+    setLnWeekNumber(weekNum);
+    setLnLessonDate(lp?.lessonDate || '2026-11-18');
+    setLnSubmissionStatus('Submitted');
+    setLnRemarks('');
+    setLnModalOpen(true);
+  };
+
+  const handleApplyLinkedSchemeToLn = (schemeId: string, weekNum: number) => {
+    setLnSchemeId(schemeId);
+    const found = schemes.find((s) => s.id === schemeId);
+    if (!found) return;
+    setLnGrade(found.grade);
+    setLnSection(found.section);
+    setLnSubject(found.subject);
+    if (isAdmin) setLnTeacherId(found.teacherId);
+    setLnWeekNumber(weekNum);
+  };
+
+  const handleApplyLinkedLessonPlanToLn = (lpId: string) => {
+    setLnLessonPlanId(lpId);
+    const lp = lessonPlans.find((item) => item.id === lpId);
+    if (!lp) return;
+    if (lp.schemeOfWorkId) setLnSchemeId(lp.schemeOfWorkId);
+    setLnGrade(lp.grade);
+    setLnSection(lp.section);
+    setLnSubject(lp.subject);
+    if (isAdmin) setLnTeacherId(lp.teacherId);
+    setLnWeekNumber(lp.weekNumber);
+    setLnLessonDate(lp.lessonDate);
+  };
+
   // API Mutations
   const handleSaveScheme = async (submitNow: boolean) => {
     setSubmittingAction(true);
@@ -838,6 +1234,46 @@ export function TeacherAcademicsModule({
     }
   };
 
+  const handleSaveRecordOfWork = async (submitNow: boolean) => {
+    setSubmittingAction(true);
+    try {
+      await saasApi.saveRecordOfWork(tenant.id, {
+        id: editingRowId,
+        schemeOfWorkId: rowSchemeId || undefined,
+        lessonPlanId: rowLessonPlanId || undefined,
+        grade: rowGrade,
+        section: rowSection,
+        subject: rowSubject,
+        teacherId: isAdmin ? rowTeacherId || undefined : undefined,
+        weekNumber: rowWeekNumber,
+        dateCovered: rowDateCovered,
+        strand: rowStrand,
+        subStrand: rowSubStrand,
+        workCovered: rowWorkCovered,
+        lessonsTaughtCount: rowLessonsTaught,
+        lessonsPlannedCount: rowLessonsPlanned,
+        learnerMastery: rowMastery,
+        coverageStatus: rowCoverageStatus,
+        challengesAndRemediation: rowChallenges,
+        remarks: rowRemarks,
+        parentSummary: rowParentSummary,
+        submitNow,
+      });
+      setRowModalOpen(false);
+      onNotify(
+        submitNow
+          ? 'Record of Work submitted for academic sign-off.'
+          : 'Record of Work saved as draft.',
+        'success'
+      );
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Could not save Record of Work.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
   const handleSubmitScheme = async (schemeId: string) => {
     setSubmittingAction(true);
     try {
@@ -856,6 +1292,19 @@ export function TeacherAcademicsModule({
     try {
       await saasApi.submitLessonPlan(tenant.id, lpId);
       onNotify('Lesson Plan submitted for admin review.', 'success');
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Submission failed.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleSubmitRecordOfWork = async (rowId: string) => {
+    setSubmittingAction(true);
+    try {
+      await saasApi.submitRecordOfWork(tenant.id, rowId);
+      onNotify('Record of Work submitted for admin sign-off.', 'success');
       await onRefresh();
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Submission failed.', 'error');
@@ -908,6 +1357,28 @@ export function TeacherAcademicsModule({
     }
   };
 
+  const handleReviewRecordOfWork = async (
+    rowId: string,
+    decision: 'Approved' | 'Revision Requested'
+  ) => {
+    setSubmittingAction(true);
+    try {
+      const res = await saasApi.reviewRecordOfWork(tenant.id, rowId, {
+        decision,
+        reviewFeedback: reviewFeedbackInput,
+        parentVisible: decision === 'Approved' ? reviewShareWithParents : false,
+      });
+      setInspectRecordOfWork(res.recordOfWork);
+      setReviewFeedbackInput('');
+      onNotify(`Record of Work marked as ${decision}.`, 'success');
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Review action failed.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
   const handleToggleSchemeVisibility = async (s: SchemeOfWork) => {
     setSubmittingAction(true);
     try {
@@ -946,6 +1417,25 @@ export function TeacherAcademicsModule({
     }
   };
 
+  const handleToggleRecordOfWorkVisibility = async (r: RecordOfWork) => {
+    setSubmittingAction(true);
+    try {
+      const res = await saasApi.setRecordOfWorkParentVisibility(tenant.id, r.id, !r.parentVisible);
+      if (inspectRecordOfWork?.id === r.id) setInspectRecordOfWork(res.recordOfWork);
+      onNotify(
+        res.recordOfWork.parentVisible
+          ? 'Record of Work is now visible on the Parent Portal.'
+          : 'Record of Work hidden from the Parent Portal.',
+        'info'
+      );
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Visibility update failed.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
   const handleDeleteScheme = async (schemeId: string) => {
     setSubmittingAction(true);
     try {
@@ -966,6 +1456,129 @@ export function TeacherAcademicsModule({
       await saasApi.deleteLessonPlan(tenant.id, lpId);
       if (inspectLessonPlan?.id === lpId) setInspectLessonPlan(null);
       onNotify('Lesson Plan deleted.', 'info');
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Delete failed.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleDeleteRecordOfWork = async (rowId: string) => {
+    setSubmittingAction(true);
+    try {
+      await saasApi.deleteRecordOfWork(tenant.id, rowId);
+      if (inspectRecordOfWork?.id === rowId) setInspectRecordOfWork(null);
+      onNotify('Record of Work deleted.', 'info');
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Delete failed.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleSaveLessonNoteFromModal = async () => {
+    setSubmittingAction(true);
+    try {
+      await saasApi.saveLessonNote(tenant.id, {
+        id: editingLnId,
+        schemeOfWorkId: lnSchemeId || undefined,
+        lessonPlanId: lnLessonPlanId || undefined,
+        grade: lnGrade,
+        section: lnSection,
+        subject: lnSubject,
+        teacherId: isAdmin ? lnTeacherId || undefined : undefined,
+        weekNumber: lnWeekNumber,
+        lessonDate: lnLessonDate,
+        submissionStatus: lnSubmissionStatus,
+        remarks: lnRemarks.trim() || undefined,
+      });
+      setLnModalOpen(false);
+      onNotify(
+        `Lesson Notes marked as ${lnSubmissionStatus}.`,
+        'success'
+      );
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Could not save Lesson Notes.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleSaveLessonNoteRow = async (ln: LessonNote) => {
+    const draft = lnRowDrafts[ln.id];
+    const nextStatus = draft?.submissionStatus ?? resolveLessonNoteStatus(ln);
+    const nextRemarks = draft ? draft.remarks : ln.remarks || '';
+    setSubmittingAction(true);
+    try {
+      await saasApi.saveLessonNote(tenant.id, {
+        id: ln.id,
+        grade: ln.grade,
+        section: ln.section,
+        subject: ln.subject,
+        teacherId: isAdmin ? ln.teacherId : undefined,
+        weekNumber: ln.weekNumber,
+        lessonDate: ln.lessonDate,
+        submissionStatus: nextStatus,
+        remarks: nextRemarks.trim() || undefined,
+      });
+      setLnRowDrafts((prev) => {
+        const next = { ...prev };
+        delete next[ln.id];
+        return next;
+      });
+      onNotify(`Lesson Notes updated (${nextStatus}).`, 'success');
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Could not update Lesson Notes.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleSaveAllLessonNoteRows = async () => {
+    const dirtyIds = Object.keys(lnRowDrafts);
+    if (dirtyIds.length === 0) return;
+    setSubmittingAction(true);
+    try {
+      for (const id of dirtyIds) {
+        const ln = lessonNotes.find((item) => item.id === id);
+        const draft = lnRowDrafts[id];
+        if (!ln || !draft) continue;
+        await saasApi.saveLessonNote(tenant.id, {
+          id: ln.id,
+          grade: ln.grade,
+          section: ln.section,
+          subject: ln.subject,
+          teacherId: isAdmin ? ln.teacherId : undefined,
+          weekNumber: ln.weekNumber,
+          lessonDate: ln.lessonDate,
+          submissionStatus: draft.submissionStatus,
+          remarks: draft.remarks.trim() || undefined,
+        });
+      }
+      setLnRowDrafts({});
+      onNotify(`Saved ${dirtyIds.length} Lesson Notes entry/entries.`, 'success');
+      await onRefresh();
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Batch save failed.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleDeleteLessonNote = async (noteId: string) => {
+    setSubmittingAction(true);
+    try {
+      await saasApi.deleteLessonNote(tenant.id, noteId);
+      setLnRowDrafts((prev) => {
+        const next = { ...prev };
+        delete next[noteId];
+        return next;
+      });
+      onNotify('Lesson Notes entry deleted.', 'info');
       await onRefresh();
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Delete failed.', 'error');
@@ -1044,6 +1657,18 @@ export function TeacherAcademicsModule({
             (lp.section === activeChild.section || lp.section === 'All Streams') &&
             childSubjects.includes(lp.subject) &&
             (filterSubject === 'ALL' || lp.subject === filterSubject)
+        )
+      : [];
+
+    const childRecordsOfWork = activeChild
+      ? recordsOfWork.filter(
+          (r) =>
+            r.status === 'Approved' &&
+            r.parentVisible &&
+            r.grade === activeChild.grade &&
+            (r.section === activeChild.section || r.section === 'All Streams') &&
+            childSubjects.includes(r.subject) &&
+            (filterSubject === 'ALL' || r.subject === filterSubject)
         )
       : [];
 
@@ -1138,6 +1763,16 @@ export function TeacherAcademicsModule({
                 }`}
               >
                 Weekly Highlights ({childLessonPlans.length})
+              </button>
+              <button
+                onClick={() => setParentTab('covered')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
+                  parentTab === 'covered'
+                    ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-slate-100'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                Covered Work ({childRecordsOfWork.length})
               </button>
             </div>
           </div>
@@ -1269,58 +1904,117 @@ export function TeacherAcademicsModule({
               })}
             </div>
           )
-        ) : childLessonPlans.length === 0 ? (
+        ) : parentTab === 'lessons' ? (
+          childLessonPlans.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-10 text-center dark:border-slate-800 dark:bg-slate-900">
+              <FileText className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600" />
+              <p className="mt-3 text-sm font-semibold text-slate-800 dark:text-slate-200">
+                No weekly lesson highlights published for {activeChild.grade} {activeChild.section} yet
+              </p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Approved lesson summaries and parent home follow-up prompts will appear here.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {childLessonPlans.map((lp) => (
+                <div
+                  key={lp.id}
+                  className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-mono text-[11px] font-medium text-slate-500 tabular-nums dark:text-slate-400">
+                        Week {lp.weekNumber} · {lp.lessonDate} · {lp.subject}
+                      </p>
+                      <h3 className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100">
+                        {lp.lessonTitle}
+                      </h3>
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        {lp.strand} — {lp.subStrand} · Teacher: {lp.teacherName}
+                      </p>
+                    </div>
+                    <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 shrink-0 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">
+                      Approved
+                    </span>
+                  </div>
+                  <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 text-xs dark:border-slate-800">
+                    <div>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">
+                        Learning Focus:{' '}
+                      </span>
+                      <span className="text-slate-600 dark:text-slate-400">{lp.learningOutcomes}</span>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">
+                        Required Materials:{' '}
+                      </span>
+                      <span className="text-slate-600 dark:text-slate-400">{lp.learningResources}</span>
+                    </div>
+                    {lp.extendedHomework && (
+                      <div className="rounded-lg border border-blue-200 bg-blue-50/70 p-2.5 text-blue-950 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
+                        <span className="font-semibold">Home Follow-Up / Homework: </span>
+                        {lp.extendedHomework}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : childRecordsOfWork.length === 0 ? (
           <div className="rounded-xl border border-slate-200 bg-white p-10 text-center dark:border-slate-800 dark:bg-slate-900">
-            <FileText className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600" />
+            <ClipboardCheck className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600" />
             <p className="mt-3 text-sm font-semibold text-slate-800 dark:text-slate-200">
-              No weekly lesson highlights published for {activeChild.grade} {activeChild.section} yet
+              No covered work records published for {activeChild.grade} {activeChild.section} yet
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Approved lesson summaries and parent home follow-up prompts will appear here.
+              Weekly Records of Work logged by teachers and verified by the academic office will
+              appear here.
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {childLessonPlans.map((lp) => (
+            {childRecordsOfWork.map((rec) => (
               <div
-                key={lp.id}
+                key={rec.id}
                 className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="font-mono text-[11px] font-medium text-slate-500 tabular-nums dark:text-slate-400">
-                      Week {lp.weekNumber} · {lp.lessonDate} · {lp.subject}
+                      Week {rec.weekNumber} · {rec.dateCovered} · {rec.subject}
                     </p>
                     <h3 className="mt-1 text-sm font-bold text-slate-900 dark:text-slate-100">
-                      {lp.lessonTitle}
+                      {rec.strand} — {rec.subStrand}
                     </h3>
                     <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                      {lp.strand} — {lp.subStrand} · Teacher: {lp.teacherName}
+                      Teacher: {rec.teacherName}
                     </p>
                   </div>
-                  <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 shrink-0 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">
-                    Approved
+                  <span
+                    className={`rounded-md border px-2 py-0.5 text-[11px] font-medium shrink-0 ${COVERAGE_BADGE_MAP[rec.coverageStatus]}`}
+                  >
+                    {rec.coverageStatus}
                   </span>
                 </div>
                 <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 text-xs dark:border-slate-800">
-                  <div>
-                    <span className="font-semibold text-slate-700 dark:text-slate-200">
-                      Learning Focus:{' '}
+                  <p className="text-slate-700 dark:text-slate-300">
+                    {rec.parentSummary || rec.workCovered}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    <span className="font-mono tabular-nums">
+                      Lessons Taught: {rec.lessonsTaughtCount}
+                      {rec.lessonsPlannedCount ? `/${rec.lessonsPlannedCount}` : ''}
                     </span>
-                    <span className="text-slate-600 dark:text-slate-400">{lp.learningOutcomes}</span>
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-700 dark:text-slate-200">
-                      Required Materials:{' '}
+                    <span>·</span>
+                    <span>
+                      Class Mastery:{' '}
+                      <strong className="font-semibold text-slate-700 dark:text-slate-200">
+                        {rec.learnerMastery}
+                      </strong>
                     </span>
-                    <span className="text-slate-600 dark:text-slate-400">{lp.learningResources}</span>
                   </div>
-                  {lp.extendedHomework && (
-                    <div className="rounded-lg border border-blue-200 bg-blue-50/70 p-2.5 text-blue-950 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
-                      <span className="font-semibold">Home Follow-Up / Homework: </span>
-                      {lp.extendedHomework}
-                    </div>
-                  )}
                 </div>
               </div>
             ))}
@@ -1347,6 +2041,13 @@ export function TeacherAcademicsModule({
       lp.grade === previewGrade &&
       (lp.section === previewStream || lp.section === 'All Streams')
   );
+  const previewCohortRecordsOfWork = recordsOfWork.filter(
+    (r) =>
+      r.status === 'Approved' &&
+      r.parentVisible &&
+      r.grade === previewGrade &&
+      (r.section === previewStream || r.section === 'All Streams')
+  );
 
   return (
     <div className="space-y-6">
@@ -1354,7 +2055,7 @@ export function TeacherAcademicsModule({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between no-print">
         <div>
           <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-            Teacher Academics — Schemes & Lesson Plans
+            Teacher Academics — Schemes, Lesson Plans, Notes &amp; Records of Work
           </h1>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
             {tenant.name} · {tenant.academicYear} ({tenant.currentTerm}) · Active Week{' '}
@@ -1416,6 +2117,20 @@ export function TeacherAcademicsModule({
                 <Plus className="h-3.5 w-3.5" />
                 New Lesson Plan
               </button>
+              <button
+                onClick={() => openCreateLessonNoteModal()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              >
+                <BookMarked className="h-3.5 w-3.5" />
+                New Lesson Notes
+              </button>
+              <button
+                onClick={() => openCreateRecordOfWorkModal()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              >
+                <ClipboardCheck className="h-3.5 w-3.5" />
+                Log Record of Work
+              </button>
             </>
           )}
         </div>
@@ -1455,15 +2170,18 @@ export function TeacherAcademicsModule({
         <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
           <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span className="font-semibold uppercase tracking-wide">
-              Week {submissionConfig.currentWeekNumber} Lesson Plans
+              Week {submissionConfig.currentWeekNumber} Execution
             </span>
             <FileCheck2 className="h-4 w-4 text-slate-400" />
           </div>
           <p className="mt-2 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
             {kpis.activeWeekPlans}
+            <span className="ml-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+              plans · {kpis.activeWeekNotes} notes · {kpis.activeWeekRecords} covered
+            </span>
           </p>
           <p className="mt-1 text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
-            {kpis.totalPlans} total term lesson plans recorded
+            {kpis.totalPlans} plans · {kpis.totalNotes} notes · {kpis.totalRecords} records logged
           </p>
         </div>
 
@@ -1491,6 +2209,12 @@ export function TeacherAcademicsModule({
               [
                 { id: 'schemes', label: `Schemes of Work (${schemes.length})`, icon: BookOpen },
                 { id: 'lesson-plans', label: `Lesson Plans (${lessonPlans.length})`, icon: FileText },
+                { id: 'lesson-notes', label: `Lesson Notes (${lessonNotes.length})`, icon: BookMarked },
+                {
+                  id: 'record-of-work',
+                  label: `Record of Work (${recordsOfWork.length})`,
+                  icon: ClipboardCheck,
+                },
                 {
                   id: 'tracking',
                   label: `Submission Tracking (${trackingSummary.missingGaps.length} gaps)`,
@@ -1519,7 +2243,10 @@ export function TeacherAcademicsModule({
           </div>
         </div>
 
-        {(activeTab === 'schemes' || activeTab === 'lesson-plans') && (
+        {(activeTab === 'schemes' ||
+          activeTab === 'lesson-plans' ||
+          activeTab === 'lesson-notes' ||
+          activeTab === 'record-of-work') && (
           <div className="grid grid-cols-1 gap-2.5 rounded-xl border border-slate-200 bg-white p-3.5 sm:grid-cols-2 lg:grid-cols-6 dark:border-slate-800 dark:bg-slate-900">
             <div className="relative lg:col-span-2">
               <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
@@ -1527,7 +2254,7 @@ export function TeacherAcademicsModule({
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search title, strand, subject, or teacher..."
+                placeholder="Search title, strand, covered work, or teacher..."
                 className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs text-slate-800 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
               />
             </div>
@@ -1567,13 +2294,24 @@ export function TeacherAcademicsModule({
               className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
             >
               <option value="ALL">All Statuses</option>
-              <option value="Approved">Approved</option>
-              <option value="Submitted">Submitted</option>
-              <option value="Revision Requested">Revision Requested</option>
-              <option value="Draft">Draft</option>
+              {activeTab === 'lesson-notes' ? (
+                <>
+                  <option value="Submitted">Submitted</option>
+                  <option value="Not Submitted">Not Submitted</option>
+                </>
+              ) : (
+                <>
+                  <option value="Approved">Approved</option>
+                  <option value="Submitted">Submitted</option>
+                  <option value="Revision Requested">Revision Requested</option>
+                  <option value="Draft">Draft</option>
+                </>
+              )}
             </select>
 
-            {activeTab === 'lesson-plans' ? (
+            {activeTab === 'lesson-plans' ||
+            activeTab === 'lesson-notes' ||
+            activeTab === 'record-of-work' ? (
               <select
                 value={filterWeek}
                 onChange={(e) => setFilterWeek(e.target.value)}
@@ -1952,7 +2690,388 @@ export function TeacherAcademicsModule({
         </div>
       )}
 
-      {/* TAB 3: SUBMISSION TRACKING */}
+      {/* TAB 3: LESSON NOTES (SUBMITTED / NOT SUBMITTED RADIO CALLS + SHORT REMARKS) */}
+      {activeTab === 'lesson-notes' && (
+        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Lesson Notes Submission Check-In
+              </h2>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Mark each class and subject as <strong className="font-semibold">Submitted</strong>{' '}
+                or <strong className="font-semibold">Not Submitted</strong> followed by short
+                remarks.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {Object.keys(lnRowDrafts).length > 0 && canAuthor && (
+                <button
+                  disabled={submittingAction}
+                  onClick={handleSaveAllLessonNoteRows}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                >
+                  Save All Changes ({Object.keys(lnRowDrafts).length})
+                </button>
+              )}
+              {canAuthor && (
+                <button
+                  onClick={() => openCreateLessonNoteModal()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 dark:bg-slate-800"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add Entry
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400">
+                <tr>
+                  <th className="px-4 py-3">Teacher</th>
+                  <th className="px-4 py-3">Class &amp; Subject</th>
+                  <th className="px-4 py-3">Week &amp; Date</th>
+                  <th className="px-4 py-3">Lesson Notes Status</th>
+                  <th className="px-4 py-3">Short Remarks</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {filteredLessonNotes.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="px-4 py-12 text-center text-xs text-slate-500 dark:text-slate-400"
+                    >
+                      No Lesson Notes entries match the current filters.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredLessonNotes.map((ln) => {
+                    const editable = canAuthor && isOwnDoc(ln);
+                    const savedStatus = resolveLessonNoteStatus(ln);
+                    const savedRemarks = ln.remarks || '';
+                    const draft = lnRowDrafts[ln.id];
+                    const currentStatus = draft?.submissionStatus ?? savedStatus;
+                    const currentRemarks = draft ? draft.remarks : savedRemarks;
+                    const isDirty =
+                      Boolean(draft) &&
+                      (draft.submissionStatus !== savedStatus || draft.remarks !== savedRemarks);
+
+                    const updateDraft = (
+                      nextStatus: LessonNoteSubmissionStatus,
+                      nextRemarks: string
+                    ) => {
+                      setLnRowDrafts((prev) => {
+                        if (nextStatus === savedStatus && nextRemarks === savedRemarks) {
+                          const copy = { ...prev };
+                          delete copy[ln.id];
+                          return copy;
+                        }
+                        return {
+                          ...prev,
+                          [ln.id]: { submissionStatus: nextStatus, remarks: nextRemarks },
+                        };
+                      });
+                    };
+
+                    return (
+                      <tr
+                        key={ln.id}
+                        className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40"
+                      >
+                        <td className="px-4 py-3 whitespace-nowrap font-medium text-slate-900 dark:text-slate-100">
+                          {ln.teacherName}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <p className="font-medium text-slate-800 dark:text-slate-200">
+                            {ln.grade} · {ln.section}
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {ln.subject}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                          <p className="font-semibold text-slate-900 dark:text-slate-100">
+                            Wk {ln.weekNumber}
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {ln.lessonDate}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div
+                            role="radiogroup"
+                            aria-label={`Lesson notes submission status for ${ln.teacherName} ${ln.grade} ${ln.subject}`}
+                            className="inline-flex items-center gap-3"
+                          >
+                            <label
+                              className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors ${
+                                currentStatus === 'Submitted'
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
+                                  : 'border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300'
+                              } ${!editable ? 'opacity-70 cursor-default' : ''}`}
+                            >
+                              <input
+                                type="radio"
+                                name={`ln-status-${ln.id}`}
+                                value="Submitted"
+                                disabled={!editable || submittingAction}
+                                checked={currentStatus === 'Submitted'}
+                                onChange={() => updateDraft('Submitted', currentRemarks)}
+                                className="h-3.5 w-3.5 accent-emerald-600"
+                              />
+                              Submitted
+                            </label>
+                            <label
+                              className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors ${
+                                currentStatus === 'Not Submitted'
+                                  ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
+                                  : 'border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300'
+                              } ${!editable ? 'opacity-70 cursor-default' : ''}`}
+                            >
+                              <input
+                                type="radio"
+                                name={`ln-status-${ln.id}`}
+                                value="Not Submitted"
+                                disabled={!editable || submittingAction}
+                                checked={currentStatus === 'Not Submitted'}
+                                onChange={() => updateDraft('Not Submitted', currentRemarks)}
+                                className="h-3.5 w-3.5 accent-amber-600"
+                              />
+                              Not Submitted
+                            </label>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 min-w-[230px]">
+                          <input
+                            type="text"
+                            maxLength={200}
+                            disabled={!editable || submittingAction}
+                            value={currentRemarks}
+                            onChange={(e) => updateDraft(currentStatus, e.target.value)}
+                            placeholder="Short remarks..."
+                            className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 disabled:bg-slate-50 disabled:text-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:disabled:bg-slate-900"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1.5">
+                            {editable && isDirty && (
+                              <button
+                                disabled={submittingAction}
+                                onClick={() => handleSaveLessonNoteRow(ln)}
+                                className="rounded-md bg-blue-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                              >
+                                Save
+                              </button>
+                            )}
+                            {editable && (
+                              <button
+                                disabled={submittingAction}
+                                onClick={() => handleDeleteLessonNote(ln.id)}
+                                title="Delete lesson notes entry"
+                                className="rounded-md border border-slate-200 p-1 text-slate-500 hover:border-red-200 hover:text-red-600 dark:border-slate-700 dark:text-slate-400"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: RECORD OF WORK (COVERED) */}
+      {activeTab === 'record-of-work' && (
+        <div className="rounded-xl border border-slate-200 bg-white overflow-hidden dark:border-slate-800 dark:bg-slate-900">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400">
+                <tr>
+                  <th className="px-4 py-3">Week & Date</th>
+                  <th className="px-4 py-3">Class & Subject</th>
+                  <th className="px-4 py-3">Strand & Work Covered</th>
+                  <th className="px-4 py-3">Lessons</th>
+                  <th className="px-4 py-3">Coverage & Mastery</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Parent Portal</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {filteredRecordsOfWork.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={8}
+                      className="px-4 py-12 text-center text-xs text-slate-500 dark:text-slate-400"
+                    >
+                      No Records of Work match the current filters.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredRecordsOfWork.map((r) => {
+                    const editable = canAuthor && isOwnDoc(r);
+                    return (
+                      <tr
+                        key={r.id}
+                        className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40"
+                      >
+                        <td className="px-4 py-3 whitespace-nowrap font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                          <p className="font-semibold text-slate-900 dark:text-slate-100">
+                            Wk {r.weekNumber}
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {r.dateCovered}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <p className="font-medium text-slate-800 dark:text-slate-200">
+                            {r.grade} · {r.section}
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {r.subject} · {r.teacherName}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 max-w-xs">
+                          <button
+                            onClick={() => {
+                              setInspectRecordOfWork(r);
+                              setReviewFeedbackInput(r.reviewFeedback || '');
+                              setReviewShareWithParents(r.parentVisible || true);
+                            }}
+                            className="font-semibold text-slate-900 hover:text-blue-600 text-left dark:text-slate-100 dark:hover:text-blue-400"
+                          >
+                            {r.strand} — {r.subStrand}
+                          </button>
+                          <p className="mt-0.5 text-[11px] text-slate-600 line-clamp-2 dark:text-slate-400">
+                            {r.workCovered}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                          {r.lessonsTaughtCount}
+                          {r.lessonsPlannedCount ? `/${r.lessonsPlannedCount}` : ''}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium ${COVERAGE_BADGE_MAP[r.coverageStatus]}`}
+                          >
+                            {r.coverageStatus}
+                          </span>
+                          <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                            {r.learnerMastery}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium ${STATUS_BADGE_MAP[r.status]}`}
+                          >
+                            {r.status}
+                          </span>
+                          {r.reviewFeedback && r.status === 'Revision Requested' && (
+                            <p className="mt-1 max-w-[160px] truncate text-[10px] text-amber-700 dark:text-amber-300">
+                              {r.reviewFeedback}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {r.status === 'Approved' ? (
+                            editable ? (
+                              <button
+                                disabled={submittingAction}
+                                onClick={() => handleToggleRecordOfWorkVisibility(r)}
+                                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium whitespace-nowrap ${
+                                  r.parentVisible
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                    : 'border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                                }`}
+                              >
+                                {r.parentVisible ? (
+                                  <>
+                                    <Eye className="h-3 w-3" />
+                                    Visible
+                                  </>
+                                ) : (
+                                  <>
+                                    <EyeOff className="h-3 w-3" />
+                                    Hidden
+                                  </>
+                                )}
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-slate-500">
+                                {r.parentVisible ? 'Visible' : 'Hidden'}
+                              </span>
+                            )
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[11px] text-slate-400">
+                              <Lock className="h-3 w-3" />
+                              Needs Approval
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              onClick={() => {
+                                setInspectRecordOfWork(r);
+                                setReviewFeedbackInput(r.reviewFeedback || '');
+                                setReviewShareWithParents(true);
+                              }}
+                              className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                              {isAdmin && r.status === 'Submitted' ? 'Review' : 'View'}
+                            </button>
+                            {editable && (
+                              <>
+                                <button
+                                  onClick={() => openEditRecordOfWorkModal(r)}
+                                  className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                                >
+                                  Edit
+                                </button>
+                                {(r.status === 'Draft' || r.status === 'Revision Requested') && (
+                                  <button
+                                    disabled={submittingAction}
+                                    onClick={() => handleSubmitRecordOfWork(r.id)}
+                                    className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-500"
+                                  >
+                                    <Send className="h-3 w-3" />
+                                    Submit
+                                  </button>
+                                )}
+                                {(isAdmin || r.status !== 'Approved') && (
+                                  <button
+                                    disabled={submittingAction}
+                                    onClick={() => handleDeleteRecordOfWork(r.id)}
+                                    title="Delete record of work"
+                                    className="rounded-md border border-slate-200 p-1 text-slate-500 hover:border-red-200 hover:text-red-600 dark:border-slate-700 dark:text-slate-400"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: SUBMISSION TRACKING */}
       {activeTab === 'tracking' && (
         <div className="space-y-6">
           <div className="rounded-xl border border-slate-200 bg-white overflow-hidden dark:border-slate-800 dark:bg-slate-900">
@@ -1963,7 +3082,7 @@ export function TeacherAcademicsModule({
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Expected Schemes of Work vs Approved, Submitted, Revision, Missing & Active Week{' '}
-                  {submissionConfig.currentWeekNumber} Lesson Plans
+                  {submissionConfig.currentWeekNumber} Plans & Records of Work
                 </p>
               </div>
               <span className="font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
@@ -1983,6 +3102,12 @@ export function TeacherAcademicsModule({
                     <th className="px-4 py-3">Late Submissions</th>
                     <th className="px-4 py-3">
                       Wk {submissionConfig.currentWeekNumber} Plans
+                    </th>
+                    <th className="px-4 py-3">
+                      Wk {submissionConfig.currentWeekNumber} Notes
+                    </th>
+                    <th className="px-4 py-3">
+                      Wk {submissionConfig.currentWeekNumber} Records
                     </th>
                     <th className="px-4 py-3 text-right">Action</th>
                   </tr>
@@ -2031,6 +3156,18 @@ export function TeacherAcademicsModule({
                         {row.activeWeekPlansCount}{' '}
                         <span className="text-[11px] text-slate-400">
                           ({row.totalPlansCount} total)
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 font-mono tabular-nums text-slate-800 dark:text-slate-200">
+                        {row.activeWeekNotesCount}{' '}
+                        <span className="text-[11px] text-slate-400">
+                          ({row.totalNotesCount} total)
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 font-mono tabular-nums text-slate-800 dark:text-slate-200">
+                        {row.activeWeekRecordsCount}{' '}
+                        <span className="text-[11px] text-slate-400">
+                          ({row.totalRecordsCount} total)
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right whitespace-nowrap">
@@ -2226,6 +3363,35 @@ export function TeacherAcademicsModule({
                           Home Follow-Up: {lp.extendedHomework}
                         </p>
                       )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Published Covered Work ({previewCohortRecordsOfWork.length})
+              </h3>
+              {previewCohortRecordsOfWork.length === 0 ? (
+                <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
+                  No Approved + Parent-Visible records of work for {previewGrade} Stream{' '}
+                  {previewStream}.
+                </p>
+              ) : (
+                <ul className="mt-3 divide-y divide-slate-100 dark:divide-slate-800">
+                  {previewCohortRecordsOfWork.map((rec) => (
+                    <li key={rec.id} className="py-3">
+                      <p className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                        Week {rec.weekNumber}: {rec.strand} — {rec.subStrand}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                        {rec.dateCovered} · {rec.subject} · {rec.coverageStatus} ·{' '}
+                        {rec.learnerMastery}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                        {rec.parentSummary || rec.workCovered}
+                      </p>
                     </li>
                   ))}
                 </ul>
@@ -2560,6 +3726,189 @@ export function TeacherAcademicsModule({
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />
                       Approve Lesson Plan
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DETAIL / ADMIN REVIEW / PRINT MODAL: RECORD OF WORK */}
+      {inspectRecordOfWork && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="flex max-h-[90vh] w-full max-w-3xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 no-print dark:border-slate-800">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Week {inspectRecordOfWork.weekNumber} Record of Work —{' '}
+                  {inspectRecordOfWork.subject}
+                </h2>
+                <span
+                  className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${STATUS_BADGE_MAP[inspectRecordOfWork.status]}`}
+                >
+                  {inspectRecordOfWork.status}
+                </span>
+                <span
+                  className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${COVERAGE_BADGE_MAP[inspectRecordOfWork.coverageStatus]}`}
+                >
+                  {inspectRecordOfWork.coverageStatus}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => window.print()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
+                >
+                  <Printer className="h-3.5 w-3.5" />
+                  Print
+                </button>
+                <button
+                  onClick={() => setInspectRecordOfWork(null)}
+                  className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <TenantDocumentHeader
+                tenant={tenant}
+                documentTitle="Record of Work Covered (CBC)"
+                subtitle={`${inspectRecordOfWork.grade} (${inspectRecordOfWork.section}) · ${inspectRecordOfWork.subject}`}
+                rightMeta={[
+                  { label: 'Teacher', value: inspectRecordOfWork.teacherName },
+                  {
+                    label: 'Week / Date',
+                    value: `Wk ${inspectRecordOfWork.weekNumber} · ${inspectRecordOfWork.dateCovered}`,
+                  },
+                  {
+                    label: 'Lessons Taught',
+                    value: `${inspectRecordOfWork.lessonsTaughtCount}${
+                      inspectRecordOfWork.lessonsPlannedCount
+                        ? ` / ${inspectRecordOfWork.lessonsPlannedCount}`
+                        : ''
+                    }`,
+                  },
+                ]}
+                compact
+              />
+
+              <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
+                <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <span className="text-[11px] uppercase text-slate-500">Strand & Sub-Strand</span>
+                  <p className="mt-1 font-semibold text-slate-900 dark:text-slate-100">
+                    {inspectRecordOfWork.strand} — {inspectRecordOfWork.subStrand}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <span className="text-[11px] uppercase text-slate-500">Learner Mastery</span>
+                  <p className="mt-1 font-semibold text-slate-900 dark:text-slate-100">
+                    {inspectRecordOfWork.learnerMastery}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <span className="text-[11px] uppercase text-slate-500">Parent Portal</span>
+                  <p className="mt-1 font-medium text-slate-900 dark:text-slate-100">
+                    {inspectRecordOfWork.status === 'Approved' && inspectRecordOfWork.parentVisible
+                      ? 'Published to Parents'
+                      : 'Staff Only'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2.5 text-xs">
+                <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <p className="font-semibold text-slate-900 dark:text-slate-100">
+                    Actual Work Covered
+                  </p>
+                  <p className="mt-1 text-slate-700 dark:text-slate-300">
+                    {inspectRecordOfWork.workCovered}
+                  </p>
+                </div>
+                {inspectRecordOfWork.parentSummary && (
+                  <div className="rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-900/60 dark:bg-blue-950/30">
+                    <p className="font-semibold text-blue-950 dark:text-blue-200">
+                      Parent Summary
+                    </p>
+                    <p className="mt-1 text-blue-900 dark:text-blue-300">
+                      {inspectRecordOfWork.parentSummary}
+                    </p>
+                  </div>
+                )}
+                {inspectRecordOfWork.challengesAndRemediation && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
+                    <p className="font-semibold text-slate-800 dark:text-slate-200">
+                      Challenges & Remediation Plan (Internal Staff Only)
+                    </p>
+                    <p className="mt-1 text-slate-600 dark:text-slate-400">
+                      {inspectRecordOfWork.challengesAndRemediation}
+                    </p>
+                  </div>
+                )}
+                {inspectRecordOfWork.remarks && (
+                  <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                    <p className="font-semibold text-slate-800 dark:text-slate-200">
+                      Teacher Remarks
+                    </p>
+                    <p className="mt-1 text-slate-600 dark:text-slate-400">
+                      {inspectRecordOfWork.remarks}
+                    </p>
+                  </div>
+                )}
+                {inspectRecordOfWork.reviewFeedback && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-950">
+                    <p className="font-semibold text-slate-800 dark:text-slate-200">
+                      Academic Review Feedback ({inspectRecordOfWork.reviewedByName || 'Admin'})
+                    </p>
+                    <p className="mt-1 text-slate-600 dark:text-slate-400">
+                      {inspectRecordOfWork.reviewFeedback}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {isAdmin && !readOnly && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3 no-print dark:border-slate-800 dark:bg-slate-950">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wide text-slate-700 dark:text-slate-200">
+                      Academic Admin Sign-Off & Approval
+                    </h3>
+                    <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={reviewShareWithParents}
+                        onChange={(e) => setReviewShareWithParents(e.target.checked)}
+                      />
+                      Share on Parent Portal upon approval
+                    </label>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={reviewFeedbackInput}
+                    onChange={(e) => setReviewFeedbackInput(e.target.value)}
+                    placeholder="Enter sign-off notes (required when requesting revision)..."
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  />
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      disabled={submittingAction}
+                      onClick={() =>
+                        handleReviewRecordOfWork(inspectRecordOfWork.id, 'Revision Requested')
+                      }
+                      className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300"
+                    >
+                      Request Revision
+                    </button>
+                    <button
+                      disabled={submittingAction}
+                      onClick={() => handleReviewRecordOfWork(inspectRecordOfWork.id, 'Approved')}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      Approve Record of Work
                     </button>
                   </div>
                 </div>
@@ -3213,6 +4562,580 @@ export function TeacherAcademicsModule({
               >
                 <Send className="h-3.5 w-3.5" />
                 Save & Submit for Review
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CREATE / EDIT RECORD OF WORK MODAL */}
+      {rowModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 no-print">
+          <div className="flex max-h-[92vh] w-full max-w-3xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+              <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                {editingRowId ? 'Edit Record of Work' : 'Log CBC Record of Work Covered'}
+              </h2>
+              <button
+                onClick={() => setRowModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-3.5 text-xs">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Link to Scheme of Work (auto-populates strand & outcomes)
+                  </label>
+                  <select
+                    value={rowSchemeId}
+                    onChange={(e) => handleApplyLinkedSchemeToRow(e.target.value, rowWeekNumber)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    <option value="">Standalone Record of Work</option>
+                    {schemes
+                      .filter((s) => isAdmin || isOwnDoc(s))
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.title} ({s.status})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Link to Lesson Plan (optional)
+                  </label>
+                  <select
+                    value={rowLessonPlanId}
+                    onChange={(e) => handleApplyLinkedLessonPlanToRow(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    <option value="">None / Weekly Aggregation</option>
+                    {lessonPlans
+                      .filter((lp) => isAdmin || isOwnDoc(lp))
+                      .map((lp) => (
+                        <option key={lp.id} value={lp.id}>
+                          Wk {lp.weekNumber} · {lp.grade} {lp.section} {lp.subject}: {lp.lessonTitle}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Grade
+                  </label>
+                  <select
+                    value={rowGrade}
+                    onChange={(e) => {
+                      const nextG = e.target.value;
+                      const streams = getStreamsForGrade(tenant, nextG);
+                      const nextSec = streams.includes(rowSection) ? rowSection : streams[0] || 'A';
+                      const subs = getAllowedSubjectsForEditor(nextG, nextSec);
+                      setRowGrade(nextG);
+                      setRowSection(nextSec);
+                      if (!subs.includes(rowSubject)) setRowSubject(subs[0] || rowSubject);
+                    }}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {availableGradesForEditor.map((g) => (
+                      <option key={g} value={g}>
+                        {g}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Stream
+                  </label>
+                  <select
+                    value={rowSection}
+                    onChange={(e) => setRowSection(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {getStreamsForGrade(tenant, rowGrade).map((sec) => (
+                      <option key={sec} value={sec}>
+                        {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Subject
+                  </label>
+                  <select
+                    value={rowSubject}
+                    onChange={(e) => setRowSubject(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {getAllowedSubjectsForEditor(rowGrade, rowSection).map((sub) => (
+                      <option key={sub} value={sub}>
+                        {sub}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {isAdmin && (
+                  <div>
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                      Teacher
+                    </label>
+                    <select
+                      value={rowTeacherId}
+                      onChange={(e) => setRowTeacherId(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                    >
+                      {tenant.teachers.map((tc) => (
+                        <option key={tc.id} value={tc.id}>
+                          {tc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Week #
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={14}
+                    value={rowWeekNumber}
+                    onChange={(e) => setRowWeekNumber(Number(e.target.value) || 1)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono tabular-nums dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Date Covered *
+                  </label>
+                  <input
+                    type="date"
+                    value={rowDateCovered}
+                    onChange={(e) => setRowDateCovered(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono tabular-nums dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Lessons Taught
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={rowLessonsTaught}
+                    onChange={(e) => setRowLessonsTaught(Number(e.target.value) || 1)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono tabular-nums dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Lessons Planned
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={rowLessonsPlanned}
+                    onChange={(e) => setRowLessonsPlanned(Number(e.target.value) || 1)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono tabular-nums dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Coverage Status *
+                  </label>
+                  <select
+                    value={rowCoverageStatus}
+                    onChange={(e) =>
+                      setRowCoverageStatus(e.target.value as RecordOfWorkCoverageStatus)
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {COVERAGE_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    CBC Learner Mastery *
+                  </label>
+                  <select
+                    value={rowMastery}
+                    onChange={(e) => setRowMastery(e.target.value as CbcLearnerMasteryLevel)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {MASTERY_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>
+                        {opt}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Strand *
+                  </label>
+                  <input
+                    type="text"
+                    value={rowStrand}
+                    onChange={(e) => setRowStrand(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Sub-Strand *
+                  </label>
+                  <input
+                    type="text"
+                    value={rowSubStrand}
+                    onChange={(e) => setRowSubStrand(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                  Actual Work Covered *
+                </label>
+                <textarea
+                  rows={3}
+                  value={rowWorkCovered}
+                  onChange={(e) => setRowWorkCovered(e.target.value)}
+                  placeholder="Detail topics, practicals, and exercises actually taught during the week..."
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                  Parent Portal Summary (shown once approved & published)
+                </label>
+                <input
+                  type="text"
+                  value={rowParentSummary}
+                  onChange={(e) => setRowParentSummary(e.target.value)}
+                  placeholder="Concise guardian-friendly update on covered learning..."
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Challenges & Remediation Plan (staff-only)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={rowChallenges}
+                    onChange={(e) => setRowChallenges(e.target.value)}
+                    placeholder="Never shown to parents..."
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Teacher Remarks
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={rowRemarks}
+                    onChange={(e) => setRowRemarks(e.target.value)}
+                    placeholder="Pace adjustments or carryover notes..."
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-6 py-3.5 dark:border-slate-800">
+              <button
+                onClick={() => setRowModalOpen(false)}
+                className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={submittingAction}
+                onClick={() => handleSaveRecordOfWork(false)}
+                className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              >
+                Save as Draft
+              </button>
+              <button
+                disabled={submittingAction}
+                onClick={() => handleSaveRecordOfWork(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500"
+              >
+                <Send className="h-3.5 w-3.5" />
+                Save & Submit for Sign-Off
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LOG LESSON NOTES MODAL (ONLY TWO RADIO CALLS: SUBMITTED / NOT SUBMITTED + SHORT REMARKS) */}
+      {lnModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 no-print">
+          <div className="flex max-h-[90vh] w-full max-w-xl flex-col rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 dark:border-slate-800">
+              <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                Log Lesson Notes Submission
+              </h2>
+              <button
+                onClick={() => setLnModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-4 text-xs">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Link to Scheme of Work (optional)
+                  </label>
+                  <select
+                    value={lnSchemeId}
+                    onChange={(e) => handleApplyLinkedSchemeToLn(e.target.value, lnWeekNumber)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    <option value="">No linked scheme</option>
+                    {schemes
+                      .filter((s) => isAdmin || isOwnDoc(s))
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.title}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Link to Lesson Plan (optional)
+                  </label>
+                  <select
+                    value={lnLessonPlanId}
+                    onChange={(e) => handleApplyLinkedLessonPlanToLn(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    <option value="">No linked lesson plan</option>
+                    {lessonPlans
+                      .filter((lp) => isAdmin || isOwnDoc(lp))
+                      .map((lp) => (
+                        <option key={lp.id} value={lp.id}>
+                          Wk {lp.weekNumber} · {lp.grade} {lp.section} · {lp.subject}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Grade
+                  </label>
+                  <select
+                    value={lnGrade}
+                    onChange={(e) => {
+                      const nextG = e.target.value;
+                      const streams = getStreamsForGrade(tenant, nextG);
+                      const nextSec = streams.includes(lnSection) ? lnSection : streams[0] || 'A';
+                      const subs = getAllowedSubjectsForEditor(nextG, nextSec);
+                      setLnGrade(nextG);
+                      setLnSection(nextSec);
+                      if (!subs.includes(lnSubject)) setLnSubject(subs[0] || lnSubject);
+                    }}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {availableGradesForEditor.map((g) => (
+                      <option key={g} value={g}>
+                        {g}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Stream
+                  </label>
+                  <select
+                    value={lnSection}
+                    onChange={(e) => setLnSection(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {getStreamsForGrade(tenant, lnGrade).map((sec) => (
+                      <option key={sec} value={sec}>
+                        {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Subject
+                  </label>
+                  <select
+                    value={lnSubject}
+                    onChange={(e) => setLnSubject(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  >
+                    {getAllowedSubjectsForEditor(lnGrade, lnSection).map((sub) => (
+                      <option key={sub} value={sub}>
+                        {sub}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {isAdmin && (
+                  <div>
+                    <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                      Teacher
+                    </label>
+                    <select
+                      value={lnTeacherId}
+                      onChange={(e) => setLnTeacherId(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                    >
+                      {tenant.teachers.map((tc) => (
+                        <option key={tc.id} value={tc.id}>
+                          {tc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Week #
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={14}
+                    value={lnWeekNumber}
+                    onChange={(e) => setLnWeekNumber(Number(e.target.value) || 1)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-mono tabular-nums dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                    Date
+                  </label>
+                  <input
+                    type="date"
+                    value={lnLessonDate}
+                    onChange={(e) => setLnLessonDate(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 font-mono tabular-nums dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <span className="block font-semibold text-slate-700 dark:text-slate-200">
+                  Lesson Notes Status *
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="Lesson Notes Status"
+                  className="mt-2 grid grid-cols-2 gap-3"
+                >
+                  <label
+                    className={`flex items-center gap-2.5 rounded-lg border px-3.5 py-2.5 text-xs font-semibold cursor-pointer transition-colors ${
+                      lnSubmissionStatus === 'Submitted'
+                        ? 'border-emerald-400 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200'
+                        : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="ln-modal-status"
+                      value="Submitted"
+                      checked={lnSubmissionStatus === 'Submitted'}
+                      onChange={() => setLnSubmissionStatus('Submitted')}
+                      className="h-4 w-4 accent-emerald-600"
+                    />
+                    Submitted
+                  </label>
+                  <label
+                    className={`flex items-center gap-2.5 rounded-lg border px-3.5 py-2.5 text-xs font-semibold cursor-pointer transition-colors ${
+                      lnSubmissionStatus === 'Not Submitted'
+                        ? 'border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-200'
+                        : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="ln-modal-status"
+                      value="Not Submitted"
+                      checked={lnSubmissionStatus === 'Not Submitted'}
+                      onChange={() => setLnSubmissionStatus('Not Submitted')}
+                      className="h-4 w-4 accent-amber-600"
+                    />
+                    Not Submitted
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-600 dark:text-slate-300">
+                  Short Remarks
+                </label>
+                <input
+                  type="text"
+                  maxLength={200}
+                  value={lnRemarks}
+                  onChange={(e) => setLnRemarks(e.target.value)}
+                  placeholder="Enter short remarks (e.g. Checked & filed, pending diagrams)..."
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-6 py-3.5 dark:border-slate-800">
+              <button
+                onClick={() => setLnModalOpen(false)}
+                className="rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={submittingAction}
+                onClick={handleSaveLessonNoteFromModal}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                Save Lesson Notes
               </button>
             </div>
           </div>

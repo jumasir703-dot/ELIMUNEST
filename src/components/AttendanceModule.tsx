@@ -21,9 +21,15 @@ import { saasApi } from '../lib/api';
 import {
   addDaysIso,
   getStreamsForGrade,
+  getSubjectsForGrade,
+  getTenantLessonRows,
   isDateInLeaveChit,
   isTeacherAssignedToCohort,
+  type DayOfWeek,
   type LeaveOutChit,
+  type TeacherLessonAttendanceRecord,
+  type TeacherLessonAttendanceStatus,
+  type Tenant,
   type TenantWorkspaceData,
   type UserRole,
 } from '../shared/types';
@@ -37,9 +43,53 @@ interface AttendanceModuleProps {
 }
 
 type BinaryAttendanceStatus = 'Present' | 'Absent';
-type RollCallTarget = 'student' | 'teaching' | 'non-teaching';
+type RollCallTarget = 'student' | 'teacher-lesson' | 'teaching' | 'non-teaching';
+
+interface TeacherLessonDraftItem {
+  rowKey: string;
+  id?: string;
+  timetableSlotId?: string;
+  periodNumber?: number;
+  timeSlot: string;
+  grade: string;
+  section: string;
+  subject: string;
+  scheduledTeacherId: string;
+  status: TeacherLessonAttendanceStatus;
+  delegatedTeacherId: string;
+  delegationNotes: string;
+  originalMissedDate: string;
+  recoveredDate: string;
+  recoveredByTeacherId: string;
+  topicCovered: string;
+  remarks: string;
+  isAdHoc?: boolean;
+}
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAY_NAMES: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+const LESSON_STATUS_OPTIONS: TeacherLessonAttendanceStatus[] = [
+  'Attended',
+  'Delegated',
+  'Recovered',
+  'Missed',
+];
+
+function resolveWeekdayFromIso(isoDate: string): DayOfWeek | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
+  const parsed = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const utcDay = parsed.getUTCDay(); // 0=Sun .. 6=Sat
+  if (utcDay >= 1 && utcDay <= 5) {
+    return WEEKDAY_NAMES[utcDay - 1];
+  }
+  return null;
+}
+
+function getPeriodTimeLabel(period?: number, tenant?: Pick<Tenant, 'bellSchedule'> | null): string {
+  if (!period) return '';
+  return getTenantLessonRows(tenant).find((p) => p.period === period)?.time || '';
+}
 
 function getLocalTodayIso(): string {
   const now = new Date();
@@ -69,12 +119,14 @@ export function AttendanceModule({
     students,
     attendance,
     staffAttendance = [],
+    teacherLessonAttendance = [],
     leaveOutChits = [],
     timetable = [],
   } = workspace;
 
-  const isAdmin = !readOnly && (currentRole === 'Admin' || currentRole === 'Super Admin');
+  const isAdmin = !readOnly && (currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer');
   const isTeacherRole = !readOnly && currentRole === 'Teacher';
+  const canUseTeacherLessonAttendance = isAdmin || isTeacherRole;
   const isReadOnlyViewer = Boolean(readOnly) || currentRole === 'Parent' || currentRole === 'Student';
 
   const defaultGrade = tenant.grades.includes('Grade 9')
@@ -84,7 +136,7 @@ export function AttendanceModule({
 
   const [rollCallTarget, setRollCallTarget] = useState<RollCallTarget>('student');
   const [activeTab, setActiveTab] = useState<'rollcall' | 'summary'>('rollcall');
-  const [date, setDate] = useState('2026-11-14');
+  const [date, setDate] = useState('2026-11-16');
   const [grade, setGrade] = useState(defaultGrade);
   const [section, setSection] = useState(defaultStreams[0] || 'A');
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>(
@@ -99,6 +151,33 @@ export function AttendanceModule({
   const [summaryPage, setSummaryPage] = useState(1);
   const [saving, setSaving] = useState(false);
 
+  // Teacher Lesson Attendance filters & inline Ad-hoc/Make-up form
+  const [lessonGradeFilter, setLessonGradeFilter] = useState<string>('All');
+  const [lessonStreamFilter, setLessonStreamFilter] = useState<string>('All');
+  const [lessonTeacherFilter, setLessonTeacherFilter] = useState<string>('All');
+  const [lessonDraftMap, setLessonDraftMap] = useState<Record<string, TeacherLessonDraftItem>>({});
+  const [stagedAdHocLessons, setStagedAdHocLessons] = useState<TeacherLessonDraftItem[]>([]);
+  const [showAddAdHocLesson, setShowAddAdHocLesson] = useState(false);
+  const [adHocGrade, setAdHocGrade] = useState<string>(defaultGrade);
+  const [adHocStream, setAdHocStream] = useState<string>(defaultStreams[0] || 'A');
+  const [adHocSubject, setAdHocSubject] = useState<string>(
+    getSubjectsForGrade(tenant, defaultGrade)[0] || tenant.subjects[0] || 'Mathematics'
+  );
+  const [adHocPeriod, setAdHocPeriod] = useState<number>(1);
+  const [adHocScheduledTeacherId, setAdHocScheduledTeacherId] = useState<string>(
+    tenant.teachers[0]?.id || ''
+  );
+  const [adHocStatus, setAdHocStatus] = useState<TeacherLessonAttendanceStatus>('Recovered');
+  const [adHocDelegatedTeacherId, setAdHocDelegatedTeacherId] = useState<string>('');
+  const [adHocDelegationNotes, setAdHocDelegationNotes] = useState<string>('');
+  const [adHocOriginalMissedDate, setAdHocOriginalMissedDate] = useState<string>('2026-11-12');
+  const [adHocRecoveredDate, setAdHocRecoveredDate] = useState<string>('2026-11-16');
+  const [adHocRecoveredByTeacherId, setAdHocRecoveredByTeacherId] = useState<string>(
+    tenant.teachers[0]?.id || ''
+  );
+  const [adHocTopicCovered, setAdHocTopicCovered] = useState<string>('');
+  const [adHocRemarks, setAdHocRemarks] = useState<string>('');
+
   // Add Non-Teaching Staff inline form (Admin only)
   const [showAddNonTeaching, setShowAddNonTeaching] = useState(false);
   const [newStaffName, setNewStaffName] = useState('');
@@ -109,18 +188,26 @@ export function AttendanceModule({
 
   // Leave Out Chit form state
   const [chitStudentId, setChitStudentId] = useState('');
-  const [chitStartDate, setChitStartDate] = useState('2026-11-14');
+  const [chitStartDate, setChitStartDate] = useState('2026-11-16');
   const [chitDays, setChitDays] = useState<number>(1);
   const [chitReason, setChitReason] = useState('');
   const [chitSaving, setChitSaving] = useState(false);
   const [selectedNoteChitId, setSelectedNoteChitId] = useState<string>('');
 
-  // Enforce Admin-only viewership for Teaching and Non-Teaching Staff attendance
+  // Enforce Admin-only viewership for Teaching and Non-Teaching Staff attendance, while allowing Teachers Student + Lesson Attendance
   useEffect(() => {
-    if (!isAdmin && rollCallTarget !== 'student') {
-      setRollCallTarget('student');
+    if (!isAdmin) {
+      if (!canUseTeacherLessonAttendance && rollCallTarget !== 'student') {
+        setRollCallTarget('student');
+      } else if (
+        canUseTeacherLessonAttendance &&
+        rollCallTarget !== 'student' &&
+        rollCallTarget !== 'teacher-lesson'
+      ) {
+        setRollCallTarget('student');
+      }
     }
-  }, [isAdmin, rollCallTarget]);
+  }, [isAdmin, canUseTeacherLessonAttendance, rollCallTarget]);
 
   // Keep selected teacher valid when tenant switches
   useEffect(() => {
@@ -561,6 +648,230 @@ export function AttendanceModule({
     });
   }, [nonTeachingRoster, nonTeachingRecords]);
 
+  // --- Teacher Lesson Attendance (Scheduled Timetable + Delegation Mandate + Recovery) ---
+  const selectedLessonDayOfWeek = useMemo(() => resolveWeekdayFromIso(date), [date]);
+
+  const scheduledLessonsForDate = useMemo(() => {
+    if (!selectedLessonDayOfWeek) return [];
+    return timetable
+      .filter((slot) => slot.day === selectedLessonDayOfWeek)
+      .slice()
+      .sort((a, b) => {
+        if (a.period !== b.period) return a.period - b.period;
+        if (a.grade !== b.grade) return a.grade.localeCompare(b.grade);
+        return a.section.localeCompare(b.section);
+      });
+  }, [timetable, selectedLessonDayOfWeek]);
+
+  // Sync Teacher Lesson Attendance draft whenever date, timetable, or saved records change
+  useEffect(() => {
+    const savedForDate = teacherLessonAttendance.filter((r) => r.date === date);
+    const nextMap: Record<string, TeacherLessonDraftItem> = {};
+    const matchedSavedIds = new Set<string>();
+
+    scheduledLessonsForDate.forEach((slot) => {
+      const existing = savedForDate.find((r) => r.timetableSlotId === slot.id);
+      if (existing) matchedSavedIds.add(existing.id);
+      const rowKey = `slot:${slot.id}`;
+      nextMap[rowKey] = {
+        rowKey,
+        id: existing?.id,
+        timetableSlotId: slot.id,
+        periodNumber: existing?.periodNumber ?? slot.period,
+        timeSlot: existing?.timeSlot || getPeriodTimeLabel(slot.period),
+        grade: slot.grade,
+        section: slot.section,
+        subject: slot.subject,
+        scheduledTeacherId: existing?.scheduledTeacherId || slot.teacherId,
+        status: existing?.status || 'Attended',
+        delegatedTeacherId: existing?.delegatedTeacherId || '',
+        delegationNotes: existing?.delegationNotes || '',
+        originalMissedDate: existing?.originalMissedDate || '',
+        recoveredDate: existing?.recoveredDate || date,
+        recoveredByTeacherId: existing?.recoveredByTeacherId || slot.teacherId,
+        topicCovered: existing?.topicCovered || '',
+        remarks: existing?.remarks || '',
+        isAdHoc: false,
+      };
+    });
+
+    // Include any saved ad-hoc/recovered records for this date without a matching timetable slot on that weekday
+    savedForDate
+      .filter((r) => !matchedSavedIds.has(r.id))
+      .forEach((rec) => {
+        const rowKey = `rec:${rec.id}`;
+        nextMap[rowKey] = {
+          rowKey,
+          id: rec.id,
+          timetableSlotId: rec.timetableSlotId,
+          periodNumber: rec.periodNumber,
+          timeSlot: rec.timeSlot || getPeriodTimeLabel(rec.periodNumber),
+          grade: rec.grade,
+          section: rec.section,
+          subject: rec.subject,
+          scheduledTeacherId: rec.scheduledTeacherId,
+          status: rec.status,
+          delegatedTeacherId: rec.delegatedTeacherId || '',
+          delegationNotes: rec.delegationNotes || '',
+          originalMissedDate: rec.originalMissedDate || '',
+          recoveredDate: rec.recoveredDate || date,
+          recoveredByTeacherId: rec.recoveredByTeacherId || rec.scheduledTeacherId,
+          topicCovered: rec.topicCovered || '',
+          remarks: rec.remarks || '',
+          isAdHoc: true,
+        };
+      });
+
+    // Re-attach unsaved staged ad-hoc items created by the user for this date
+    stagedAdHocLessons
+      .filter((item) => item.recoveredDate === date || item.isAdHoc)
+      .forEach((item) => {
+        if (!nextMap[item.rowKey]) {
+          nextMap[item.rowKey] = item;
+        }
+      });
+
+    setLessonDraftMap(nextMap);
+    setAdHocRecoveredDate(date);
+  }, [date, scheduledLessonsForDate, teacherLessonAttendance]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setStagedAdHocLessons([]);
+  }, [date, tenant.id]);
+
+  useEffect(() => {
+    if (isTeacherRole && selectedTeacher) {
+      setAdHocScheduledTeacherId(selectedTeacher.id);
+      setAdHocRecoveredByTeacherId(selectedTeacher.id);
+    } else if (!tenant.teachers.some((t) => t.id === adHocScheduledTeacherId)) {
+      const firstId = tenant.teachers[0]?.id || '';
+      setAdHocScheduledTeacherId(firstId);
+      setAdHocRecoveredByTeacherId(firstId);
+    }
+  }, [isTeacherRole, selectedTeacher, tenant.teachers, adHocScheduledTeacherId]);
+
+  const lessonStreamOptions = useMemo(() => {
+    if (lessonGradeFilter === 'All') {
+      return Array.from(
+        new Set(tenant.grades.flatMap((g) => getStreamsForGrade(tenant, g)))
+      );
+    }
+    return getStreamsForGrade(tenant, lessonGradeFilter);
+  }, [tenant, lessonGradeFilter]);
+
+  useEffect(() => {
+    if (lessonStreamFilter !== 'All' && !lessonStreamOptions.includes(lessonStreamFilter)) {
+      setLessonStreamFilter('All');
+    }
+  }, [lessonStreamFilter, lessonStreamOptions]);
+
+  const visibleLessonDraftRows = useMemo(() => {
+    const rows = Object.values(lessonDraftMap);
+    return rows
+      .filter((row) => {
+        if (isTeacherRole && selectedTeacher) {
+          const permitted =
+            row.scheduledTeacherId === selectedTeacher.id ||
+            row.delegatedTeacherId === selectedTeacher.id ||
+            row.recoveredByTeacherId === selectedTeacher.id ||
+            isTeacherAssignedToCohort(selectedTeacher, row.grade, row.section, timetable);
+          if (!permitted) return false;
+        }
+        if (lessonGradeFilter !== 'All' && row.grade !== lessonGradeFilter) return false;
+        if (lessonStreamFilter !== 'All' && row.section !== lessonStreamFilter) return false;
+        if (
+          lessonTeacherFilter !== 'All' &&
+          row.scheduledTeacherId !== lessonTeacherFilter &&
+          row.delegatedTeacherId !== lessonTeacherFilter &&
+          row.recoveredByTeacherId !== lessonTeacherFilter
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        const pa = a.periodNumber ?? 99;
+        const pb = b.periodNumber ?? 99;
+        if (pa !== pb) return pa - pb;
+        if (a.grade !== b.grade) return a.grade.localeCompare(b.grade);
+        return a.section.localeCompare(b.section);
+      });
+  }, [
+    lessonDraftMap,
+    isTeacherRole,
+    selectedTeacher,
+    timetable,
+    lessonGradeFilter,
+    lessonStreamFilter,
+    lessonTeacherFilter,
+  ]);
+
+  const lessonMetrics = useMemo(() => {
+    let attended = 0;
+    let delegated = 0;
+    let recovered = 0;
+    let missed = 0;
+    visibleLessonDraftRows.forEach((row) => {
+      if (row.status === 'Attended') attended += 1;
+      else if (row.status === 'Delegated') delegated += 1;
+      else if (row.status === 'Recovered') recovered += 1;
+      else missed += 1;
+    });
+    return {
+      total: visibleLessonDraftRows.length,
+      attended,
+      delegated,
+      recovered,
+      missed,
+    };
+  }, [visibleLessonDraftRows]);
+
+  const teacherLessonSummary = useMemo(() => {
+    const teachersToSummarize =
+      isTeacherRole && selectedTeacher ? [selectedTeacher] : tenant.teachers;
+    return teachersToSummarize.map((member) => {
+      const ownRecs = teacherLessonAttendance.filter(
+        (r) => r.scheduledTeacherId === member.id
+      );
+      const mandatesReceived = teacherLessonAttendance.filter(
+        (r) => r.status === 'Delegated' && r.delegatedTeacherId === member.id
+      ).length;
+      const attended = ownRecs.filter((r) => r.status === 'Attended').length;
+      const delegated = ownRecs.filter((r) => r.status === 'Delegated').length;
+      const recovered = ownRecs.filter((r) => r.status === 'Recovered').length;
+      const missed = ownRecs.filter((r) => r.status === 'Missed').length;
+      const total = ownRecs.length;
+      const delivered = attended + delegated + recovered;
+      const deliveryRate = total > 0 ? Math.round((delivered / total) * 1000) / 10 : 100;
+      return {
+        member,
+        total,
+        attended,
+        delegated,
+        mandatesReceived,
+        recovered,
+        missed,
+        deliveryRate,
+      };
+    });
+  }, [tenant.teachers, teacherLessonAttendance, isTeacherRole, selectedTeacher]);
+
+  const lessonAuditLogs = useMemo(() => {
+    return teacherLessonAttendance
+      .filter((r) => {
+        if (isTeacherRole && selectedTeacher) {
+          const involves =
+            r.scheduledTeacherId === selectedTeacher.id ||
+            r.delegatedTeacherId === selectedTeacher.id ||
+            r.recoveredByTeacherId === selectedTeacher.id;
+          if (!involves) return false;
+        }
+        return r.status === 'Delegated' || r.status === 'Recovered' || r.status === 'Missed';
+      })
+      .slice()
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [teacherLessonAttendance, isTeacherRole, selectedTeacher]);
+
   // --- Handlers ---
   function markAllPresent() {
     if (!canViewAndMarkStudentRegister) return;
@@ -752,6 +1063,176 @@ export function AttendanceModule({
     } catch (err) {
       onNotify(
         err instanceof Error ? err.message : 'Failed to save non-teaching staff roll call',
+        'error'
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function updateLessonDraft(rowKey: string, patch: Partial<TeacherLessonDraftItem>) {
+    setLessonDraftMap((prev) => {
+      const current = prev[rowKey];
+      if (!current) return prev;
+      const updated = { ...current, ...patch };
+      if (patch.status === 'Recovered' && !updated.recoveredDate) {
+        updated.recoveredDate = date;
+      }
+      if (patch.status === 'Recovered' && !updated.recoveredByTeacherId) {
+        updated.recoveredByTeacherId = updated.scheduledTeacherId;
+      }
+      return { ...prev, [rowKey]: updated };
+    });
+  }
+
+  function markVisibleLessonsAttended() {
+    if (!canUseTeacherLessonAttendance || isDateTermClosed) return;
+    setLessonDraftMap((prev) => {
+      const next = { ...prev };
+      visibleLessonDraftRows.forEach((row) => {
+        next[row.rowKey] = {
+          ...row,
+          status: 'Attended',
+        };
+      });
+      return next;
+    });
+  }
+
+  function handleStageAdHocLesson(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canUseTeacherLessonAttendance) return;
+    if (!adHocScheduledTeacherId) {
+      onNotify('Select the scheduled teacher for this lesson.', 'error');
+      return;
+    }
+    if (adHocStatus === 'Delegated') {
+      if (!adHocDelegatedTeacherId) {
+        onNotify('Select the teacher given the mandate for a delegated lesson.', 'error');
+        return;
+      }
+      if (adHocDelegatedTeacherId === adHocScheduledTeacherId) {
+        onNotify('Delegated mandate teacher must differ from the scheduled teacher.', 'error');
+        return;
+      }
+    }
+    if (adHocStatus === 'Recovered') {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(adHocOriginalMissedDate)) {
+        onNotify('Enter the Original Missed Date (YYYY-MM-DD) for a recovered lesson.', 'error');
+        return;
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(adHocRecoveredDate || date)) {
+        onNotify('Enter a valid Recovery Date (YYYY-MM-DD).', 'error');
+        return;
+      }
+    }
+    const rowKey = `adhoc:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const newItem: TeacherLessonDraftItem = {
+      rowKey,
+      periodNumber: adHocPeriod,
+      timeSlot: getPeriodTimeLabel(adHocPeriod),
+      grade: adHocGrade,
+      section: adHocStream,
+      subject: adHocSubject,
+      scheduledTeacherId: adHocScheduledTeacherId,
+      status: adHocStatus,
+      delegatedTeacherId: adHocStatus === 'Delegated' ? adHocDelegatedTeacherId : '',
+      delegationNotes: adHocStatus === 'Delegated' ? adHocDelegationNotes.trim() : '',
+      originalMissedDate: adHocStatus === 'Recovered' ? adHocOriginalMissedDate : '',
+      recoveredDate: adHocStatus === 'Recovered' ? adHocRecoveredDate || date : '',
+      recoveredByTeacherId:
+        adHocStatus === 'Recovered'
+          ? adHocRecoveredByTeacherId || adHocScheduledTeacherId
+          : '',
+      topicCovered: adHocTopicCovered.trim(),
+      remarks: adHocRemarks.trim(),
+      isAdHoc: true,
+    };
+    setStagedAdHocLessons((prev) => [newItem, ...prev]);
+    setLessonDraftMap((prev) => ({ [rowKey]: newItem, ...prev }));
+    setShowAddAdHocLesson(false);
+    setAdHocDelegationNotes('');
+    setAdHocTopicCovered('');
+    setAdHocRemarks('');
+    onNotify(`Added ${adHocGrade} ${adHocStream} ${adHocSubject} to ${date} register. Click Save Lesson Attendance to persist.`);
+  }
+
+  async function handleSaveTeacherLessons() {
+    if (!canUseTeacherLessonAttendance || visibleLessonDraftRows.length === 0) return;
+
+    for (const row of visibleLessonDraftRows) {
+      if (row.status === 'Delegated') {
+        if (!row.delegatedTeacherId) {
+          onNotify(
+            `Select the teacher given the mandate for ${row.grade} Stream ${row.section} ${row.subject}.`,
+            'error'
+          );
+          return;
+        }
+        if (row.delegatedTeacherId === row.scheduledTeacherId) {
+          onNotify(
+            `Mandate teacher for ${row.grade} Stream ${row.section} ${row.subject} must be different from the scheduled teacher.`,
+            'error'
+          );
+          return;
+        }
+      }
+      if (row.status === 'Recovered') {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(row.originalMissedDate)) {
+          onNotify(
+            `Specify the Original Missed Date for recovered lesson ${row.grade} Stream ${row.section} ${row.subject}.`,
+            'error'
+          );
+          return;
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(row.recoveredDate || date)) {
+          onNotify(
+            `Specify a valid Recovery Date for ${row.grade} Stream ${row.section} ${row.subject}.`,
+            'error'
+          );
+          return;
+        }
+      }
+    }
+
+    setSaving(true);
+    try {
+      await saasApi.saveTeacherLessonAttendanceBatch(tenant.id, {
+        date,
+        entries: visibleLessonDraftRows.map((row) => ({
+          id: row.id,
+          timetableSlotId: row.timetableSlotId,
+          periodNumber: row.periodNumber,
+          timeSlot: row.timeSlot || undefined,
+          grade: row.grade,
+          section: row.section,
+          subject: row.subject,
+          scheduledTeacherId: row.scheduledTeacherId,
+          status: row.status,
+          delegatedTeacherId: row.status === 'Delegated' ? row.delegatedTeacherId : undefined,
+          delegationNotes:
+            row.status === 'Delegated' && row.delegationNotes.trim()
+              ? row.delegationNotes.trim()
+              : undefined,
+          originalMissedDate: row.status === 'Recovered' ? row.originalMissedDate : undefined,
+          recoveredDate: row.status === 'Recovered' ? row.recoveredDate || date : undefined,
+          recoveredPeriod: row.status === 'Recovered' ? row.periodNumber : undefined,
+          recoveredByTeacherId:
+            row.status === 'Recovered'
+              ? row.recoveredByTeacherId || row.scheduledTeacherId
+              : undefined,
+          topicCovered: row.topicCovered.trim() || undefined,
+          remarks: row.remarks.trim() || undefined,
+        })),
+      });
+      setStagedAdHocLessons([]);
+      await onRefresh();
+      onNotify(
+        `Saved ${visibleLessonDraftRows.length} teacher lesson attendance record(s) for ${date}.`
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Failed to save teacher lesson attendance',
         'error'
       );
     } finally {
@@ -1052,7 +1533,9 @@ export function AttendanceModule({
   }
 
   const summaryTabLabel =
-    isAdmin && rollCallTarget === 'teaching'
+    canUseTeacherLessonAttendance && rollCallTarget === 'teacher-lesson'
+      ? 'Lesson Delivery Rates'
+      : isAdmin && rollCallTarget === 'teaching'
       ? 'Teaching Staff Rates'
       : isAdmin && rollCallTarget === 'non-teaching'
       ? 'Non-Teaching Staff Rates'
@@ -1067,15 +1550,15 @@ export function AttendanceModule({
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
             {isAdmin
-              ? 'Student register marking (assigned teachers & Admin), plus Teaching Staff and Non-Teaching Staff roll call (Admin only).'
+              ? 'Student register marking, Teacher Lesson Attendance (with delegation mandates & recovery logs), plus Teaching and Non-Teaching Staff roll calls.'
               : isTeacherRole
-              ? 'Student register marking for classes and streams assigned to you.'
+              ? 'Student register marking and Teacher Lesson Attendance (attended, delegated mandate, or recovered lessons) for your assigned cohorts.'
               : 'Student register marking is restricted to assigned class/subject teachers and School Admin.'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {isAdmin ? (
+          {canUseTeacherLessonAttendance ? (
             <select
               aria-label="Select roll call type"
               value={rollCallTarget}
@@ -1083,8 +1566,9 @@ export function AttendanceModule({
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
             >
               <option value="student">Student Roll Call</option>
-              <option value="teaching">Teaching Staff Roll Call</option>
-              <option value="non-teaching">Non-Teaching Staff Roll Call</option>
+              <option value="teacher-lesson">Teacher Lesson Attendance</option>
+              {isAdmin && <option value="teaching">Teaching Staff Roll Call</option>}
+              {isAdmin && <option value="non-teaching">Non-Teaching Staff Roll Call</option>}
             </select>
           ) : (
             <span className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
@@ -1833,6 +2317,630 @@ export function AttendanceModule({
             </>
           )}
         </>
+      ) : activeTab === 'rollcall' && canUseTeacherLessonAttendance && rollCallTarget === 'teacher-lesson' ? (
+        <>
+          {/* Teacher Lesson Attendance Controls Bar */}
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 lg:flex-row lg:items-center lg:justify-between dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center gap-2.5">
+              {isTeacherRole && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    Teacher:
+                  </span>
+                  <select
+                    aria-label="Acting teacher profile for lesson attendance"
+                    value={selectedTeacher?.id || ''}
+                    onChange={(e) => setSelectedTeacherId(e.target.value)}
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {tenant.teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2">
+                <label className="sr-only">Lesson Date</label>
+                <input
+                  type="date"
+                  aria-label="Teacher lesson attendance date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-mono text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+                <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                  {selectedLessonDayOfWeek || 'Weekend (Ad-Hoc Only)'}
+                </span>
+              </div>
+
+              <select
+                aria-label="Filter lessons by grade"
+                value={lessonGradeFilter}
+                onChange={(e) => setLessonGradeFilter(e.target.value)}
+                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              >
+                <option value="All">All Grades</option>
+                {tenant.grades.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                aria-label="Filter lessons by stream"
+                value={lessonStreamFilter}
+                onChange={(e) => setLessonStreamFilter(e.target.value)}
+                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+              >
+                <option value="All">All Streams</option>
+                {lessonStreamOptions.map((sec) => (
+                  <option key={sec} value={sec}>
+                    Stream {sec}
+                  </option>
+                ))}
+              </select>
+
+              {isAdmin && (
+                <select
+                  aria-label="Filter lessons by teacher"
+                  value={lessonTeacherFilter}
+                  onChange={(e) => setLessonTeacherFilter(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                >
+                  <option value="All">All Teachers</option>
+                  {tenant.teachers.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <span className="text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                Attended:{' '}
+                <strong className="text-emerald-700 dark:text-emerald-400">
+                  {lessonMetrics.attended}
+                </strong>{' '}
+                · Delegated:{' '}
+                <strong className="text-blue-700 dark:text-blue-400">
+                  {lessonMetrics.delegated}
+                </strong>{' '}
+                · Recovered:{' '}
+                <strong className="text-amber-700 dark:text-amber-400">
+                  {lessonMetrics.recovered}
+                </strong>{' '}
+                · Missed:{' '}
+                <strong className="text-red-700 dark:text-red-400">
+                  {lessonMetrics.missed}
+                </strong>
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isDateTermClosed}
+                onClick={() => setShowAddAdHocLesson((prev) => !prev)}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {showAddAdHocLesson ? 'Close Make-Up Form' : 'Log Make-Up / Ad-Hoc Lesson'}
+              </button>
+              <button
+                type="button"
+                onClick={markVisibleLessonsAttended}
+                disabled={visibleLessonDraftRows.length === 0 || isDateTermClosed}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                <CheckCheck className="h-3.5 w-3.5" />
+                Mark Visible Attended
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveTeacherLessons}
+                disabled={saving || visibleLessonDraftRows.length === 0 || isDateTermClosed}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" />
+                {saving ? 'Saving...' : 'Save Lesson Attendance'}
+              </button>
+            </div>
+          </div>
+
+          {showAddAdHocLesson && (
+            <form
+              onSubmit={handleStageAdHocLesson}
+              className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5 dark:border-slate-800">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    Log Make-Up, Recovered, or Ad-Hoc Lesson ({date})
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Add a recovered lesson for an earlier missed session or an extra remedial period, or delegate a covering teacher.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-6">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Grade
+                  </label>
+                  <select
+                    value={adHocGrade}
+                    onChange={(e) => {
+                      const nextG = e.target.value;
+                      const nextStreams = getStreamsForGrade(tenant, nextG);
+                      const nextSubs = getSubjectsForGrade(tenant, nextG);
+                      setAdHocGrade(nextG);
+                      if (!nextStreams.includes(adHocStream)) setAdHocStream(nextStreams[0] || 'A');
+                      if (!nextSubs.includes(adHocSubject)) setAdHocSubject(nextSubs[0] || 'Mathematics');
+                    }}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {tenant.grades.map((g) => (
+                      <option key={g} value={g}>
+                        {g}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Stream
+                  </label>
+                  <select
+                    value={adHocStream}
+                    onChange={(e) => setAdHocStream(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {getStreamsForGrade(tenant, adHocGrade).map((sec) => (
+                      <option key={sec} value={sec}>
+                        Stream {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Subject
+                  </label>
+                  <select
+                    value={adHocSubject}
+                    onChange={(e) => setAdHocSubject(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {getSubjectsForGrade(tenant, adHocGrade).map((sub) => (
+                      <option key={sub} value={sub}>
+                        {sub}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Period
+                  </label>
+                  <select
+                    value={adHocPeriod}
+                    onChange={(e) => setAdHocPeriod(Number(e.target.value) || 1)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 tabular-nums dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {getTenantLessonRows(tenant).map((p) => (
+                      <option key={p.period} value={p.period}>
+                        P{p.period} ({p.time})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Scheduled Teacher
+                  </label>
+                  <select
+                    disabled={isTeacherRole}
+                    value={adHocScheduledTeacherId}
+                    onChange={(e) => setAdHocScheduledTeacherId(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {tenant.teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Lesson Status
+                  </label>
+                  <select
+                    value={adHocStatus}
+                    onChange={(e) => setAdHocStatus(e.target.value as TeacherLessonAttendanceStatus)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {LESSON_STATUS_OPTIONS.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {adHocStatus === 'Delegated' && (
+                <div className="grid grid-cols-1 gap-3 rounded-lg border border-blue-200 bg-blue-50/50 p-3 sm:grid-cols-2 dark:border-blue-900/60 dark:bg-blue-950/20">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Mandate Given To (Covering Teacher) *
+                    </label>
+                    <select
+                      required
+                      value={adHocDelegatedTeacherId}
+                      onChange={(e) => setAdHocDelegatedTeacherId(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      <option value="">Select covering teacher...</option>
+                      {tenant.teachers
+                        .filter((t) => t.id !== adHocScheduledTeacherId)
+                        .map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name} ({t.department})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Delegation Notes / Handover Instructions
+                    </label>
+                    <input
+                      type="text"
+                      value={adHocDelegationNotes}
+                      onChange={(e) => setAdHocDelegationNotes(e.target.value)}
+                      placeholder="e.g. Guided worksheet and class exercise supervised"
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {adHocStatus === 'Recovered' && (
+                <div className="grid grid-cols-1 gap-3 rounded-lg border border-amber-200 bg-amber-50/50 p-3 sm:grid-cols-3 dark:border-amber-900/60 dark:bg-amber-950/20">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Original Missed Date *
+                    </label>
+                    <input
+                      required
+                      type="date"
+                      value={adHocOriginalMissedDate}
+                      onChange={(e) => setAdHocOriginalMissedDate(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Recovery Date *
+                    </label>
+                    <input
+                      required
+                      type="date"
+                      value={adHocRecoveredDate}
+                      onChange={(e) => setAdHocRecoveredDate(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Recovered By Teacher
+                    </label>
+                    <select
+                      value={adHocRecoveredByTeacherId}
+                      onChange={(e) => setAdHocRecoveredByTeacherId(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                    >
+                      {tenant.teachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 sm:items-end">
+                <div className="sm:col-span-5">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Topic Covered
+                  </label>
+                  <input
+                    type="text"
+                    value={adHocTopicCovered}
+                    onChange={(e) => setAdHocTopicCovered(e.target.value)}
+                    placeholder="e.g. Algebra Make-Up Revision / Linear Graphs"
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+                <div className="sm:col-span-5">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Remarks
+                  </label>
+                  <input
+                    type="text"
+                    value={adHocRemarks}
+                    onChange={(e) => setAdHocRemarks(e.target.value)}
+                    placeholder="Optional delivery or recovery remark..."
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  />
+                </div>
+                <div className="sm:col-span-2 sm:flex sm:justify-end">
+                  <button
+                    type="submit"
+                    className="inline-flex w-full items-center justify-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 sm:w-auto dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Add to Register
+                  </button>
+                </div>
+              </div>
+            </form>
+          )}
+
+          {/* Teacher Lesson Attendance Register Table */}
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
+                  <tr>
+                    <th className="px-4 py-3">Period &amp; Time</th>
+                    <th className="px-4 py-3">Class &amp; Subject</th>
+                    <th className="px-4 py-3">Scheduled Teacher</th>
+                    <th className="px-4 py-3">Delivery Status</th>
+                    <th className="px-4 py-3">Mandate / Recovery &amp; Topic Details</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {visibleLessonDraftRows.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400"
+                      >
+                        {selectedLessonDayOfWeek
+                          ? `No timetable lessons match the current filter for ${selectedLessonDayOfWeek} (${date}). Use "Log Make-Up / Ad-Hoc Lesson" above to record an unscheduled or recovered lesson.`
+                          : `${date} falls on a weekend. Use "Log Make-Up / Ad-Hoc Lesson" above to record a Saturday/make-up or recovered lesson.`}
+                      </td>
+                    </tr>
+                  ) : (
+                    visibleLessonDraftRows.map((row) => {
+                      const scheduledTeacher = tenant.teachers.find(
+                        (t) => t.id === row.scheduledTeacherId
+                      );
+                      const coveringCandidates = tenant.teachers.filter(
+                        (t) => t.id !== row.scheduledTeacherId
+                      );
+                      return (
+                        <tr
+                          key={row.rowKey}
+                          className="align-top hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
+                        >
+                          <td className="px-4 py-3 whitespace-nowrap font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
+                            <div className="font-semibold text-slate-900 dark:text-slate-100">
+                              {row.periodNumber ? `Period ${row.periodNumber}` : 'Ad-Hoc'}
+                            </div>
+                            {row.timeSlot && (
+                              <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                {row.timeSlot}
+                              </div>
+                            )}
+                            {row.isAdHoc && (
+                              <div className="mt-0.5 text-[11px] font-sans font-medium text-amber-700 dark:text-amber-400">
+                                Make-Up / Ad-Hoc
+                              </div>
+                            )}
+                          </td>
+
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="font-semibold text-slate-900 dark:text-slate-100">
+                              {row.subject}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                              {row.grade} · Stream {row.section}
+                            </div>
+                          </td>
+
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="font-medium text-slate-900 dark:text-slate-100">
+                              {scheduledTeacher?.name || 'Assigned Teacher'}
+                            </div>
+                            <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                              {scheduledTeacher?.department || 'Faculty'}
+                            </div>
+                          </td>
+
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <select
+                              aria-label={`Lesson delivery status for ${row.grade} ${row.section} ${row.subject}`}
+                              disabled={isDateTermClosed}
+                              value={row.status}
+                              onChange={(e) =>
+                                updateLessonDraft(row.rowKey, {
+                                  status: e.target.value as TeacherLessonAttendanceStatus,
+                                })
+                              }
+                              className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold focus:outline-none ${
+                                row.status === 'Attended'
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                  : row.status === 'Delegated'
+                                  ? 'border-blue-300 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300'
+                                  : row.status === 'Recovered'
+                                  ? 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300'
+                                  : 'border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300'
+                              }`}
+                            >
+                              {LESSON_STATUS_OPTIONS.map((st) => (
+                                <option key={st} value={st}>
+                                  {st}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+
+                          <td className="px-4 py-3 min-w-[320px] space-y-2">
+                            {row.status === 'Delegated' && (
+                              <div className="grid grid-cols-1 gap-2 rounded-lg border border-blue-200 bg-blue-50/50 p-2.5 sm:grid-cols-2 dark:border-blue-900/60 dark:bg-blue-950/20">
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-blue-950 dark:text-blue-200">
+                                    Mandate Given To *
+                                  </label>
+                                  <select
+                                    aria-label={`Mandate teacher for ${row.subject} ${row.grade}`}
+                                    disabled={isDateTermClosed}
+                                    value={row.delegatedTeacherId}
+                                    onChange={(e) =>
+                                      updateLessonDraft(row.rowKey, {
+                                        delegatedTeacherId: e.target.value,
+                                      })
+                                    }
+                                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                  >
+                                    <option value="">Select covering teacher...</option>
+                                    {coveringCandidates.map((t) => (
+                                      <option key={t.id} value={t.id}>
+                                        {t.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                                    Delegation Notes
+                                  </label>
+                                  <input
+                                    type="text"
+                                    disabled={isDateTermClosed}
+                                    value={row.delegationNotes}
+                                    onChange={(e) =>
+                                      updateLessonDraft(row.rowKey, {
+                                        delegationNotes: e.target.value,
+                                      })
+                                    }
+                                    placeholder="Handover instructions / task left..."
+                                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {row.status === 'Recovered' && (
+                              <div className="grid grid-cols-1 gap-2 rounded-lg border border-amber-200 bg-amber-50/50 p-2.5 sm:grid-cols-3 dark:border-amber-900/60 dark:bg-amber-950/20">
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-amber-950 dark:text-amber-200">
+                                    Original Missed Date *
+                                  </label>
+                                  <input
+                                    type="date"
+                                    aria-label={`Original missed date for ${row.subject}`}
+                                    disabled={isDateTermClosed}
+                                    value={row.originalMissedDate}
+                                    onChange={(e) =>
+                                      updateLessonDraft(row.rowKey, {
+                                        originalMissedDate: e.target.value,
+                                      })
+                                    }
+                                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-amber-950 dark:text-amber-200">
+                                    Recovered Date *
+                                  </label>
+                                  <input
+                                    type="date"
+                                    aria-label={`Recovery date for ${row.subject}`}
+                                    disabled={isDateTermClosed}
+                                    value={row.recoveredDate || date}
+                                    onChange={(e) =>
+                                      updateLessonDraft(row.rowKey, {
+                                        recoveredDate: e.target.value,
+                                      })
+                                    }
+                                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                                    Recovered By
+                                  </label>
+                                  <select
+                                    disabled={isDateTermClosed}
+                                    value={row.recoveredByTeacherId || row.scheduledTeacherId}
+                                    onChange={(e) =>
+                                      updateLessonDraft(row.rowKey, {
+                                        recoveredByTeacherId: e.target.value,
+                                      })
+                                    }
+                                    className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                  >
+                                    {tenant.teachers.map((t) => (
+                                      <option key={t.id} value={t.id}>
+                                        {t.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              <input
+                                type="text"
+                                disabled={isDateTermClosed}
+                                value={row.topicCovered}
+                                onChange={(e) =>
+                                  updateLessonDraft(row.rowKey, { topicCovered: e.target.value })
+                                }
+                                placeholder="Topic / sub-strand covered..."
+                                className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              />
+                              <input
+                                type="text"
+                                disabled={isDateTermClosed}
+                                value={row.remarks}
+                                onChange={(e) =>
+                                  updateLessonDraft(row.rowKey, { remarks: e.target.value })
+                                }
+                                placeholder={
+                                  row.status === 'Missed'
+                                    ? 'Reason missed & planned recovery slot...'
+                                    : 'Optional delivery note...'
+                                }
+                                className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
       ) : activeTab === 'rollcall' && isAdmin && rollCallTarget === 'teaching' ? (
         <>
           {/* Teaching Staff Roll Call Controls Bar (Admin Only) */}
@@ -2298,6 +3406,244 @@ export function AttendanceModule({
             </div>
           </div>
         </>
+      ) : canUseTeacherLessonAttendance && rollCallTarget === 'teacher-lesson' ? (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Logged Lessons
+              </p>
+              <p className="mt-2 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-slate-100">
+                {teacherLessonSummary.reduce((sum, r) => sum + r.total, 0)}
+              </p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Across {teacherLessonSummary.length} teaching staff profile(s)
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Direct Attendance
+              </p>
+              <p className="mt-2 font-mono text-2xl font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
+                {teacherLessonSummary.reduce((sum, r) => sum + r.attended, 0)}
+              </p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Delivered by scheduled teacher
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Delegated (Mandate)
+              </p>
+              <p className="mt-2 font-mono text-2xl font-bold text-blue-700 tabular-nums dark:text-blue-400">
+                {teacherLessonSummary.reduce((sum, r) => sum + r.delegated, 0)}
+              </p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Covered via signed teacher mandate
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Recovered / Missed
+              </p>
+              <p className="mt-2 font-mono text-2xl font-bold text-amber-700 tabular-nums dark:text-amber-400">
+                {teacherLessonSummary.reduce((sum, r) => sum + r.recovered, 0)}
+                <span className="ml-2 text-sm font-semibold text-red-700 dark:text-red-400">
+                  / {teacherLessonSummary.reduce((sum, r) => sum + r.missed, 0)} missed
+                </span>
+              </p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Make-up sessions logged vs unrecovered
+              </p>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+            <div className="border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                Teacher Lesson Delivery Compliance
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                Tracks scheduled lessons delivered directly, delegated to a covering teacher, recovered on a make-up date, or missed.
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
+                  <tr>
+                    <th className="px-4 py-3">Teacher</th>
+                    <th className="px-4 py-3">Department</th>
+                    <th className="px-4 py-3 text-right">Logged</th>
+                    <th className="px-4 py-3 text-right">Attended</th>
+                    <th className="px-4 py-3 text-right">Delegated Out</th>
+                    <th className="px-4 py-3 text-right">Mandates Covered</th>
+                    <th className="px-4 py-3 text-right">Recovered</th>
+                    <th className="px-4 py-3 text-right">Missed</th>
+                    <th className="px-4 py-3 text-right">Delivery Rate</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {teacherLessonSummary.map((row) => (
+                    <tr
+                      key={row.member.id}
+                      className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
+                    >
+                      <td className="px-4 py-2.5 font-medium text-slate-900 dark:text-slate-100">
+                        {row.member.name}
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-400">
+                        {row.member.department}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
+                        {row.total}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-emerald-700 tabular-nums dark:text-emerald-400">
+                        {row.attended}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-blue-700 tabular-nums dark:text-blue-400">
+                        {row.delegated}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
+                        {row.mandatesReceived}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-amber-700 tabular-nums dark:text-amber-400">
+                        {row.recovered}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-red-700 tabular-nums dark:text-red-400">
+                        {row.missed}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs font-semibold tabular-nums">
+                        <span
+                          className={
+                            row.deliveryRate < 85
+                              ? 'text-red-700 dark:text-red-400'
+                              : row.deliveryRate < 94
+                              ? 'text-amber-700 dark:text-amber-400'
+                              : 'text-emerald-700 dark:text-emerald-400'
+                          }
+                        >
+                          {row.deliveryRate}%
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+            <div className="border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                Delegation Mandate &amp; Lesson Recovery Audit Log
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                {lessonAuditLogs.length} delegated, recovered, or missed lesson record(s)
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
+                  <tr>
+                    <th className="px-4 py-3">Date &amp; Period</th>
+                    <th className="px-4 py-3">Class &amp; Subject</th>
+                    <th className="px-4 py-3">Scheduled Teacher</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Mandate / Recovery Record</th>
+                    <th className="px-4 py-3">Topic &amp; Remarks</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {lessonAuditLogs.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={6}
+                        className="px-4 py-10 text-center text-xs text-slate-500 dark:text-slate-400"
+                      >
+                        No delegated, recovered, or missed lessons recorded yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    lessonAuditLogs.map((rec: TeacherLessonAttendanceRecord) => (
+                      <tr
+                        key={rec.id}
+                        className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
+                      >
+                        <td className="px-4 py-2.5 whitespace-nowrap font-mono text-xs text-slate-700 tabular-nums dark:text-slate-300">
+                          <div>{rec.date}</div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {rec.periodNumber ? `Period ${rec.periodNumber}` : 'Ad-Hoc'}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 whitespace-nowrap">
+                          <div className="font-medium text-slate-900 dark:text-slate-100">
+                            {rec.subject}
+                          </div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400">
+                            {rec.grade} · Stream {rec.section}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 text-xs font-medium text-slate-800 dark:text-slate-200">
+                          {rec.scheduledTeacherName}
+                        </td>
+                        <td className="px-4 py-2.5 whitespace-nowrap text-xs font-semibold">
+                          <span
+                            className={
+                              rec.status === 'Delegated'
+                                ? 'text-blue-700 dark:text-blue-400'
+                                : rec.status === 'Recovered'
+                                ? 'text-amber-700 dark:text-amber-400'
+                                : 'text-red-700 dark:text-red-400'
+                            }
+                          >
+                            {rec.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-xs text-slate-700 dark:text-slate-300">
+                          {rec.status === 'Delegated' ? (
+                            <div>
+                              <span className="font-semibold text-blue-800 dark:text-blue-300">
+                                Mandate → {rec.delegatedTeacherName}
+                              </span>
+                              {rec.delegationNotes && (
+                                <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                  {rec.delegationNotes}
+                                </div>
+                              )}
+                            </div>
+                          ) : rec.status === 'Recovered' ? (
+                            <div>
+                              <span className="font-mono text-[11px] tabular-nums">
+                                Missed {rec.originalMissedDate} → Recovered {rec.recoveredDate || rec.date}
+                              </span>
+                              {rec.recoveredByTeacherName && (
+                                <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                  Recovered by: {rec.recoveredByTeacherName}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-red-700 dark:text-red-400">
+                              Awaiting recovery slot
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 text-xs text-slate-600 dark:text-slate-400">
+                          <div>{rec.topicCovered || '—'}</div>
+                          {rec.remarks && (
+                            <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                              {rec.remarks}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       ) : isAdmin && rollCallTarget === 'teaching' ? (
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="overflow-x-auto">

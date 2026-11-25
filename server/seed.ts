@@ -29,6 +29,8 @@ import {
   type FinanceAuditEntry,
   type IndependentVotelineItem,
   type LeaveOutChit,
+  type LearnerProgressiveEntry,
+  type LessonNote,
   type LessonPlan,
   type LifecycleAuditEntry,
   type MpesaTransactionLog,
@@ -37,10 +39,12 @@ import {
   type PayrollEntry,
   type PayrollStatutoryRateSchedule,
   type ReconciliationLine,
+  type RecordOfWork,
   type SchemeOfWork,
   type SchoolExpense,
   type StaffAttendanceRecord,
   type Student,
+  type TeacherLessonAttendanceRecord,
   type Tenant,
   type TenantUser,
   type TimetableSlot,
@@ -51,7 +55,11 @@ import {
   hashPassword,
   resolveDeveloperBootstrapPassword,
 } from './middleware/adminAuth.ts';
-import { buildDefaultAcademicsForTenant } from './seedAcademics.ts';
+import {
+  buildDefaultAcademicsForTenant,
+  buildDefaultProgressiveReportsForTenant,
+  buildDefaultTeacherLessonAttendanceForTenant,
+} from './seedAcademics.ts';
 import {
   buildStRaphaelSeedData,
   ST_RAPHAEL_TENANT_ID,
@@ -260,9 +268,11 @@ export interface DatabaseState {
   timetable: TimetableSlot[];
   attendance: AttendanceRecord[];
   staffAttendance: StaffAttendanceRecord[];
+  teacherLessonAttendance?: TeacherLessonAttendanceRecord[];
   leaveOutChits: LeaveOutChit[];
   examCycles: ExamCycle[];
   examResults: ExamResult[];
+  progressiveReports?: LearnerProgressiveEntry[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
   creditNotes?: CreditNoteRecord[];
@@ -288,6 +298,8 @@ export interface DatabaseState {
   notifications: NotificationItem[];
   schemesOfWork?: SchemeOfWork[];
   lessonPlans?: LessonPlan[];
+  recordsOfWork?: RecordOfWork[];
+  lessonNotes?: LessonNote[];
   adminAuditLogs: AdminAuditEntry[];
   lifecycleAuditLogs?: LifecycleAuditEntry[];
 }
@@ -828,9 +840,11 @@ export function createEmptyDatabase(): DatabaseState {
     timetable: [],
     attendance: [],
     staffAttendance: [],
+    teacherLessonAttendance: [],
     leaveOutChits: [],
     examCycles: [],
     examResults: [],
+    progressiveReports: [],
     feeStructures: [],
     invoices: [],
     creditNotes: [],
@@ -859,6 +873,8 @@ export function createEmptyDatabase(): DatabaseState {
     notifications: [],
     schemesOfWork: [],
     lessonPlans: [],
+    recordsOfWork: [],
+    lessonNotes: [],
     adminAuditLogs: [],
     lifecycleAuditLogs: [],
   };
@@ -2671,11 +2687,19 @@ export async function createSeedDatabase(options?: {
 
   const schemesOfWork: SchemeOfWork[] = [];
   const lessonPlans: LessonPlan[] = [];
+  const recordsOfWork: RecordOfWork[] = [];
+  const lessonNotes: LessonNote[] = [];
+  const teacherLessonAttendance: TeacherLessonAttendanceRecord[] = [];
+  const progressiveReports: LearnerProgressiveEntry[] = [];
   for (const t of tenants) {
     const built = buildDefaultAcademicsForTenant(t, { timetable });
     t.academicSubmissionConfig = built.config;
     schemesOfWork.push(...built.schemesOfWork);
     lessonPlans.push(...built.lessonPlans);
+    recordsOfWork.push(...built.recordsOfWork);
+    lessonNotes.push(...built.lessonNotes);
+    teacherLessonAttendance.push(...buildDefaultTeacherLessonAttendanceForTenant(t, timetable));
+    progressiveReports.push(...buildDefaultProgressiveReportsForTenant(t, students));
   }
 
   const includeLargeTenants =
@@ -2702,9 +2726,11 @@ export async function createSeedDatabase(options?: {
     students.push(...stRaphael.students);
     timetable.push(...stRaphael.timetable);
     attendance.push(...stRaphael.attendance);
+    teacherLessonAttendance.push(...stRaphael.teacherLessonAttendance);
     leaveOutChits.push(...stRaphael.leaveOutChits);
     examCycles.push(...stRaphael.examCycles);
     examResults.push(...stRaphael.examResults);
+    progressiveReports.push(...stRaphael.progressiveReports);
     feeStructures.push(...stRaphael.feeStructures);
     invoices.push(...stRaphael.invoices);
     feeWaivers.push(...stRaphael.feeWaivers);
@@ -2720,6 +2746,8 @@ export async function createSeedDatabase(options?: {
     notifications.push(...stRaphael.notifications);
     schemesOfWork.push(...stRaphael.schemesOfWork);
     lessonPlans.push(...stRaphael.lessonPlans);
+    recordsOfWork.push(...stRaphael.recordsOfWork);
+    lessonNotes.push(...stRaphael.lessonNotes);
     receiptCounters[ST_RAPHAEL_TENANT_ID] = stRaphael.counters.receipt;
     studentCounters[ST_RAPHAEL_TENANT_ID] = stRaphael.counters.student;
     invoiceCounters[ST_RAPHAEL_TENANT_ID] = stRaphael.counters.invoice;
@@ -2741,9 +2769,11 @@ export async function createSeedDatabase(options?: {
       timetable,
       attendance,
       staffAttendance: [],
+      teacherLessonAttendance,
       leaveOutChits,
       examCycles,
       examResults,
+      progressiveReports,
       feeStructures,
       invoices,
       creditNotes: [],
@@ -2772,6 +2802,8 @@ export async function createSeedDatabase(options?: {
       notifications,
       schemesOfWork,
       lessonPlans,
+      recordsOfWork,
+      lessonNotes,
       adminAuditLogs: [],
       lifecycleAuditLogs: [],
     },

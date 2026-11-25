@@ -17,6 +17,7 @@ import type {
   BellScheduleRow,
   BudgetAllocation,
   CbcClusterId,
+  CbcLearnerMasteryLevel,
   CreditNoteRecord,
   CurrencyCode,
   CustomRoleDefinition,
@@ -40,6 +41,9 @@ import type {
   ImpersonatorMeta,
   IndependentVotelineItem,
   LeaveOutChit,
+  LearnerProgressiveEntry,
+  LessonNote,
+  LessonNoteSubmissionStatus,
   LessonPlan,
   LifecycleAuditEntry,
   MpesaEnvironment,
@@ -60,6 +64,8 @@ import type {
   ReconciliationChannel,
   ReconciliationLine,
   ReconciliationStatus,
+  RecordOfWork,
+  RecordOfWorkCoverageStatus,
   SchemeOfWork,
   SchemeOfWorkWeek,
   SchoolExpense,
@@ -72,6 +78,8 @@ import type {
   SubscriptionCycle,
   SuperAdminTenantSummary,
   TeacherClassAssignment,
+  TeacherLessonAttendanceRecord,
+  TeacherLessonAttendanceStatus,
   TeacherProfile,
   Tenant,
   TenantBranding,
@@ -1211,6 +1219,41 @@ export const saasApi = {
     });
   },
 
+  saveTeacherLessonAttendanceBatch(
+    tenantId: string,
+    payload: {
+      date: string;
+      entries: Array<{
+        id?: string;
+        timetableSlotId?: string;
+        periodNumber?: number;
+        timeSlot?: string;
+        grade: string;
+        section: string;
+        subject: string;
+        scheduledTeacherId: string;
+        status: TeacherLessonAttendanceStatus;
+        delegatedTeacherId?: string;
+        delegationNotes?: string;
+        originalMissedDate?: string;
+        recoveredDate?: string;
+        recoveredPeriod?: number;
+        recoveredByTeacherId?: string;
+        topicCovered?: string;
+        remarks?: string;
+      }>;
+    }
+  ) {
+    return apiRequest<{ records: TeacherLessonAttendanceRecord[] }>(
+      '/api/attendance/teacher-lessons',
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
   createLeaveOutChit(
     tenantId: string,
     payload: {
@@ -1304,6 +1347,79 @@ export const saasApi = {
       tenantId,
       body: JSON.stringify({ reason }),
     });
+  },
+
+  saveProgressiveReport(
+    tenantId: string,
+    payload: {
+      id?: string;
+      studentId: string;
+      academicYear?: string;
+      term?: string;
+      assessmentLabel: string;
+      assessmentDate: string;
+      sequenceOrder?: number;
+      subjects: Array<{
+        subject: string;
+        score?: number | null;
+        resultStatus?: ExamResultStatus;
+        masteryLevel?: CbcLearnerMasteryLevel;
+        remarks?: string;
+      }>;
+      classTeacherRemarks?: string;
+      source?: 'manual' | 'import';
+      mergeSubjects?: boolean;
+    }
+  ) {
+    return apiRequest<{ entry: LearnerProgressiveEntry }>('/api/exams/progressive-reports', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  importProgressiveReports(
+    tenantId: string,
+    payload: {
+      academicYear?: string;
+      term?: string;
+      assessmentLabel: string;
+      assessmentDate: string;
+      rows: Array<{
+        studentCode?: string;
+        studentId?: string;
+        studentName?: string;
+        subjects: Array<{
+          subject: string;
+          score?: number | null;
+          resultStatus?: ExamResultStatus;
+          masteryLevel?: CbcLearnerMasteryLevel;
+          remarks?: string;
+        }>;
+        classTeacherRemarks?: string;
+      }>;
+    }
+  ) {
+    return apiRequest<{
+      savedCount: number;
+      skippedRows: number;
+      errors: Array<{ rowIndex: number; identifier: string; reason: string }>;
+      entries: LearnerProgressiveEntry[];
+    }>('/api/exams/progressive-reports/import', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteProgressiveReport(tenantId: string, entryId: string) {
+    return apiRequest<{ deleted: boolean }>(
+      `/api/exams/progressive-reports/${encodeURIComponent(entryId)}`,
+      {
+        method: 'DELETE',
+        tenantId,
+      }
+    );
   },
 
   upsertFeeStructure(
@@ -2319,6 +2435,171 @@ export const saasApi = {
   deleteLessonPlan(tenantId: string, lessonPlanId: string) {
     return apiRequest<{ deleted: boolean }>(
       `/api/academics/lesson-plans/${encodeURIComponent(lessonPlanId)}`,
+      { method: 'DELETE', tenantId }
+    );
+  },
+
+  saveRecordOfWork(
+    tenantId: string,
+    payload: {
+      id?: string;
+      schemeOfWorkId?: string;
+      lessonPlanId?: string;
+      academicYear?: string;
+      term?: string;
+      weekNumber: number;
+      dateCovered: string;
+      grade?: string;
+      section?: string;
+      subject?: string;
+      teacherId?: string;
+      strand?: string;
+      subStrand?: string;
+      workCovered: string;
+      lessonsTaughtCount?: number;
+      lessonsPlannedCount?: number;
+      learnerMastery?: CbcLearnerMasteryLevel;
+      coverageStatus?: RecordOfWorkCoverageStatus;
+      challengesAndRemediation?: string;
+      remarks?: string;
+      parentSummary?: string;
+      parentVisible?: boolean;
+      submitNow?: boolean;
+      status?: AcademicDocumentStatus;
+    }
+  ) {
+    const method = payload.id ? 'PUT' : 'POST';
+    const path = payload.id
+      ? `/api/academics/records-of-work/${encodeURIComponent(payload.id)}`
+      : '/api/academics/records-of-work';
+    return apiRequest<{ recordOfWork: RecordOfWork }>(path, {
+      method,
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  submitRecordOfWork(tenantId: string, recordId: string) {
+    return apiRequest<{ recordOfWork: RecordOfWork }>(
+      `/api/academics/records-of-work/${encodeURIComponent(recordId)}/submit`,
+      { method: 'POST', tenantId }
+    );
+  },
+
+  reviewRecordOfWork(
+    tenantId: string,
+    recordId: string,
+    payload: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    }
+  ) {
+    return apiRequest<{ recordOfWork: RecordOfWork }>(
+      `/api/academics/records-of-work/${encodeURIComponent(recordId)}/review`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  setRecordOfWorkParentVisibility(
+    tenantId: string,
+    recordId: string,
+    parentVisible: boolean
+  ) {
+    return apiRequest<{ recordOfWork: RecordOfWork }>(
+      `/api/academics/records-of-work/${encodeURIComponent(recordId)}/parent-visibility`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify({ parentVisible }),
+      }
+    );
+  },
+
+  deleteRecordOfWork(tenantId: string, recordId: string) {
+    return apiRequest<{ deleted: boolean }>(
+      `/api/academics/records-of-work/${encodeURIComponent(recordId)}`,
+      { method: 'DELETE', tenantId }
+    );
+  },
+
+  saveLessonNote(
+    tenantId: string,
+    payload: {
+      id?: string;
+      schemeOfWorkId?: string;
+      lessonPlanId?: string;
+      academicYear?: string;
+      term?: string;
+      weekNumber: number;
+      lessonDate: string;
+      grade?: string;
+      section?: string;
+      subject?: string;
+      teacherId?: string;
+      submissionStatus: LessonNoteSubmissionStatus;
+      remarks?: string;
+    }
+  ) {
+    const method = payload.id ? 'PUT' : 'POST';
+    const path = payload.id
+      ? `/api/academics/lesson-notes/${encodeURIComponent(payload.id)}`
+      : '/api/academics/lesson-notes';
+    return apiRequest<{ lessonNote: LessonNote }>(path, {
+      method,
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  submitLessonNote(tenantId: string, noteId: string) {
+    return apiRequest<{ lessonNote: LessonNote }>(
+      `/api/academics/lesson-notes/${encodeURIComponent(noteId)}/submit`,
+      { method: 'POST', tenantId }
+    );
+  },
+
+  reviewLessonNote(
+    tenantId: string,
+    noteId: string,
+    payload: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    }
+  ) {
+    return apiRequest<{ lessonNote: LessonNote }>(
+      `/api/academics/lesson-notes/${encodeURIComponent(noteId)}/review`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  setLessonNoteParentVisibility(
+    tenantId: string,
+    noteId: string,
+    parentVisible: boolean
+  ) {
+    return apiRequest<{ lessonNote: LessonNote }>(
+      `/api/academics/lesson-notes/${encodeURIComponent(noteId)}/parent-visibility`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify({ parentVisible }),
+      }
+    );
+  },
+
+  deleteLessonNote(tenantId: string, noteId: string) {
+    return apiRequest<{ deleted: boolean }>(
+      `/api/academics/lesson-notes/${encodeURIComponent(noteId)}`,
       { method: 'DELETE', tenantId }
     );
   },

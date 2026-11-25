@@ -1130,6 +1130,8 @@ export default function App() {
                   <ExamsModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    currentUserId={authSession.user.id}
+                    currentUserEmail={authSession.user.email}
                     readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}

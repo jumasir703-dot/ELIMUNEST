@@ -402,5 +402,403 @@ describe('Teacher Academics: Schemes of Work, Lesson Plans, Submission Tracking 
       expect(lp.parentVisible).toBe(true);
       expect(lp.teacherReflection).toBeUndefined();
     }
+    expect(Array.isArray(stRaphWs.body.recordsOfWork)).toBe(true);
+    expect(stRaphWs.body.recordsOfWork.length).toBeGreaterThan(0);
+    for (const row of stRaphWs.body.recordsOfWork) {
+      expect(row.status).toBe('Approved');
+      expect(row.parentVisible).toBe(true);
+      expect(row.challengesAndRemediation).toBeUndefined();
+      expect(row.reviewFeedback).toBeUndefined();
+      expect(row.reviewedByUserId).toBeUndefined();
+      expect(row.createdByUserId).toBeUndefined();
+    }
+  });
+
+  it('manages Record of Work RBAC, cohort ownership, Admin sign-off, parent field stripping, and re-approval resets', async () => {
+    // Bursar, Registrar (read-only), and Parent receive 403 when attempting to create a Record of Work
+    for (const token of [oakBursarToken, oakRegistrarToken, oakParentToken]) {
+      const res = await request(app)
+        .post('/api/academics/records-of-work')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          grade: 'Grade 9',
+          section: 'A',
+          subject: 'Mathematics',
+          weekNumber: 8,
+          dateCovered: '2026-11-20',
+          strand: 'Algebra',
+          subStrand: 'Quadratic Expressions',
+          workCovered: 'Covered expansion and factorisation of quadratics.',
+          lessonsTaughtCount: 4,
+          lessonsPlannedCount: 4,
+          learnerMastery: 'Meeting Expectations',
+          coverageStatus: 'Completed',
+        });
+      expect(res.status).toBe(403);
+    }
+
+    // Teacher (Mr. Kamau) cannot log a Record of Work for an unassigned subject
+    const unassignedRowRes = await request(app)
+      .post('/api/academics/records-of-work')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Integrated Science',
+        weekNumber: 8,
+        dateCovered: '2026-11-20',
+        strand: 'Living Things',
+        subStrand: 'Nutrition',
+        workCovered: 'Attempted unauthorized subject log.',
+      });
+    expect(unassignedRowRes.status).toBe(403);
+
+    // Teacher logs a Record of Work for their assigned cohort (Grade 9 A Mathematics) with parentVisible: true & submitNow: true
+    const createRowRes = await request(app)
+      .post('/api/academics/records-of-work')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        dateCovered: '2026-11-20',
+        strand: 'Algebra',
+        subStrand: 'Simultaneous Linear Equations',
+        workCovered: 'Completed graphical and elimination methods with worked examples.',
+        lessonsTaughtCount: 4,
+        lessonsPlannedCount: 5,
+        learnerMastery: 'Meeting Expectations',
+        coverageStatus: 'Partially Covered',
+        challengesAndRemediation: 'INTERNAL REMEDIATION: 4 learners scheduled for Tuesday clinic.',
+        remarks: 'Substitution method carried forward to Week 9.',
+        parentSummary: 'Class covered solving simultaneous equations via graphs and elimination.',
+        parentVisible: true,
+        submitNow: true,
+      });
+    expect(createRowRes.status).toBe(201);
+    const rowId = createRowRes.body.recordOfWork.id as string;
+    expect(createRowRes.body.recordOfWork.status).toBe('Submitted');
+    // Server must block parentVisible until Admin approves
+    expect(createRowRes.body.recordOfWork.parentVisible).toBe(false);
+
+    // Peer teacher cannot edit, toggle visibility, or delete another teacher's Record of Work
+    const peerEditRes = await request(app)
+      .put(`/api/academics/records-of-work/${rowId}`)
+      .set('Authorization', `Bearer ${oakPeerTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        dateCovered: '2026-11-20',
+        strand: 'Algebra',
+        subStrand: 'Simultaneous Linear Equations',
+        workCovered: 'Peer tampered work covered.',
+      });
+    expect(peerEditRes.status).toBe(403);
+
+    const peerDeleteRes = await request(app)
+      .delete(`/api/academics/records-of-work/${rowId}`)
+      .set('Authorization', `Bearer ${oakPeerTeacherToken}`);
+    expect(peerDeleteRes.status).toBe(403);
+
+    // Teacher cannot self-approve via review endpoint
+    const selfApproveRes = await request(app)
+      .post(`/api/academics/records-of-work/${rowId}/review`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({ decision: 'Approved', parentVisible: true });
+    expect(selfApproveRes.status).toBe(403);
+
+    // Unapproved Record of Work must NOT appear in Parent workspace
+    const parentWsPending = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakParentToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(parentWsPending.status).toBe(200);
+    expect(parentWsPending.body.recordsOfWork.some((r: any) => r.id === rowId)).toBe(false);
+
+    // Admin requests revision -> teacher submits again -> Admin approves with parentVisible: false
+    const revRes = await request(app)
+      .post(`/api/academics/records-of-work/${rowId}/review`)
+      .set('Authorization', `Bearer ${oakAdminToken}`)
+      .send({
+        decision: 'Revision Requested',
+        reviewFeedback: 'Clarify which exercise numbers were assigned.',
+      });
+    expect(revRes.status).toBe(200);
+    expect(revRes.body.recordOfWork.status).toBe('Revision Requested');
+
+    const resubmitRes = await request(app)
+      .post(`/api/academics/records-of-work/${rowId}/submit`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`);
+    expect(resubmitRes.status).toBe(200);
+    expect(resubmitRes.body.recordOfWork.status).toBe('Submitted');
+
+    const approveHiddenRes = await request(app)
+      .post(`/api/academics/records-of-work/${rowId}/review`)
+      .set('Authorization', `Bearer ${oakAdminToken}`)
+      .send({
+        decision: 'Approved',
+        reviewFeedback: 'Signed off by Dean of Studies.',
+        parentVisible: false,
+      });
+    expect(approveHiddenRes.status).toBe(200);
+    expect(approveHiddenRes.body.recordOfWork.status).toBe('Approved');
+    expect(approveHiddenRes.body.recordOfWork.parentVisible).toBe(false);
+
+    const parentWsStillHidden = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakParentToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(parentWsStillHidden.body.recordsOfWork.some((r: any) => r.id === rowId)).toBe(false);
+
+    // Teacher cannot delete an Approved Record of Work (409)
+    const teacherDeleteApproved = await request(app)
+      .delete(`/api/academics/records-of-work/${rowId}`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`);
+    expect(teacherDeleteApproved.status).toBe(409);
+
+    // Teacher publishes Approved Record of Work to Parent Portal
+    const publishRes = await request(app)
+      .patch(`/api/academics/records-of-work/${rowId}/parent-visibility`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({ parentVisible: true });
+    expect(publishRes.status).toBe(200);
+    expect(publishRes.body.recordOfWork.parentVisible).toBe(true);
+
+    // Parent now sees the Record of Work with internal remediation & review metadata stripped
+    const parentWsVisible = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakParentToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(parentWsVisible.status).toBe(200);
+    const visibleRow = parentWsVisible.body.recordsOfWork.find((r: any) => r.id === rowId);
+    expect(visibleRow).toBeDefined();
+    expect(visibleRow.parentSummary).toBe(
+      'Class covered solving simultaneous equations via graphs and elimination.'
+    );
+    expect(visibleRow.challengesAndRemediation).toBeUndefined();
+    expect(visibleRow.reviewFeedback).toBeUndefined();
+    expect(visibleRow.reviewedByUserId).toBeUndefined();
+    expect(visibleRow.createdByUserId).toBeUndefined();
+
+    // Teacher editing an Approved Record of Work resets it to Draft & hides it from parents
+    const editApprovedRes = await request(app)
+      .put(`/api/academics/records-of-work/${rowId}`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        dateCovered: '2026-11-21',
+        strand: 'Algebra',
+        subStrand: 'Simultaneous Linear Equations',
+        workCovered: 'Updated after remedial completion.',
+        lessonsTaughtCount: 5,
+        lessonsPlannedCount: 5,
+        learnerMastery: 'Meeting Expectations',
+        coverageStatus: 'Completed',
+        parentVisible: true,
+      });
+    expect(editApprovedRes.status).toBe(200);
+    expect(editApprovedRes.body.recordOfWork.status).toBe('Draft');
+    expect(editApprovedRes.body.recordOfWork.parentVisible).toBe(false);
+
+    const parentWsAfterEdit = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakParentToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(parentWsAfterEdit.body.recordsOfWork.some((r: any) => r.id === rowId)).toBe(false);
+  });
+
+  it('manages Lesson Notes two-state submission (Submitted / Not Submitted) with short remarks, RBAC, isolation, and St. Raphael seeds', async () => {
+    // Bursar, Registrar (read-only), and Parent receive 403 when attempting to create Lesson Notes
+    for (const token of [oakBursarToken, oakRegistrarToken, oakParentToken]) {
+      const res = await request(app)
+        .post('/api/academics/lesson-notes')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          grade: 'Grade 9',
+          section: 'A',
+          subject: 'Mathematics',
+          weekNumber: 8,
+          lessonDate: '2026-11-24',
+          submissionStatus: 'Submitted',
+          remarks: 'Checked and filed.',
+        });
+      expect(res.status).toBe(403);
+    }
+
+    // Teacher (Mr. Kamau) cannot log Lesson Notes for an unassigned subject
+    const unassignedNoteRes = await request(app)
+      .post('/api/academics/lesson-notes')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Integrated Science',
+        weekNumber: 8,
+        lessonDate: '2026-11-24',
+        submissionStatus: 'Submitted',
+        remarks: 'Checked.',
+      });
+    expect(unassignedNoteRes.status).toBe(403);
+
+    // Rejects invalid submissionStatus (only Submitted or Not Submitted allowed)
+    const invalidStatusRes = await request(app)
+      .post('/api/academics/lesson-notes')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        lessonDate: '2026-11-24',
+        submissionStatus: 'Approved',
+        remarks: 'Invalid status test.',
+      });
+    expect(invalidStatusRes.status).toBe(400);
+
+    // Teacher logs Lesson Notes as Not Submitted with short remarks
+    const createNoteRes = await request(app)
+      .post('/api/academics/lesson-notes')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        lessonDate: '2026-11-24',
+        submissionStatus: 'Not Submitted',
+        remarks: 'Pending worked examples sheet.',
+      });
+    expect(createNoteRes.status).toBe(201);
+    const noteId = createNoteRes.body.lessonNote.id as string;
+    expect(createNoteRes.body.lessonNote.submissionStatus).toBe('Not Submitted');
+    expect(createNoteRes.body.lessonNote.status).toBe('Draft');
+    expect(createNoteRes.body.lessonNote.remarks).toBe('Pending worked examples sheet.');
+    expect(createNoteRes.body.lessonNote.parentVisible).toBe(false);
+
+    // Peer teacher cannot edit or delete another teacher's Lesson Notes
+    const peerEditRes = await request(app)
+      .put(`/api/academics/lesson-notes/${noteId}`)
+      .set('Authorization', `Bearer ${oakPeerTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        lessonDate: '2026-11-24',
+        submissionStatus: 'Submitted',
+        remarks: 'Tampered remark',
+      });
+    expect(peerEditRes.status).toBe(403);
+
+    const peerDeleteRes = await request(app)
+      .delete(`/api/academics/lesson-notes/${noteId}`)
+      .set('Authorization', `Bearer ${oakPeerTeacherToken}`);
+    expect(peerDeleteRes.status).toBe(403);
+
+    // Teacher updates status to Submitted with updated short remarks
+    const updateRes = await request(app)
+      .put(`/api/academics/lesson-notes/${noteId}`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        grade: 'Grade 9',
+        section: 'A',
+        subject: 'Mathematics',
+        weekNumber: 8,
+        lessonDate: '2026-11-24',
+        submissionStatus: 'Submitted',
+        remarks: 'Completed and signed by HOD.',
+      });
+    expect(updateRes.status).toBe(200);
+    expect(updateRes.body.lessonNote.submissionStatus).toBe('Submitted');
+    expect(updateRes.body.lessonNote.status).toBe('Submitted');
+    expect(updateRes.body.lessonNote.remarks).toBe('Completed and signed by HOD.');
+    expect(updateRes.body.lessonNote.submittedAt).toBeTruthy();
+
+    // Parent workspace must receive empty lessonNotes (staff check-in & remarks are never exposed)
+    const parentWs = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakParentToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(parentWs.status).toBe(200);
+    expect(parentWs.body.lessonNotes).toEqual([]);
+
+    // Peer teacher workspace only includes their own lesson notes
+    const peerWs = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakPeerTeacherToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(peerWs.status).toBe(200);
+    expect(peerWs.body.lessonNotes.some((n: any) => n.id === noteId)).toBe(false);
+
+    // Owner teacher can delete their Lesson Notes check-in entry
+    const teacherDeleteRes = await request(app)
+      .delete(`/api/academics/lesson-notes/${noteId}`)
+      .set('Authorization', `Bearer ${oakTeacherToken}`);
+    expect(teacherDeleteRes.status).toBe(200);
+
+    // St. Raphael seeded Admin workspace has Submitted / Not Submitted entries with short remarks; Parent sees []
+    await store.resetForTests({ empty: false, includeLargeTenants: true });
+    const stRaphAdminPass = ST_RAPHAEL_DEFAULT_PASSWORDS['juma.j@straphael.ac.ke'];
+    const stRaphAdminLogin = await request(app)
+      .post('/api/auth/login')
+      .send({
+        email: 'juma.j@straphael.ac.ke',
+        password: stRaphAdminPass,
+      });
+    expect(stRaphAdminLogin.status).toBe(200);
+    let stRaphAdminToken = stRaphAdminLogin.body.token as string;
+    if (stRaphAdminLogin.body.user.mustChangePassword) {
+      const chg = await request(app)
+        .post('/api/auth/change-password')
+        .set('Authorization', `Bearer ${stRaphAdminToken}`)
+        .send({ currentPassword: stRaphAdminPass, newPassword: 'StRaphaelAdminNew2026!' });
+      expect(chg.status).toBe(200);
+      stRaphAdminToken = chg.body.token as string;
+    }
+
+    const stRaphAdminWs = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${stRaphAdminToken}`)
+      .set('x-tenant-id', ST_RAPHAEL_TENANT_ID);
+    expect(stRaphAdminWs.status).toBe(200);
+    expect(Array.isArray(stRaphAdminWs.body.lessonNotes)).toBe(true);
+    expect(stRaphAdminWs.body.lessonNotes.length).toBeGreaterThan(0);
+    for (const note of stRaphAdminWs.body.lessonNotes) {
+      expect(['Submitted', 'Not Submitted']).toContain(note.submissionStatus);
+      expect(typeof note.remarks).toBe('string');
+      expect((note.remarks as string).length).toBeGreaterThan(0);
+    }
+
+    const stRaphParentPass = ST_RAPHAEL_DEFAULT_PASSWORDS['parent.kamau@straphael.ac.ke'];
+    const stRaphParentRes = await request(app)
+      .post('/api/auth/login')
+      .send({
+        email: 'parent.kamau@straphael.ac.ke',
+        password: stRaphParentPass,
+      });
+    expect(stRaphParentRes.status).toBe(200);
+    let stRaphParentToken = stRaphParentRes.body.token as string;
+    if (stRaphParentRes.body.user.mustChangePassword) {
+      const chg = await request(app)
+        .post('/api/auth/change-password')
+        .set('Authorization', `Bearer ${stRaphParentToken}`)
+        .send({ currentPassword: stRaphParentPass, newPassword: 'StRaphaelParentNew2026!' });
+      expect(chg.status).toBe(200);
+      stRaphParentToken = chg.body.token as string;
+    }
+    const stRaphParentWs = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${stRaphParentToken}`)
+      .set('x-tenant-id', ST_RAPHAEL_TENANT_ID);
+    expect(stRaphParentWs.status).toBe(200);
+    expect(stRaphParentWs.body.lessonNotes).toEqual([]);
   });
 });
+
+

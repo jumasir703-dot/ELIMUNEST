@@ -1081,6 +1081,97 @@ export interface LessonPlan {
   updatedAt: string;
 }
 
+export type RecordOfWorkCoverageStatus =
+  | 'Completed'
+  | 'Partially Covered'
+  | 'Carried Forward';
+
+export type CbcLearnerMasteryLevel =
+  | 'Exceeding Expectations'
+  | 'Meeting Expectations'
+  | 'Approaching Expectations'
+  | 'Below Expectations';
+
+export interface RecordOfWork {
+  id: string;
+  tenantId: string;
+  schemeOfWorkId?: string;
+  lessonPlanId?: string;
+  academicYear: string;
+  termId?: string;
+  term: string;
+  weekNumber: number;
+  dateCovered: string; // YYYY-MM-DD
+  grade: string;
+  section: string;
+  subject: string;
+  teacherId: string;
+  teacherName: string;
+  createdByUserId?: string;
+  strand: string;
+  subStrand: string;
+  workCovered: string;
+  lessonsTaughtCount: number;
+  lessonsPlannedCount?: number;
+  learnerMastery: CbcLearnerMasteryLevel;
+  coverageStatus: RecordOfWorkCoverageStatus;
+  challengesAndRemediation?: string;
+  remarks?: string;
+  parentSummary?: string;
+  status: AcademicDocumentStatus;
+  parentVisible: boolean;
+  dueDate?: string;
+  submittedAt?: string;
+  reviewedByUserId?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  reviewFeedback?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type LessonNoteSubmissionStatus = 'Submitted' | 'Not Submitted';
+
+export interface LessonNote {
+  id: string;
+  tenantId: string;
+  schemeOfWorkId?: string;
+  lessonPlanId?: string;
+  academicYear: string;
+  termId?: string;
+  term: string;
+  weekNumber: number;
+  lessonDate: string; // YYYY-MM-DD
+  grade: string;
+  section: string;
+  subject: string;
+  teacherId: string;
+  teacherName: string;
+  createdByUserId?: string;
+  submissionStatus: LessonNoteSubmissionStatus;
+  remarks?: string;
+  strand?: string;
+  subStrand?: string;
+  topicTitle?: string;
+  noteSummary?: string;
+  detailedNotes?: string;
+  keyVocabulary?: string;
+  workedExamples?: string;
+  learnerExercises?: string;
+  referenceMaterials?: string;
+  internalTeacherGuide?: string;
+  status: AcademicDocumentStatus;
+  parentVisible: boolean;
+  dueDate?: string;
+  submittedAt?: string;
+  reviewedByUserId?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  reviewFeedback?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TenantUser {
   id: string;
   tenantId: string;
@@ -1848,6 +1939,43 @@ export interface StaffAttendanceRecord {
   updatedAt: string;
 }
 
+export type TeacherLessonAttendanceStatus =
+  | 'Attended'
+  | 'Delegated'
+  | 'Recovered'
+  | 'Missed';
+
+export interface TeacherLessonAttendanceRecord {
+  id: string;
+  tenantId: string;
+  termId?: string;
+  date: string; // YYYY-MM-DD
+  dayOfWeek: DayOfWeek | string;
+  timetableSlotId?: string;
+  periodNumber?: number;
+  timeSlot?: string;
+  grade: string;
+  section: string;
+  subject: string;
+  scheduledTeacherId: string;
+  scheduledTeacherName: string;
+  status: TeacherLessonAttendanceStatus;
+  delegatedTeacherId?: string;
+  delegatedTeacherName?: string;
+  delegationNotes?: string;
+  originalMissedDate?: string;
+  recoveredDate?: string;
+  recoveredPeriod?: number;
+  recoveredByTeacherId?: string;
+  recoveredByTeacherName?: string;
+  topicCovered?: string;
+  remarks?: string;
+  recordedBy: string;
+  recordedByUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface LeaveOutChit {
   id: string;
   tenantId: string;
@@ -1917,6 +2045,43 @@ export interface ExamResult {
   gpaPoints: number;
   resultStatus?: ExamResultStatus;
   remarks: string;
+  updatedAt: string;
+}
+
+export interface ProgressiveReportSubjectScore {
+  subject: string;
+  score: number | null;
+  maxScore: number;
+  resultStatus?: ExamResultStatus;
+  letterGrade?: string;
+  gpaPoints?: number;
+  masteryLevel?: CbcLearnerMasteryLevel;
+  remarks?: string;
+}
+
+export interface LearnerProgressiveEntry {
+  id: string;
+  tenantId: string;
+  studentId: string;
+  studentName: string;
+  studentCode: string;
+  grade: string;
+  section: string;
+  academicYear: string;
+  term: string;
+  assessmentLabel: string;
+  assessmentDate: string; // YYYY-MM-DD
+  sequenceOrder?: number;
+  subjects: ProgressiveReportSubjectScore[];
+  totalScore: number;
+  maxPossible: number;
+  meanScore: number;
+  meanGrade: string;
+  classTeacherRemarks?: string;
+  source: 'manual' | 'import';
+  recordedByName?: string;
+  recordedByUserId?: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -2380,12 +2545,16 @@ export interface TenantWorkspaceData {
   admissions: AdmissionApplication[];
   schemesOfWork?: SchemeOfWork[];
   lessonPlans?: LessonPlan[];
+  recordsOfWork?: RecordOfWork[];
+  lessonNotes?: LessonNote[];
   timetable: TimetableSlot[];
   attendance: AttendanceRecord[];
   staffAttendance: StaffAttendanceRecord[];
+  teacherLessonAttendance?: TeacherLessonAttendanceRecord[];
   leaveOutChits: LeaveOutChit[];
   examCycles: ExamCycle[];
   examResults: ExamResult[];
+  progressiveReports?: LearnerProgressiveEntry[];
   feeStructures: FeeStructure[];
   invoices: FeeInvoice[];
   creditNotes?: CreditNoteRecord[];
