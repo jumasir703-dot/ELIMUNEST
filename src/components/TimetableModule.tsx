@@ -52,7 +52,7 @@ import {
 interface TimetableModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
-  canEdit?: boolean;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -68,12 +68,12 @@ const DAYS: DayOfWeek[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday
 export function TimetableModule({
   workspace,
   currentRole = 'Admin',
-  canEdit = true,
+  readOnly = false,
   onRefresh,
   onNotify,
 }: TimetableModuleProps) {
   const { tenant, timetable } = workspace;
-  const isReadOnlyViewer = !canEdit || currentRole === 'Parent' || currentRole === 'Student';
+  const isReadOnlyViewer = Boolean(readOnly) || currentRole === 'Parent' || currentRole === 'Student';
   const bellSchedule = useMemo(() => getTenantBellSchedule(tenant), [tenant]);
   const lessonRows = useMemo(() => getTenantLessonRows(tenant), [tenant]);
   const periodTimes = useMemo(() => getTenantPeriodTimes(tenant), [tenant]);
@@ -1002,12 +1002,6 @@ export function TimetableModule({
           )}
         </div>
       </div>
-
-      {!canEdit && currentRole !== 'Parent' && currentRole !== 'Student' && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
-          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Timetable. Editing slots, customizing subjects, and running the solver are disabled.
-        </div>
-      )}
 
       {activeTab === 'grid' ? (
         <>

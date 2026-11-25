@@ -37,6 +37,7 @@ import {
   sanitizeSchoolEmailDomain,
   getLessonsPerWeekForSubject,
   getStreamsForGrade,
+  getStudentRegisteredSubjects,
   getSubjectsForGrade,
   getSubjectsForLevel,
   getTeacherAssignedSubjectsForCohort,
@@ -49,6 +50,8 @@ import {
   KENYAN_CBC_SUBJECTS,
   MAX_FEE_VOTELINES,
   validatePasswordStrength,
+  type AcademicDocumentStatus,
+  type AcademicSubmissionDeadlineConfig,
   type AcademicTerm,
   type AcademicYear,
   type AdminAuditEntry,
@@ -93,6 +96,7 @@ import {
   type IndependentVotelineItem,
   type IndependentVotelinePayment,
   type LeaveOutChit,
+  type LessonPlan,
   type LifecycleAuditAction,
   type LifecycleAuditEntry,
   type MpesaEnvironment,
@@ -116,6 +120,8 @@ import {
   type ReconciliationChannel,
   type ReconciliationLine,
   type ReconciliationStatus,
+  type SchemeOfWork,
+  type SchemeOfWorkWeek,
   type SchoolExpense,
   type StaffAttendanceRecord,
   type StaffCategory,
@@ -144,6 +150,11 @@ import {
   type WhatsAppDispatchCategory,
   type WhatsAppDispatchRecord,
 } from '../src/shared/types.ts';
+import {
+  buildDefaultAcademicsForTenant,
+  buildWeeksFromSubjectTemplate,
+  getDefaultAcademicSubmissionConfig,
+} from './seedAcademics.ts';
 import {
   buildDefaultApprovalsForTenant,
   buildDefaultBudgetsForTenant,
@@ -317,9 +328,9 @@ export class TenantStore {
       if (!isProd && !isTest) {
         this.persist(state);
         if (devCredentials.length > 0) {
-          console.log('[elimuNest] Seeded development demo accounts (one-time random passwords, change required on first login):');
+          console.log('[elimuNest] Seeded development demo accounts (deterministic dev passwords):');
           for (const cred of devCredentials) {
-            console.log(`  - ${cred.role.padEnd(11)} | ${cred.email} | ${cred.password}`);
+            console.log(`  - ${cred.role.padEnd(28)} | ${cred.email} | ${cred.password}`);
           }
         }
       }
@@ -356,6 +367,7 @@ export class TenantStore {
           (u) => u.email.toLowerCase() === DEVELOPER_EMAIL
         );
         const { password, fromEnv } = resolveDeveloperBootstrapPassword();
+        const isProd = process.env.NODE_ENV === 'production';
         if (existing) {
           if (existing.mustChangePassword && fromEnv) {
             const matches = await verifyPassword(password, existing.passwordHash);
@@ -378,7 +390,7 @@ export class TenantStore {
           role: 'Developer',
           passwordHash: await hashPassword(password),
           status: 'Active',
-          mustChangePassword: true,
+          mustChangePassword: isProd,
           tokenVersion: 0,
           allowedModules: [...DEFAULT_ROLE_MODULES.Developer],
           createdAt: new Date().toISOString(),
@@ -386,8 +398,10 @@ export class TenantStore {
         this.persist();
         console.log(
           fromEnv
-            ? `[elimuNest] Created ${DEVELOPER_EMAIL} with the password from DEVELOPER_BOOTSTRAP_PASSWORD (change required on first login).`
-            : `[elimuNest] Created ${DEVELOPER_EMAIL} with one-time password: ${password} (change required on first login). Set DEVELOPER_BOOTSTRAP_PASSWORD to choose your own.`
+            ? `[elimuNest] Created ${DEVELOPER_EMAIL} with the password from DEVELOPER_BOOTSTRAP_PASSWORD.`
+            : isProd
+            ? `[elimuNest] Created ${DEVELOPER_EMAIL} with one-time password: ${password} (change required on first login). Set DEVELOPER_BOOTSTRAP_PASSWORD to choose your own.`
+            : `[elimuNest] Created ${DEVELOPER_EMAIL} with default dev password: ${password}.`
         );
       })();
     }
@@ -496,6 +510,7 @@ export class TenantStore {
     initiallyDirty: boolean
   ): { state: DatabaseState; dirty: boolean } {
     let dirty = initiallyDirty;
+    const hadAcademics = Array.isArray(parsed.schemesOfWork);
 
     if (!Array.isArray(parsed.students)) {
       parsed.students = [];
@@ -547,6 +562,14 @@ export class TenantStore {
     }
     if (!Array.isArray(parsed.notifications)) {
       parsed.notifications = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.schemesOfWork)) {
+      parsed.schemesOfWork = [];
+      dirty = true;
+    }
+    if (!Array.isArray(parsed.lessonPlans)) {
+      parsed.lessonPlans = [];
       dirty = true;
     }
 
@@ -644,6 +667,14 @@ export class TenantStore {
             }
 
             t.teachers.forEach((tc) => {
+              if (t.id === 'tenant-oakridge' && tc.id === 't-oak-1' && tc.email === 'k.njoroge@oakridge.ac.ke') {
+                tc.email = 'kamau.njoroge@oakridge.ac.ke';
+                dirty = true;
+              }
+              if (t.id === 'tenant-stjude' && tc.id === 't-sj-2' && tc.email === 'p.nair@stjude.ac.uk') {
+                tc.email = 'priya.nair@stjude.ac.ke';
+                dirty = true;
+              }
               if (!Array.isArray(tc.subjects)) {
                 tc.subjects = t.subjects.slice(0, 1);
                 dirty = true;
@@ -1341,6 +1372,52 @@ export class TenantStore {
       }
     }
 
+    // Backfill Teacher Academics seed data & module access when upgrading an existing DB snapshot
+    parsed.tenants.forEach((t) => {
+      if (!t.academicSubmissionConfig) {
+        t.academicSubmissionConfig = getDefaultAcademicSubmissionConfig(t);
+        dirty = true;
+      }
+      if (!hadAcademics) {
+        const hasTenantSchemes = parsed.schemesOfWork!.some((s) => s.tenantId === t.id);
+        const hasTenantPlans = parsed.lessonPlans!.some((l) => l.tenantId === t.id);
+        if (!hasTenantSchemes && !hasTenantPlans) {
+          const built = buildDefaultAcademicsForTenant(t, { timetable: parsed.timetable });
+          parsed.schemesOfWork!.push(...built.schemesOfWork);
+          parsed.lessonPlans!.push(...built.lessonPlans);
+          dirty = true;
+        }
+      }
+    });
+
+    if (!hadAcademics && Array.isArray(parsed.users)) {
+      const defaultAcademicsLevelByRole: Partial<Record<UserRole, 'edit' | 'read'>> = {
+        Developer: 'edit',
+        'Super Admin': 'edit',
+        Admin: 'edit',
+        Teacher: 'edit',
+        Registrar: 'read',
+        Parent: 'read',
+        Student: 'read',
+      };
+      for (const u of parsed.users) {
+        const defaultLevel = defaultAcademicsLevelByRole[u.role];
+        if (!defaultLevel) continue;
+        const alreadyExplicit =
+          (Array.isArray(u.allowedModules) && u.allowedModules.includes('academics')) ||
+          Boolean(u.moduleAccess && 'academics' in u.moduleAccess);
+        if (!alreadyExplicit) {
+          if (Array.isArray(u.allowedModules)) {
+            u.allowedModules.push('academics');
+          }
+          if (u.moduleAccess) {
+            u.moduleAccess.academics = defaultLevel;
+          }
+          dirty = true;
+        }
+      }
+    }
+
     return { state: parsed, dirty };
   }
 
@@ -1363,7 +1440,7 @@ export class TenantStore {
     }
   }
 
-  async resetForTests(options?: { empty?: boolean }) {
+  async resetForTests(options?: { empty?: boolean; includeLargeTenants?: boolean }) {
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       throw new Error('resetForTests can only be used in test mode');
     }
@@ -1371,7 +1448,10 @@ export class TenantStore {
     this.loginAttempts.clear();
     this.resetRequestsByEmail.clear();
     this.resetRequestsByIp.clear();
-    const { state, devCredentials } = await createSeedDatabase({ empty: Boolean(options?.empty) });
+    const { state, devCredentials } = await createSeedDatabase({
+      empty: Boolean(options?.empty),
+      includeLargeTenants: options?.includeLargeTenants,
+    });
     this.state = state;
     this.developerEnsurePromise = null;
     await this.ensureDeveloperAccount();
@@ -1564,6 +1644,8 @@ export class TenantStore {
       ['messages', this.state.messages],
       ['whatsappDispatches', this.state.whatsappDispatches || []],
       ['notifications', this.state.notifications],
+      ['schemesOfWork', this.state.schemesOfWork || []],
+      ['lessonPlans', this.state.lessonPlans || []],
       ['adminAuditLogs', this.state.adminAuditLogs || []],
     ];
 
@@ -1852,6 +1934,33 @@ export class TenantStore {
       (w) => w.tenantId === tenantId
     );
     const allNotifications = this.state.notifications.filter((n) => n.tenantId === tenantId);
+    const allSchemes = (this.state.schemesOfWork || []).filter((s) => s.tenantId === tenantId);
+    const allLessonPlans = (this.state.lessonPlans || []).filter((l) => l.tenantId === tenantId);
+
+    const sanitizeSchemeForParentOrStudent = (s: SchemeOfWork): SchemeOfWork => ({
+      ...s,
+      reviewFeedback: undefined,
+      reviewedByUserId: undefined,
+      createdByUserId: undefined,
+    });
+
+    const sanitizeLessonPlanForParentOrStudent = (lp: LessonPlan): LessonPlan => ({
+      ...lp,
+      teacherReflection: undefined,
+      reviewFeedback: undefined,
+      reviewedByUserId: undefined,
+      createdByUserId: undefined,
+    });
+
+    const matchesStudentScope = (
+      stu: Student,
+      item: Pick<SchemeOfWork, 'grade' | 'section' | 'subject'>
+    ): boolean => {
+      if (item.grade !== stu.grade) return false;
+      if (item.section !== stu.section && item.section !== 'All Streams') return false;
+      const registered = getStudentRegisteredSubjects(tenant, stu);
+      return registered.includes(item.subject);
+    };
 
     if (authUser?.role === 'Student') {
       const ownStudent = allStudents.find(
@@ -1864,6 +1973,7 @@ export class TenantStore {
       const ownGradeSections = new Set(linked.map((s) => `${s.grade}::${s.section}`));
       const publishedCycles = allExamCycles.filter((c) => c.status === 'Published');
       const publishedCycleIds = new Set(publishedCycles.map((c) => c.id));
+      const canReadAcademics = getModuleAccessLevel(authUser, 'academics') !== 'none';
 
       return {
         tenant,
@@ -1906,8 +2016,31 @@ export class TenantStore {
             n.category === 'announcement' ||
             n.category === 'exam' ||
             n.category === 'timetable' ||
-            n.category === 'attendance'
+            n.category === 'attendance' ||
+            n.category === 'academics'
         ),
+        schemesOfWork:
+          canReadAcademics && ownStudent
+            ? allSchemes
+                .filter(
+                  (s) =>
+                    s.status === 'Approved' &&
+                    s.parentVisible === true &&
+                    matchesStudentScope(ownStudent, s)
+                )
+                .map(sanitizeSchemeForParentOrStudent)
+            : [],
+        lessonPlans:
+          canReadAcademics && ownStudent
+            ? allLessonPlans
+                .filter(
+                  (lp) =>
+                    lp.status === 'Approved' &&
+                    lp.parentVisible === true &&
+                    matchesStudentScope(ownStudent, lp)
+                )
+                .map(sanitizeLessonPlanForParentOrStudent)
+            : [],
       };
     }
 
@@ -1918,6 +2051,7 @@ export class TenantStore {
       const childGradeSections = new Set(linkedStudents.map((s) => `${s.grade}::${s.section}`));
       const publishedCycles = allExamCycles.filter((c) => c.status === 'Published');
       const publishedCycleIds = new Set(publishedCycles.map((c) => c.id));
+      const canReadAcademics = getModuleAccessLevel(authUser, 'academics') !== 'none';
 
       return {
         tenant,
@@ -1956,8 +2090,31 @@ export class TenantStore {
         messages: [],
         whatsappDispatches: [],
         notifications: allNotifications.filter(
-          (n) => n.category === 'announcement' || n.category === 'exam'
+          (n) =>
+            n.category === 'announcement' ||
+            n.category === 'exam' ||
+            n.category === 'academics'
         ),
+        schemesOfWork: canReadAcademics
+          ? allSchemes
+              .filter(
+                (s) =>
+                  s.status === 'Approved' &&
+                  s.parentVisible === true &&
+                  linkedStudents.some((child) => matchesStudentScope(child, s))
+              )
+              .map(sanitizeSchemeForParentOrStudent)
+          : [],
+        lessonPlans: canReadAcademics
+          ? allLessonPlans
+              .filter(
+                (lp) =>
+                  lp.status === 'Approved' &&
+                  lp.parentVisible === true &&
+                  linkedStudents.some((child) => matchesStudentScope(child, lp))
+              )
+              .map(sanitizeLessonPlanForParentOrStudent)
+          : [],
       };
     }
 
@@ -1973,6 +2130,13 @@ export class TenantStore {
       const teacherStudentIds = new Set(teacherStudents.map((s) => s.id));
       const canReadFees = getModuleAccessLevel(authUser, 'fees') !== 'none';
       const canReadAdmissions = getModuleAccessLevel(authUser, 'admissions') !== 'none';
+      const canReadAcademics = getModuleAccessLevel(authUser, 'academics') !== 'none';
+      const isOwnAcademicItem = (item: Pick<SchemeOfWork, 'teacherId' | 'createdByUserId'>) =>
+        Boolean(
+          (teacherProfile && item.teacherId === teacherProfile.id) ||
+            item.createdByUserId === authUser.id
+        );
+
       return {
         tenant,
         tenants: [tenant],
@@ -2011,6 +2175,16 @@ export class TenantStore {
         notifications: canReadFees
           ? allNotifications
           : allNotifications.filter((n) => n.category !== 'fee'),
+        schemesOfWork: canReadAcademics
+          ? allSchemes
+              .filter((s) => isOwnAcademicItem(s) || s.status === 'Approved')
+              .map((s) => (isOwnAcademicItem(s) ? s : sanitizeSchemeForParentOrStudent(s)))
+          : [],
+        lessonPlans: canReadAcademics
+          ? allLessonPlans
+              .filter((lp) => isOwnAcademicItem(lp) || lp.status === 'Approved')
+              .map((lp) => (isOwnAcademicItem(lp) ? lp : sanitizeLessonPlanForParentOrStudent(lp)))
+          : [],
       };
     }
 
@@ -2019,6 +2193,7 @@ export class TenantStore {
       const canReadExams = getModuleAccessLevel(authUser, 'exams') !== 'none';
       const canReadAttendance = getModuleAccessLevel(authUser, 'attendance') !== 'none';
       const canReadTimetable = getModuleAccessLevel(authUser, 'timetable') !== 'none';
+      const canReadAcademics = getModuleAccessLevel(authUser, 'academics') !== 'none';
       return {
         tenant,
         tenants: [tenant],
@@ -2051,11 +2226,14 @@ export class TenantStore {
         messages: allMessages,
         whatsappDispatches: allWhatsapp,
         notifications: allNotifications,
+        schemesOfWork: canReadAcademics ? allSchemes : [],
+        lessonPlans: canReadAcademics ? allLessonPlans : [],
       };
     }
 
     if (authUser?.role === 'Registrar') {
       const canReadFees = getModuleAccessLevel(authUser, 'fees') !== 'none';
+      const canReadAcademics = getModuleAccessLevel(authUser, 'academics') !== 'none';
       return {
         tenant,
         tenants: [tenant],
@@ -2090,6 +2268,8 @@ export class TenantStore {
         notifications: canReadFees
           ? allNotifications
           : allNotifications.filter((n) => n.category !== 'fee'),
+        schemesOfWork: canReadAcademics ? allSchemes : [],
+        lessonPlans: canReadAcademics ? allLessonPlans : [],
       };
     }
 
@@ -2126,6 +2306,8 @@ export class TenantStore {
       messages: allMessages,
       whatsappDispatches: allWhatsapp,
       notifications: allNotifications,
+      schemesOfWork: allSchemes,
+      lessonPlans: allLessonPlans,
     };
   }
 
@@ -2248,6 +2430,7 @@ export class TenantStore {
         },
       ],
       nonTeachingStaff: buildDefaultNonTeachingStaff(slug, id.slice(-4)),
+      academicSubmissionConfig: getDefaultAcademicSubmissionConfig(null),
       createdAt: new Date().toISOString(),
     };
 
@@ -3291,7 +3474,8 @@ export class TenantStore {
     role: UserRole,
     rawModuleAccess?: unknown,
     rawModules?: unknown,
-    fallbackAccess?: TenantModuleAccessMap
+    fallbackAccess?: TenantModuleAccessMap,
+    preferredOrder?: TenantModulePermission[]
   ): { moduleAccess: TenantModuleAccessMap; allowedModules: TenantModulePermission[] } {
     const hasExplicitMap =
       rawModuleAccess && typeof rawModuleAccess === 'object' && !Array.isArray(rawModuleAccess);
@@ -3310,9 +3494,25 @@ export class TenantStore {
       moduleAccess = normalizeModuleAccessMap(role);
     }
 
-    const allowedModules = ALL_TENANT_MODULES.map((m) => m.id).filter(
+    const enabled = ALL_TENANT_MODULES.map((m) => m.id).filter(
       (id) => moduleAccess[id] === 'read' || moduleAccess[id] === 'edit'
     );
+    const orderSource =
+      preferredOrder && preferredOrder.length > 0
+        ? preferredOrder
+        : !hasExplicitMap && fallbackModList && fallbackModList.length > 0
+        ? fallbackModList
+        : null;
+    let allowedModules = enabled;
+    if (orderSource) {
+      const enabledSet = new Set(enabled);
+      const preserved = orderSource.filter((id) => enabledSet.has(id));
+      const preservedSet = new Set(preserved);
+      for (const id of enabled) {
+        if (!preservedSet.has(id)) preserved.push(id);
+      }
+      allowedModules = preserved;
+    }
     return { moduleAccess, allowedModules };
   }
 
@@ -3400,11 +3600,13 @@ export class TenantStore {
     }
 
     const defaultAccess = getDefaultModuleAccessForTenantRole(tenant, role, customRoleId);
+    const defaultModOrder = getDefaultModulesForTenantRole(tenant, role, customRoleId);
     const { moduleAccess, allowedModules } = this.resolveModuleAccessPayload(
       role,
       input.moduleAccess,
       input.allowedModules,
-      defaultAccess
+      defaultAccess,
+      !input.moduleAccess && !input.allowedModules ? defaultModOrder : undefined
     );
     const customPassword = typeof input.password === 'string' ? input.password.trim() : '';
     let assignedPassword: string;
@@ -5119,6 +5321,7 @@ export class TenantStore {
       guardianPhone: string;
       guardianEmail?: string;
       enrolledAt?: string;
+      registeredSubjects?: string[];
     },
     actor?: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
   ): { student: Student; invoice: FeeInvoice } {
@@ -5192,6 +5395,10 @@ export class TenantStore {
     }
 
     const validStreams = getStreamsForGrade(tenant, resolvedGrade);
+    const registeredSubjects =
+      Array.isArray(input.registeredSubjects) && input.registeredSubjects.length > 0
+        ? this.sanitizeStudentSubjects(tenant, resolvedGrade, input.registeredSubjects)
+        : [...getSubjectsForGrade(tenant, resolvedGrade)];
     const student: Student = {
       id: `stu-${randomUUID().slice(0, 8)}`,
       tenantId,
@@ -5209,6 +5416,7 @@ export class TenantStore {
       enrolledAt: input.enrolledAt || new Date().toISOString().slice(0, 10),
       status: 'Active',
       creditBalance: 0,
+      registeredSubjects,
     };
     this.state.students.unshift(student);
 
@@ -7372,7 +7580,7 @@ export class TenantStore {
 
     const missing: string[] = [];
     for (const student of activeStudents) {
-      const subjects = getSubjectsForGrade(tenant, student.grade);
+      const subjects = getStudentRegisteredSubjects(tenant, student);
       for (const subject of subjects) {
         if (!resultKeys.has(`${student.id}::${subject.trim().toLowerCase()}`)) {
           missing.push(`${student.fullName} (${student.grade} · ${subject})`);
@@ -10492,12 +10700,14 @@ export class TenantStore {
       if (amountChanged) {
         existing.status = 'Pending Approval';
         existing.createdByUserId = actor?.id || existing.createdByUserId || 'system';
+        existing.createdByName = actor?.fullName || existing.createdByName;
         existing.approvedBy = undefined;
         existing.approvedAt = undefined;
         existing.approvalNotes = 'Ceiling revised — awaiting approval.';
       } else if (!existing.status) {
         existing.status = 'Pending Approval';
         existing.createdByUserId = actor?.id || existing.createdByUserId || 'system';
+        existing.createdByName = actor?.fullName || existing.createdByName;
       }
       existing.updatedAt = new Date().toISOString();
 
@@ -10531,6 +10741,7 @@ export class TenantStore {
       allocatedAmount,
       status: allocatedAmount > 0 ? 'Pending Approval' : 'Draft',
       createdByUserId: actor?.id || 'system',
+      createdByName: actor?.fullName,
       notes: (input.notes || '').trim() || undefined,
       updatedAt: new Date().toISOString(),
     };
@@ -11508,6 +11719,7 @@ export class TenantStore {
       guardianEmail?: string;
       guardianPhone?: string;
       enrolledAt?: string;
+      registeredSubjects?: string[];
     },
     actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
   ): Student {
@@ -11607,6 +11819,16 @@ export class TenantStore {
     if (patch.enrolledAt !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(patch.enrolledAt.trim())) {
       student.enrolledAt = patch.enrolledAt.trim();
     }
+    if (patch.registeredSubjects !== undefined) {
+      if (!Array.isArray(patch.registeredSubjects) || patch.registeredSubjects.length === 0) {
+        throw new ConflictError('Assign at least one subject to the learner.', 400);
+      }
+      student.registeredSubjects = this.sanitizeStudentSubjects(
+        tenant,
+        student.grade,
+        patch.registeredSubjects
+      );
+    }
 
     // Keep linked display snapshots in sync
     for (const inv of this.state.invoices) {
@@ -11634,12 +11856,155 @@ export class TenantStore {
         guardianName: student.guardianName,
         guardianPhone: student.guardianPhone,
         guardianEmail: student.guardianEmail,
+        registeredSubjects: student.registeredSubjects,
       }
     );
 
     this.persist();
     this.syncTenant(tenantId, 'student:updated');
     return student;
+  }
+
+  private sanitizeStudentSubjects(
+    tenant: Tenant,
+    grade: string,
+    rawSubjects: string[]
+  ): string[] {
+    const allowedMap = new Map<string, string>();
+    for (const s of getSubjectsForGrade(tenant, grade)) {
+      allowedMap.set(s.trim().toLowerCase(), s.trim());
+    }
+    for (const s of tenant.subjects || []) {
+      const clean = s.trim();
+      if (clean && !allowedMap.has(clean.toLowerCase())) {
+        allowedMap.set(clean.toLowerCase(), clean);
+      }
+    }
+    const result: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of rawSubjects) {
+      const clean = String(raw || '').trim();
+      if (!clean) continue;
+      const key = clean.toLowerCase();
+      const canonical = allowedMap.get(key);
+      if (!canonical) {
+        throw new ConflictError(
+          `Subject "${clean}" is not configured in ${tenant.name}'s curriculum.`,
+          400
+        );
+      }
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(canonical);
+      }
+    }
+    if (result.length === 0) {
+      throw new ConflictError('Select at least one valid curriculum subject.', 400);
+    }
+    return result;
+  }
+
+  bulkAssignStudentSubjects(
+    tenantId: string,
+    input: {
+      studentIds?: string[];
+      grade?: string;
+      section?: string;
+      subjects?: string[];
+      mode?: 'replace' | 'add' | 'remove';
+    },
+    actor: Pick<TenantUser, 'id' | 'fullName' | 'email' | 'role'>
+  ): {
+    updatedCount: number;
+    mode: 'replace' | 'add' | 'remove';
+    subjects: string[];
+    scopeLabel: string;
+  } {
+    const tenant = this.requireTenant(tenantId);
+    const mode: 'replace' | 'add' | 'remove' =
+      input.mode === 'add' || input.mode === 'remove' ? input.mode : 'replace';
+    const rawSubjects = Array.isArray(input.subjects) ? input.subjects : [];
+    const targetGrade = typeof input.grade === 'string' && input.grade.trim() ? input.grade.trim() : undefined;
+    const targetSection =
+      typeof input.section === 'string' && input.section.trim() && input.section.trim() !== 'All'
+        ? input.section.trim()
+        : undefined;
+    const explicitIds = Array.isArray(input.studentIds)
+      ? new Set(input.studentIds.map((id) => String(id).trim()).filter(Boolean))
+      : null;
+
+    if ((!explicitIds || explicitIds.size === 0) && !targetGrade) {
+      throw new ConflictError('Select a target grade or at least one learner.', 400);
+    }
+
+    const sanitized = this.sanitizeStudentSubjects(
+      tenant,
+      targetGrade || tenant.grades[0] || 'Grade 7',
+      rawSubjects
+    );
+
+    const targets = this.state.students.filter((s) => {
+      if (s.tenantId !== tenantId || s.deleted) return false;
+      if (explicitIds && explicitIds.size > 0) {
+        return explicitIds.has(s.id);
+      }
+      if (s.status !== 'Active' && s.status !== 'On Leave') return false;
+      if (targetGrade && targetGrade !== 'All' && s.grade !== targetGrade) return false;
+      if (targetSection && s.section !== targetSection) return false;
+      return true;
+    });
+
+    if (targets.length === 0) {
+      throw new ConflictError('No matching active learners found for subject assignment.', 404);
+    }
+
+    const sanitizedSet = new Set(sanitized.map((s) => s.toLowerCase()));
+    for (const stu of targets) {
+      const current = getStudentRegisteredSubjects(tenant, stu);
+      let next: string[];
+      if (mode === 'replace') {
+        next = [...sanitized];
+      } else if (mode === 'add') {
+        const seen = new Set(current.map((s) => s.toLowerCase()));
+        next = [...current];
+        for (const sub of sanitized) {
+          if (!seen.has(sub.toLowerCase())) {
+            seen.add(sub.toLowerCase());
+            next.push(sub);
+          }
+        }
+      } else {
+        next = current.filter((sub) => !sanitizedSet.has(sub.toLowerCase()));
+        if (next.length === 0) {
+          throw new ConflictError(
+            `Cannot remove all subjects from ${stu.fullName} (${stu.studentCode}); learners must keep at least 1 subject.`,
+            400
+          );
+        }
+      }
+      stu.registeredSubjects = next;
+    }
+
+    const scopeLabel =
+      explicitIds && explicitIds.size > 0
+        ? `${targets.length} selected learner(s)`
+        : `${targetGrade || 'All Grades'}${targetSection ? ` · Stream ${targetSection}` : ' · All Streams'} (${targets.length} learners)`;
+
+    this.appendLifecycleAudit(
+      tenantId,
+      actor,
+      'STUDENT_SUBJECTS_ASSIGNED',
+      'Student',
+      targets.length === 1 ? targets[0].id : targetGrade || tenantId,
+      `Assigned subjects (${mode}: ${sanitized.join(', ')}) to ${scopeLabel}.`,
+      undefined,
+      null,
+      { mode, subjects: sanitized, updatedCount: targets.length, scopeLabel }
+    );
+
+    this.persist();
+    this.syncTenant(tenantId, 'student:subjects-assigned');
+    return { updatedCount: targets.length, mode, subjects: sanitized, scopeLabel };
   }
 
   transitionStudentStatus(
@@ -12607,5 +12972,1022 @@ export class TenantStore {
     this.syncTenant(tenantId, 'student:portal-provisioned');
 
     return { user: this.toPublicUser(created), oneTimePassword, student };
+  }
+
+  // =========================================================================
+  // Teacher Academics: Schemes of Work, Lesson Plans, Submissions & Visibility
+  // =========================================================================
+
+  private isPrivilegedAcademicsActor(authUser: Pick<TenantUser, 'role'>): boolean {
+    return (
+      authUser.role === 'Developer' ||
+      authUser.role === 'Super Admin' ||
+      authUser.role === 'Admin'
+    );
+  }
+
+  private assertTeacherCohortAccessForAcademics(
+    tenant: Tenant,
+    teacher: TeacherProfile,
+    grade: string,
+    section: string,
+    subject: string
+  ) {
+    const tenantTimetable = this.state.timetable.filter((s) => s.tenantId === tenant.id);
+    const streamsToCheck =
+      section.trim().toLowerCase() === 'all streams'
+        ? getStreamsForGrade(tenant, grade)
+        : [section];
+    const allowed = streamsToCheck.some((sec) =>
+      getTeacherAssignedSubjectsForCohort(tenant, teacher, grade, sec, tenantTimetable).some(
+        (sub) => sub.trim().toLowerCase() === subject.trim().toLowerCase()
+      )
+    );
+    if (!allowed) {
+      throw new ConflictError(
+        `Forbidden: ${teacher.name} is not assigned to teach ${subject} for ${grade} (${section}).`,
+        403
+      );
+    }
+  }
+
+  private resolveAcademicsTeacherActor(
+    tenant: Tenant,
+    authUser: TenantUser,
+    requestedTeacherId?: string
+  ): TeacherProfile | null {
+    if (this.isPrivilegedAcademicsActor(authUser)) {
+      if (requestedTeacherId) {
+        const found = tenant.teachers.find((t) => t.id === requestedTeacherId);
+        if (!found) {
+          throw new ConflictError('Selected teacher does not exist in this school roster.', 404);
+        }
+        return found;
+      }
+      return this.findTeacherProfileForUser(tenant.id, authUser) || tenant.teachers[0] || null;
+    }
+
+    const ownProfile = this.findTeacherProfileForUser(tenant.id, authUser);
+    if (!ownProfile) {
+      throw new ConflictError(
+        'No teaching profile matches your account email in School Settings. Ask an Admin to add or match your email on the Faculty Roster.',
+        403
+      );
+    }
+    if (requestedTeacherId && requestedTeacherId !== ownProfile.id) {
+      throw new ConflictError(
+        'Forbidden: Teachers may only author or modify their own schemes of work and lesson plans.',
+        403
+      );
+    }
+    return ownProfile;
+  }
+
+  private normalizeSchemeWeeksInput(
+    subject: string,
+    rawWeeks: unknown,
+    weeksCountInput?: number,
+    autoFillWeeks?: boolean
+  ): SchemeOfWorkWeek[] {
+    const targetCount = Math.max(
+      1,
+      Math.min(14, Math.round(Number(weeksCountInput) || (Array.isArray(rawWeeks) ? rawWeeks.length : 8) || 8))
+    );
+    if (Array.isArray(rawWeeks) && rawWeeks.length > 0) {
+      const cleaned: SchemeOfWorkWeek[] = rawWeeks.map((row, idx) => {
+        const w = (row || {}) as Partial<SchemeOfWorkWeek>;
+        return {
+          weekNumber:
+            typeof w.weekNumber === 'number' && Number.isFinite(w.weekNumber) && w.weekNumber >= 1
+              ? Math.round(w.weekNumber)
+              : idx + 1,
+          strand: String(w.strand || '').trim(),
+          subStrand: String(w.subStrand || '').trim(),
+          learningOutcomes: String(w.learningOutcomes || '').trim(),
+          keyInquiryQuestion: String(w.keyInquiryQuestion || '').trim() || undefined,
+          learningActivities: String(w.learningActivities || '').trim() || 'Guided classroom practice',
+          resources: String(w.resources || '').trim() || 'KICD Learner Book & classroom charts',
+          assessmentMethod: String(w.assessmentMethod || '').trim() || 'Observation & written exercise',
+          remarks: String(w.remarks || '').trim() || undefined,
+        };
+      });
+      const validRows = cleaned.filter((w) => w.strand && w.subStrand && w.learningOutcomes);
+      if (validRows.length === 0) {
+        throw new ConflictError(
+          'At least one scheme week must specify a Strand, Sub-Strand, and Learning Outcomes.',
+          400
+        );
+      }
+      return validRows.sort((a, b) => a.weekNumber - b.weekNumber);
+    }
+
+    if (autoFillWeeks !== false) {
+      return buildWeeksFromSubjectTemplate(subject, targetCount);
+    }
+
+    throw new ConflictError('Provide at least one week row for the Scheme of Work.', 400);
+  }
+
+  upsertSchemeOfWork(
+    tenantId: string,
+    input: {
+      id?: string;
+      academicYear?: string;
+      term?: string;
+      grade: string;
+      section: string;
+      subject: string;
+      teacherId?: string;
+      title?: string;
+      referenceBook?: string;
+      weeksCount?: number;
+      weeks?: SchemeOfWorkWeek[];
+      autoFillWeeks?: boolean;
+      parentVisible?: boolean;
+      parentSummary?: string;
+      submitNow?: boolean;
+      status?: AcademicDocumentStatus;
+    },
+    authUser: TenantUser
+  ): SchemeOfWork {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.schemesOfWork)) this.state.schemesOfWork = [];
+
+    const existing = input.id
+      ? this.state.schemesOfWork.find((s) => s.id === input.id && s.tenantId === tenantId)
+      : undefined;
+    if (input.id && !existing) {
+      throw new ConflictError('Scheme of Work not found.', 404);
+    }
+
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (existing && !isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only edit your own Schemes of Work.', 403);
+      }
+    }
+
+    const grade = String(input.grade || existing?.grade || '').trim();
+    const section = String(input.section || existing?.section || 'A').trim();
+    const subject = String(input.subject || existing?.subject || '').trim();
+    if (!grade || !subject) {
+      throw new ConflictError('Grade and Subject are required for a Scheme of Work.', 400);
+    }
+
+    const teacher = this.resolveAcademicsTeacherActor(
+      tenant,
+      authUser,
+      input.teacherId || existing?.teacherId
+    );
+    if (!isAdmin && teacher) {
+      this.assertTeacherCohortAccessForAcademics(tenant, teacher, grade, section, subject);
+    }
+
+    const teacherId = teacher?.id || existing?.teacherId || `staff-${authUser.id}`;
+    const teacherName = teacher?.name || existing?.teacherName || authUser.fullName;
+    const academicYear = String(
+      input.academicYear || existing?.academicYear || tenant.academicYear || '2026–2027'
+    ).trim();
+    const term = String(input.term || existing?.term || tenant.currentTerm || 'Term 1').trim();
+    const title =
+      String(input.title || '').trim() ||
+      existing?.title ||
+      `${grade} ${section} ${subject} — ${term} Scheme of Work`;
+
+    const weeks = this.normalizeSchemeWeeksInput(
+      subject,
+      input.weeks,
+      input.weeksCount,
+      input.autoFillWeeks ?? !existing
+    );
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    const nowIso = new Date().toISOString();
+
+    let nextStatus: AcademicDocumentStatus;
+    if (isAdmin && input.status) {
+      nextStatus = input.status;
+    } else if (input.submitNow) {
+      nextStatus = 'Submitted';
+    } else if (existing && existing.status === 'Approved' && !isAdmin) {
+      // Editing an already-approved scheme requires re-submission / re-review
+      nextStatus = 'Draft';
+    } else if (existing && existing.status !== 'Revision Requested') {
+      nextStatus = existing.status;
+    } else {
+      nextStatus = 'Draft';
+    }
+
+    const rawParentVisible =
+      typeof input.parentVisible === 'boolean'
+        ? input.parentVisible
+        : existing?.parentVisible ?? false;
+    const parentVisible =
+      cfg.requireApprovalForParentVisibility && nextStatus !== 'Approved'
+        ? false
+        : Boolean(rawParentVisible);
+
+    const matchedTerm = (this.state.academicTerms || []).find(
+      (t) => t.tenantId === tenantId && t.name.toLowerCase() === term.toLowerCase()
+    );
+
+    const record: SchemeOfWork = {
+      id: existing?.id || `sow-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      academicYear,
+      termId: matchedTerm?.id || existing?.termId,
+      term,
+      grade,
+      section,
+      subject,
+      teacherId,
+      teacherName,
+      createdByUserId: existing?.createdByUserId || authUser.id,
+      title,
+      referenceBook:
+        String(input.referenceBook ?? existing?.referenceBook ?? '').trim() || undefined,
+      weeksCount: weeks.length,
+      weeks,
+      status: nextStatus,
+      parentVisible,
+      parentSummary:
+        String(input.parentSummary ?? existing?.parentSummary ?? '').trim() || undefined,
+      dueDate: existing?.dueDate || cfg.schemeDueDate,
+      submittedAt:
+        nextStatus === 'Submitted'
+          ? existing?.status === 'Submitted' && existing.submittedAt
+            ? existing.submittedAt
+            : nowIso
+          : nextStatus === 'Approved'
+          ? existing?.submittedAt || nowIso
+          : undefined,
+      reviewedByUserId:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedByUserId || authUser.id
+            : existing?.reviewedByUserId
+          : undefined,
+      reviewedByName:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedByName || authUser.fullName
+            : existing?.reviewedByName
+          : undefined,
+      reviewedAt:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedAt || nowIso
+            : existing?.reviewedAt
+          : undefined,
+      reviewFeedback:
+        nextStatus === 'Draft' || nextStatus === 'Submitted'
+          ? undefined
+          : existing?.reviewFeedback,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (existing) {
+      const idx = this.state.schemesOfWork.findIndex((s) => s.id === existing.id);
+      if (idx !== -1) this.state.schemesOfWork[idx] = record;
+    } else {
+      this.state.schemesOfWork.unshift(record);
+    }
+
+    this.persist();
+    if (record.status === 'Submitted' && existing?.status !== 'Submitted') {
+      this.pushNotification(
+        tenantId,
+        'academics',
+        `Scheme Submitted: ${record.grade} ${record.section} ${record.subject}`,
+        `${record.teacherName} submitted "${record.title}" for academic review.`,
+        'academics'
+      );
+    }
+    this.syncTenant(tenantId, 'academics:scheme-saved');
+    return record;
+  }
+
+  submitSchemeOfWork(tenantId: string, schemeId: string, authUser: TenantUser): SchemeOfWork {
+    this.requireTenant(tenantId);
+    const list = this.state.schemesOfWork || [];
+    const idx = list.findIndex((s) => s.id === schemeId && s.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Scheme of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only submit your own Schemes of Work.', 403);
+      }
+    }
+    if (!Array.isArray(existing.weeks) || existing.weeks.length === 0) {
+      throw new ConflictError('Add at least one week before submitting for review.', 400);
+    }
+    const nowIso = new Date().toISOString();
+    const updated: SchemeOfWork = {
+      ...existing,
+      status: 'Submitted',
+      parentVisible: false,
+      submittedAt: nowIso,
+      reviewedByUserId: undefined,
+      reviewedByName: undefined,
+      reviewedAt: undefined,
+      reviewFeedback: undefined,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Scheme Submitted: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${updated.teacherName} submitted "${updated.title}" for academic review.`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:scheme-submitted');
+    return updated;
+  }
+
+  reviewSchemeOfWork(
+    tenantId: string,
+    schemeId: string,
+    input: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    },
+    authUser: TenantUser
+  ): SchemeOfWork {
+    this.requireTenant(tenantId);
+    if (!this.isPrivilegedAcademicsActor(authUser)) {
+      throw new ConflictError('Forbidden: Only School Admins can review Schemes of Work.', 403);
+    }
+    if (input.decision !== 'Approved' && input.decision !== 'Revision Requested') {
+      throw new ConflictError('Review decision must be "Approved" or "Revision Requested".', 400);
+    }
+    const feedback = String(input.reviewFeedback || '').trim();
+    if (input.decision === 'Revision Requested' && !feedback) {
+      throw new ConflictError(
+        'Provide revision feedback explaining what needs to be updated.',
+        400
+      );
+    }
+
+    const list = this.state.schemesOfWork || [];
+    const idx = list.findIndex((s) => s.id === schemeId && s.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Scheme of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const nowIso = new Date().toISOString();
+    const nextParentVisible =
+      input.decision === 'Approved'
+        ? typeof input.parentVisible === 'boolean'
+          ? input.parentVisible
+          : existing.parentVisible
+        : false;
+
+    const updated: SchemeOfWork = {
+      ...existing,
+      status: input.decision,
+      parentVisible: nextParentVisible,
+      reviewedByUserId: authUser.id,
+      reviewedByName: authUser.fullName || authUser.email,
+      reviewedAt: nowIso,
+      reviewFeedback: feedback || (input.decision === 'Approved' ? 'Approved for delivery.' : undefined),
+      submittedAt: existing.submittedAt || nowIso,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Scheme ${input.decision}: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${authUser.fullName} marked "${updated.title}" as ${input.decision}${
+        updated.parentVisible ? ' (visible to parents)' : ''
+      }.`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:scheme-reviewed');
+    return updated;
+  }
+
+  setSchemeParentVisibility(
+    tenantId: string,
+    schemeId: string,
+    parentVisible: boolean,
+    authUser: TenantUser
+  ): SchemeOfWork {
+    const tenant = this.requireTenant(tenantId);
+    const list = this.state.schemesOfWork || [];
+    const idx = list.findIndex((s) => s.id === schemeId && s.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Scheme of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only update visibility for your own schemes.', 403);
+      }
+    }
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    if (parentVisible && cfg.requireApprovalForParentVisibility && existing.status !== 'Approved') {
+      throw new ConflictError(
+        'Only Approved Schemes of Work can be shared with parents while approval governance is enabled.',
+        409
+      );
+    }
+
+    const updated: SchemeOfWork = {
+      ...existing,
+      parentVisible: Boolean(parentVisible),
+      updatedAt: new Date().toISOString(),
+    };
+    list[idx] = updated;
+    this.persist();
+    this.syncTenant(tenantId, 'academics:scheme-visibility');
+    return updated;
+  }
+
+  deleteSchemeOfWork(tenantId: string, schemeId: string, authUser: TenantUser): { deleted: true } {
+    this.requireTenant(tenantId);
+    const list = this.state.schemesOfWork || [];
+    const idx = list.findIndex((s) => s.id === schemeId && s.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Scheme of Work not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only delete your own Schemes of Work.', 403);
+      }
+      if (existing.status === 'Approved') {
+        throw new ConflictError(
+          'Approved Schemes of Work cannot be deleted by teachers. Ask a School Admin.',
+          409
+        );
+      }
+    }
+    list.splice(idx, 1);
+    (this.state.lessonPlans || []).forEach((lp) => {
+      if (lp.tenantId === tenantId && lp.schemeOfWorkId === schemeId) {
+        lp.schemeOfWorkId = undefined;
+      }
+    });
+    this.persist();
+    this.syncTenant(tenantId, 'academics:scheme-deleted');
+    return { deleted: true };
+  }
+
+  upsertLessonPlan(
+    tenantId: string,
+    input: {
+      id?: string;
+      schemeOfWorkId?: string;
+      academicYear?: string;
+      term?: string;
+      weekNumber: number;
+      lessonDate: string;
+      periodNumber?: number;
+      durationMinutes?: number;
+      grade?: string;
+      section?: string;
+      subject?: string;
+      teacherId?: string;
+      strand?: string;
+      subStrand?: string;
+      lessonTitle: string;
+      learningOutcomes: string;
+      learningResources?: string;
+      introductionActivity: string;
+      lessonDevelopment: string;
+      conclusionActivity: string;
+      extendedHomework?: string;
+      teacherReflection?: string;
+      parentVisible?: boolean;
+      submitNow?: boolean;
+      status?: AcademicDocumentStatus;
+    },
+    authUser: TenantUser
+  ): LessonPlan {
+    const tenant = this.requireTenant(tenantId);
+    if (!Array.isArray(this.state.lessonPlans)) this.state.lessonPlans = [];
+
+    const existing = input.id
+      ? this.state.lessonPlans.find((l) => l.id === input.id && l.tenantId === tenantId)
+      : undefined;
+    if (input.id && !existing) {
+      throw new ConflictError('Lesson Plan not found.', 404);
+    }
+
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (existing && !isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only edit your own Lesson Plans.', 403);
+      }
+    }
+
+    const linkedScheme = input.schemeOfWorkId
+      ? (this.state.schemesOfWork || []).find(
+          (s) => s.id === input.schemeOfWorkId && s.tenantId === tenantId
+        )
+      : undefined;
+    if (input.schemeOfWorkId && !linkedScheme) {
+      throw new ConflictError('Linked Scheme of Work not found in this school.', 404);
+    }
+
+    const grade = String(input.grade || linkedScheme?.grade || existing?.grade || '').trim();
+    const section = String(input.section || linkedScheme?.section || existing?.section || 'A').trim();
+    const subject = String(input.subject || linkedScheme?.subject || existing?.subject || '').trim();
+    if (!grade || !subject) {
+      throw new ConflictError('Grade and Subject are required for a Lesson Plan.', 400);
+    }
+
+    const teacher = this.resolveAcademicsTeacherActor(
+      tenant,
+      authUser,
+      input.teacherId || existing?.teacherId
+    );
+    if (!isAdmin && teacher) {
+      this.assertTeacherCohortAccessForAcademics(tenant, teacher, grade, section, subject);
+    }
+
+    const weekNumber = Math.max(
+      1,
+      Math.min(14, Math.round(Number(input.weekNumber ?? existing?.weekNumber) || 1))
+    );
+    const lessonDate = String(input.lessonDate || existing?.lessonDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(lessonDate)) {
+      throw new ConflictError('Lesson Date must use YYYY-MM-DD format.', 400);
+    }
+    const durationMinutes = Math.max(
+      15,
+      Math.min(180, Math.round(Number(input.durationMinutes ?? existing?.durationMinutes) || 40))
+    );
+
+    const schemeWeekMatch = linkedScheme?.weeks.find((w) => w.weekNumber === weekNumber);
+    const strand = String(input.strand || schemeWeekMatch?.strand || existing?.strand || '').trim();
+    const subStrand = String(
+      input.subStrand || schemeWeekMatch?.subStrand || existing?.subStrand || ''
+    ).trim();
+    const lessonTitle = String(input.lessonTitle || existing?.lessonTitle || '').trim();
+    const learningOutcomes = String(
+      input.learningOutcomes || schemeWeekMatch?.learningOutcomes || existing?.learningOutcomes || ''
+    ).trim();
+    const introductionActivity = String(
+      input.introductionActivity || existing?.introductionActivity || ''
+    ).trim();
+    const lessonDevelopment = String(
+      input.lessonDevelopment || existing?.lessonDevelopment || ''
+    ).trim();
+    const conclusionActivity = String(
+      input.conclusionActivity || existing?.conclusionActivity || ''
+    ).trim();
+
+    if (
+      !strand ||
+      !subStrand ||
+      !lessonTitle ||
+      !learningOutcomes ||
+      !introductionActivity ||
+      !lessonDevelopment ||
+      !conclusionActivity
+    ) {
+      throw new ConflictError(
+        'Strand, Sub-Strand, Lesson Title, Learning Outcomes, Introduction, Development, and Conclusion are required.',
+        400
+      );
+    }
+
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    const nowIso = new Date().toISOString();
+    let nextStatus: AcademicDocumentStatus;
+    if (isAdmin && input.status) {
+      nextStatus = input.status;
+    } else if (input.submitNow) {
+      nextStatus = 'Submitted';
+    } else if (existing && existing.status === 'Approved' && !isAdmin) {
+      nextStatus = 'Draft';
+    } else if (existing && existing.status !== 'Revision Requested') {
+      nextStatus = existing.status;
+    } else {
+      nextStatus = 'Draft';
+    }
+
+    const rawParentVisible =
+      typeof input.parentVisible === 'boolean'
+        ? input.parentVisible
+        : existing?.parentVisible ?? false;
+    const parentVisible =
+      cfg.requireApprovalForParentVisibility && nextStatus !== 'Approved'
+        ? false
+        : Boolean(rawParentVisible);
+
+    const academicYear = String(
+      input.academicYear || linkedScheme?.academicYear || existing?.academicYear || tenant.academicYear || '2026–2027'
+    ).trim();
+    const term = String(
+      input.term || linkedScheme?.term || existing?.term || tenant.currentTerm || 'Term 1'
+    ).trim();
+    const matchedTerm = (this.state.academicTerms || []).find(
+      (t) => t.tenantId === tenantId && t.name.toLowerCase() === term.toLowerCase()
+    );
+
+    const teacherId = teacher?.id || existing?.teacherId || `staff-${authUser.id}`;
+    const teacherName = teacher?.name || existing?.teacherName || authUser.fullName;
+    const dueDate = addDaysIso(lessonDate, -(cfg.lessonPlanLeadDays || 1));
+
+    const record: LessonPlan = {
+      id: existing?.id || `lp-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      schemeOfWorkId: linkedScheme?.id || (input.schemeOfWorkId === '' ? undefined : existing?.schemeOfWorkId),
+      academicYear,
+      termId: matchedTerm?.id || existing?.termId,
+      term,
+      weekNumber,
+      lessonDate,
+      periodNumber:
+        typeof input.periodNumber === 'number' && Number.isFinite(input.periodNumber)
+          ? Math.max(1, Math.min(12, Math.round(input.periodNumber)))
+          : existing?.periodNumber,
+      durationMinutes,
+      grade,
+      section,
+      subject,
+      teacherId,
+      teacherName,
+      createdByUserId: existing?.createdByUserId || authUser.id,
+      strand,
+      subStrand,
+      lessonTitle,
+      learningOutcomes,
+      learningResources:
+        String(
+          input.learningResources || schemeWeekMatch?.resources || existing?.learningResources || ''
+        ).trim() || 'KICD Learner Book & classroom visual aids',
+      introductionActivity,
+      lessonDevelopment,
+      conclusionActivity,
+      extendedHomework:
+        String(input.extendedHomework ?? existing?.extendedHomework ?? '').trim() || undefined,
+      teacherReflection:
+        String(input.teacherReflection ?? existing?.teacherReflection ?? '').trim() || undefined,
+      status: nextStatus,
+      parentVisible,
+      dueDate: existing?.dueDate || dueDate,
+      submittedAt:
+        nextStatus === 'Submitted'
+          ? existing?.status === 'Submitted' && existing.submittedAt
+            ? existing.submittedAt
+            : nowIso
+          : nextStatus === 'Approved'
+          ? existing?.submittedAt || nowIso
+          : undefined,
+      reviewedByUserId:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedByUserId || authUser.id
+            : existing?.reviewedByUserId
+          : undefined,
+      reviewedByName:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedByName || authUser.fullName
+            : existing?.reviewedByName
+          : undefined,
+      reviewedAt:
+        nextStatus === 'Approved'
+          ? isAdmin
+            ? existing?.reviewedAt || nowIso
+            : existing?.reviewedAt
+          : undefined,
+      reviewFeedback:
+        nextStatus === 'Draft' || nextStatus === 'Submitted'
+          ? undefined
+          : existing?.reviewFeedback,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (existing) {
+      const idx = this.state.lessonPlans.findIndex((l) => l.id === existing.id);
+      if (idx !== -1) this.state.lessonPlans[idx] = record;
+    } else {
+      this.state.lessonPlans.unshift(record);
+    }
+
+    this.persist();
+    if (record.status === 'Submitted' && existing?.status !== 'Submitted') {
+      this.pushNotification(
+        tenantId,
+        'academics',
+        `Lesson Plan Submitted: ${record.grade} ${record.section} ${record.subject}`,
+        `${record.teacherName} submitted Week ${record.weekNumber} lesson plan "${record.lessonTitle}".`,
+        'academics'
+      );
+    }
+    this.syncTenant(tenantId, 'academics:lesson-plan-saved');
+    return record;
+  }
+
+  submitLessonPlan(tenantId: string, lessonPlanId: string, authUser: TenantUser): LessonPlan {
+    this.requireTenant(tenantId);
+    const list = this.state.lessonPlans || [];
+    const idx = list.findIndex((l) => l.id === lessonPlanId && l.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Plan not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only submit your own Lesson Plans.', 403);
+      }
+    }
+    const nowIso = new Date().toISOString();
+    const updated: LessonPlan = {
+      ...existing,
+      status: 'Submitted',
+      parentVisible: false,
+      submittedAt: nowIso,
+      reviewedByUserId: undefined,
+      reviewedByName: undefined,
+      reviewedAt: undefined,
+      reviewFeedback: undefined,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Lesson Plan Submitted: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${updated.teacherName} submitted Week ${updated.weekNumber} lesson plan "${updated.lessonTitle}".`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:lesson-plan-submitted');
+    return updated;
+  }
+
+  reviewLessonPlan(
+    tenantId: string,
+    lessonPlanId: string,
+    input: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    },
+    authUser: TenantUser
+  ): LessonPlan {
+    this.requireTenant(tenantId);
+    if (!this.isPrivilegedAcademicsActor(authUser)) {
+      throw new ConflictError('Forbidden: Only School Admins can review Lesson Plans.', 403);
+    }
+    if (input.decision !== 'Approved' && input.decision !== 'Revision Requested') {
+      throw new ConflictError('Review decision must be "Approved" or "Revision Requested".', 400);
+    }
+    const feedback = String(input.reviewFeedback || '').trim();
+    if (input.decision === 'Revision Requested' && !feedback) {
+      throw new ConflictError(
+        'Provide revision feedback explaining what needs to be updated.',
+        400
+      );
+    }
+
+    const list = this.state.lessonPlans || [];
+    const idx = list.findIndex((l) => l.id === lessonPlanId && l.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Plan not found.', 404);
+    }
+    const existing = list[idx];
+    const nowIso = new Date().toISOString();
+    const nextParentVisible =
+      input.decision === 'Approved'
+        ? typeof input.parentVisible === 'boolean'
+          ? input.parentVisible
+          : existing.parentVisible
+        : false;
+
+    const updated: LessonPlan = {
+      ...existing,
+      status: input.decision,
+      parentVisible: nextParentVisible,
+      reviewedByUserId: authUser.id,
+      reviewedByName: authUser.fullName || authUser.email,
+      reviewedAt: nowIso,
+      reviewFeedback: feedback || (input.decision === 'Approved' ? 'Approved for delivery.' : undefined),
+      submittedAt: existing.submittedAt || nowIso,
+      updatedAt: nowIso,
+    };
+    list[idx] = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      `Lesson Plan ${input.decision}: ${updated.grade} ${updated.section} ${updated.subject}`,
+      `${authUser.fullName} marked Week ${updated.weekNumber} "${updated.lessonTitle}" as ${input.decision}${
+        updated.parentVisible ? ' (visible to parents)' : ''
+      }.`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:lesson-plan-reviewed');
+    return updated;
+  }
+
+  setLessonPlanParentVisibility(
+    tenantId: string,
+    lessonPlanId: string,
+    parentVisible: boolean,
+    authUser: TenantUser
+  ): LessonPlan {
+    const tenant = this.requireTenant(tenantId);
+    const list = this.state.lessonPlans || [];
+    const idx = list.findIndex((l) => l.id === lessonPlanId && l.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Plan not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError(
+          'Forbidden: You can only update parent visibility for your own lesson plans.',
+          403
+        );
+      }
+    }
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    if (parentVisible && cfg.requireApprovalForParentVisibility && existing.status !== 'Approved') {
+      throw new ConflictError(
+        'Only Approved Lesson Plans can be shared with parents while approval governance is enabled.',
+        409
+      );
+    }
+    const updated: LessonPlan = {
+      ...existing,
+      parentVisible: Boolean(parentVisible),
+      updatedAt: new Date().toISOString(),
+    };
+    list[idx] = updated;
+    this.persist();
+    this.syncTenant(tenantId, 'academics:lesson-plan-visibility');
+    return updated;
+  }
+
+  deleteLessonPlan(tenantId: string, lessonPlanId: string, authUser: TenantUser): { deleted: true } {
+    this.requireTenant(tenantId);
+    const list = this.state.lessonPlans || [];
+    const idx = list.findIndex((l) => l.id === lessonPlanId && l.tenantId === tenantId);
+    if (idx === -1) {
+      throw new ConflictError('Lesson Plan not found.', 404);
+    }
+    const existing = list[idx];
+    const isAdmin = this.isPrivilegedAcademicsActor(authUser);
+    if (!isAdmin) {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && existing.teacherId === ownTeacher.id) ||
+        existing.createdByUserId === authUser.id;
+      if (!isOwner) {
+        throw new ConflictError('Forbidden: You can only delete your own Lesson Plans.', 403);
+      }
+      if (existing.status === 'Approved') {
+        throw new ConflictError(
+          'Approved Lesson Plans cannot be deleted by teachers. Ask a School Admin.',
+          409
+        );
+      }
+    }
+    list.splice(idx, 1);
+    this.persist();
+    this.syncTenant(tenantId, 'academics:lesson-plan-deleted');
+    return { deleted: true };
+  }
+
+  updateAcademicSubmissionConfig(
+    tenantId: string,
+    patch: Partial<AcademicSubmissionDeadlineConfig>,
+    authUser: TenantUser
+  ): AcademicSubmissionDeadlineConfig {
+    const tenant = this.requireTenant(tenantId);
+    if (!this.isPrivilegedAcademicsActor(authUser)) {
+      throw new ConflictError(
+        'Forbidden: Only School Admins can update academic submission deadlines.',
+        403
+      );
+    }
+    const current = getDefaultAcademicSubmissionConfig(tenant);
+    const nextSchemeDue =
+      patch.schemeDueDate !== undefined ? String(patch.schemeDueDate).trim() : current.schemeDueDate;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextSchemeDue)) {
+      throw new ConflictError('Scheme Due Date must use YYYY-MM-DD format.', 400);
+    }
+    const nextLeadDays =
+      patch.lessonPlanLeadDays !== undefined
+        ? Math.max(0, Math.min(14, Math.round(Number(patch.lessonPlanLeadDays) || 0)))
+        : current.lessonPlanLeadDays;
+    const nextCadence =
+      patch.lessonPlanCadence === 'Daily'
+        ? 'Daily'
+        : patch.lessonPlanCadence === 'Weekly'
+        ? 'Weekly'
+        : current.lessonPlanCadence;
+    const nextWeek =
+      patch.currentWeekNumber !== undefined
+        ? Math.max(1, Math.min(14, Math.round(Number(patch.currentWeekNumber) || 1)))
+        : current.currentWeekNumber;
+    const nextRequireApproval =
+      typeof patch.requireApprovalForParentVisibility === 'boolean'
+        ? patch.requireApprovalForParentVisibility
+        : current.requireApprovalForParentVisibility;
+
+    const updated: AcademicSubmissionDeadlineConfig = {
+      schemeDueDate: nextSchemeDue,
+      lessonPlanLeadDays: nextLeadDays,
+      lessonPlanCadence: nextCadence,
+      currentWeekNumber: nextWeek,
+      requireApprovalForParentVisibility: nextRequireApproval,
+    };
+    tenant.academicSubmissionConfig = updated;
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'academics',
+      'Academic Submission Deadlines Updated',
+      `${authUser.fullName} updated Scheme due date (${nextSchemeDue}) and Active Week (Week ${nextWeek}).`,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:config-updated');
+    return updated;
+  }
+
+  sendAcademicSubmissionReminder(
+    tenantId: string,
+    input: { teacherIds?: string[]; targetLabel?: string; message?: string },
+    authUser: TenantUser
+  ): { ok: true; recipientCount: number; notification: NotificationItem } {
+    const tenant = this.requireTenant(tenantId);
+    if (!this.isPrivilegedAcademicsActor(authUser)) {
+      throw new ConflictError('Forbidden: Only School Admins can send submission reminders.', 403);
+    }
+    const validTeacherIds = Array.isArray(input.teacherIds)
+      ? input.teacherIds.filter((id) => tenant.teachers.some((t) => t.id === id))
+      : [];
+    const recipientCount = validTeacherIds.length > 0 ? validTeacherIds.length : tenant.teachers.length;
+    const targetNames =
+      validTeacherIds.length > 0
+        ? tenant.teachers
+            .filter((t) => validTeacherIds.includes(t.id))
+            .map((t) => t.name)
+            .slice(0, 3)
+            .join(', ')
+        : input.targetLabel?.trim() || `${recipientCount} teaching staff`;
+    const cfg = getDefaultAcademicSubmissionConfig(tenant);
+    const customMsg = String(input.message || '').trim();
+    const description =
+      customMsg ||
+      `Reminder to ${targetNames}${validTeacherIds.length > 3 ? ` (+${validTeacherIds.length - 3} more)` : ''}: submit pending Schemes of Work and Week ${cfg.currentWeekNumber} Lesson Plans before review cutoff (${cfg.schemeDueDate}).`;
+
+    const notification = this.pushNotification(
+      tenantId,
+      'academics',
+      'Teacher Academics Submission Reminder',
+      description,
+      'academics'
+    );
+    this.syncTenant(tenantId, 'academics:reminder-sent');
+    return { ok: true, recipientCount, notification };
   }
 }

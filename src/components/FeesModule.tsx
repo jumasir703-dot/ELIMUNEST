@@ -74,8 +74,8 @@ import {
 interface FeesModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
-  canEdit?: boolean;
   embeddedInHub?: boolean;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -83,8 +83,8 @@ interface FeesModuleProps {
 export function FeesModule({
   workspace,
   currentRole,
-  canEdit = true,
   embeddedInHub = false,
+  readOnly = false,
   onRefresh,
   onNotify,
 }: FeesModuleProps) {
@@ -95,13 +95,12 @@ export function FeesModule({
   );
   const whatsappDispatches = workspace.whatsappDispatches || [];
   const canManageFees =
-    canEdit &&
+    !readOnly &&
     (currentRole === 'Admin' ||
       currentRole === 'Bursar' ||
       currentRole === 'Super Admin' ||
       currentRole === 'Developer');
-  const canSwitchCurrency =
-    canEdit && (currentRole === 'Admin' || currentRole === 'Super Admin');
+  const canSwitchCurrency = !readOnly && (currentRole === 'Admin' || currentRole === 'Super Admin');
   const currentTermEntity = useMemo(() => {
     const terms = workspace.academicTerms || [];
     return (
@@ -128,6 +127,7 @@ export function FeesModule({
   const [ivlGradeFilter, setIvlGradeFilter] = useState<string>('All');
   const [ivlStreamFilter, setIvlStreamFilter] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
+  const [invoicePage, setInvoicePage] = useState(1);
 
   const [paymentModalInvoice, setPaymentModalInvoice] = useState<FeeInvoice | null>(null);
   const [receiptInvoice, setReceiptInvoice] = useState<FeeInvoice | null>(null);
@@ -698,12 +698,8 @@ export function FeesModule({
   ]);
 
   const INVOICES_PAGE_SIZE = 50;
-  const [invoicePage, setInvoicePage] = useState(1);
-  useEffect(() => {
-    setInvoicePage(1);
-  }, [statusFilter, invoiceGradeFilter, invoiceStreamFilter, searchQuery, tenant.id]);
-  const totalInvoicePages = Math.max(1, Math.ceil(filteredInvoices.length / INVOICES_PAGE_SIZE));
-  const safeInvoicePage = Math.min(invoicePage, totalInvoicePages);
+  const invoiceTotalPages = Math.max(1, Math.ceil(filteredInvoices.length / INVOICES_PAGE_SIZE));
+  const safeInvoicePage = Math.min(invoicePage, invoiceTotalPages);
   const paginatedInvoices = useMemo(
     () =>
       filteredInvoices.slice(
@@ -712,6 +708,10 @@ export function FeesModule({
       ),
     [filteredInvoices, safeInvoicePage]
   );
+
+  useEffect(() => {
+    setInvoicePage(1);
+  }, [tenant.id, statusFilter, invoiceGradeFilter, invoiceStreamFilter, searchQuery]);
 
   const independentMetrics = useMemo(() => {
     const totalCharged = independentVotelines.reduce((sum, v) => sum + v.amount, 0);
@@ -1933,7 +1933,7 @@ export function FeesModule({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {paginatedInvoices.length === 0 ? (
+                  {filteredInvoices.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                         No invoices match your filter.
@@ -2136,8 +2136,8 @@ export function FeesModule({
               </table>
             </div>
             {filteredInvoices.length > INVOICES_PAGE_SIZE && (
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-400">
-                <span className="tabular-nums">
+              <div className="flex flex-col gap-2 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:text-slate-400">
+                <span className="font-mono tabular-nums">
                   Showing {(safeInvoicePage - 1) * INVOICES_PAGE_SIZE + 1}–
                   {Math.min(safeInvoicePage * INVOICES_PAGE_SIZE, filteredInvoices.length)} of{' '}
                   {filteredInvoices.length} invoices
@@ -2147,18 +2147,18 @@ export function FeesModule({
                     type="button"
                     disabled={safeInvoicePage <= 1}
                     onClick={() => setInvoicePage((p) => Math.max(1, p - 1))}
-                    className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                    className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                   >
                     Previous
                   </button>
                   <span className="font-mono tabular-nums">
-                    Page {safeInvoicePage} / {totalInvoicePages}
+                    Page {safeInvoicePage} / {invoiceTotalPages}
                   </span>
                   <button
                     type="button"
-                    disabled={safeInvoicePage >= totalInvoicePages}
-                    onClick={() => setInvoicePage((p) => Math.min(totalInvoicePages, p + 1))}
-                    className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                    disabled={safeInvoicePage >= invoiceTotalPages}
+                    onClick={() => setInvoicePage((p) => Math.min(invoiceTotalPages, p + 1))}
+                    className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                   >
                     Next
                   </button>

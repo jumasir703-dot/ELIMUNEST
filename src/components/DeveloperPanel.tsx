@@ -2355,6 +2355,7 @@ export function DeveloperPanel({
                             <option value="Registrar">Registrar</option>
                             <option value="Teacher">Teacher</option>
                             <option value="Bursar">Bursar</option>
+                            <option value="Budget Approver">Budget Approver</option>
                           </select>
                           <input
                             type="text"

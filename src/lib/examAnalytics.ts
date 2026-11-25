@@ -363,8 +363,22 @@ export function buildBroadsheetRows(params: {
     new Set([...levelSubjects, ...activeResults.map((r) => r.subject)])
   );
 
+  const activeByStudent = new Map<string, ExamResult[]>();
+  for (const r of activeResults) {
+    const arr = activeByStudent.get(r.studentId);
+    if (arr) arr.push(r);
+    else activeByStudent.set(r.studentId, [r]);
+  }
+  const baselineByStudent = new Map<string, ExamResult[]>();
+  for (const r of baselineResults) {
+    if (isNonSatExamResult(r)) continue;
+    const arr = baselineByStudent.get(r.studentId);
+    if (arr) arr.push(r);
+    else baselineByStudent.set(r.studentId, [r]);
+  }
+
   const base = students.map((stu) => {
-    const stuResults = activeResults.filter((r) => r.studentId === stu.id);
+    const stuResults = activeByStudent.get(stu.id) || [];
     const stuScoredResults = stuResults.filter((r) => !isNonSatExamResult(r));
     const subjectMap: BroadsheetStudentRow['subjectMap'] = {};
     let pointsSum = 0;
@@ -407,17 +421,19 @@ export function buildBroadsheetRows(params: {
     const overallGradeInfo =
       meanScore !== null ? computeClientGrade(meanScore, stu.grade) : null;
 
+    const stuTargetSubjects =
+      Array.isArray(stu.registeredSubjects) && stu.registeredSubjects.length > 0
+        ? stu.registeredSubjects
+        : levelSubjects;
     const recordedLower = new Set(stuResults.map((r) => r.subject.trim().toLowerCase()));
-    const missingSubjects = registeredSubjects.filter(
+    const missingSubjects = stuTargetSubjects.filter(
       (sub) => !recordedLower.has(sub.trim().toLowerCase())
     );
 
     const kcseBest7 = computeKcseBest7(stuScoredResults, stu.grade);
 
     // Baseline comparison
-    const prevResults = baselineResults.filter(
-      (r) => r.studentId === stu.id && !isNonSatExamResult(r)
-    );
+    const prevResults = baselineByStudent.get(stu.id) || [];
     let prevMeanScore: number | null = null;
     let prevMeanPoints: number | null = null;
     if (prevResults.length > 0) {

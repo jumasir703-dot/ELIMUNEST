@@ -281,6 +281,7 @@ export function ReconciliationPanel({
         <MpesaIntegrationPanel
           workspace={workspace}
           currentRole={actorRole as UserRole}
+          readOnly={!canManage}
           onRefresh={onRefresh}
           onNotify={onNotify}
         />

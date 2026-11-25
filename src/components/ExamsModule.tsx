@@ -60,7 +60,7 @@ import { ZerakiExamAnalyticsPanel } from './ZerakiExamAnalyticsPanel';
 interface ExamsModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
-  canEdit?: boolean;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -96,7 +96,7 @@ function getGradeBadgeColor(letterGrade: string, is844: boolean): string {
 export function ExamsModule({
   workspace,
   currentRole = 'Teacher',
-  canEdit = true,
+  readOnly = false,
   onRefresh,
   onNotify,
 }: ExamsModuleProps) {
@@ -111,9 +111,7 @@ export function ExamsModule({
 
   const [activeTab, setActiveTab] = useState<'results' | 'analytics' | 'entry'>('results');
   const [selectedCycleId, setSelectedCycleId] = useState<string>(
-    [...orderedCycles].reverse().find((c) => /mid[- ]?term/i.test(c.title))?.id ||
-      orderedCycles[orderedCycles.length - 1]?.id ||
-      ''
+    orderedCycles.find((c) => /mid[- ]?term/i.test(c.title))?.id || orderedCycles[0]?.id || ''
   );
   const [selectedGrade, setSelectedGrade] = useState<string>(defaultGrade);
   const [selectedStream, setSelectedStream] = useState<string>('All');
@@ -133,9 +131,10 @@ export function ExamsModule({
   const [queueStreamFilter, setQueueStreamFilter] = useState<string>('All');
   const [queueSelectedStudentId, setQueueSelectedStudentId] = useState<string | null>(null);
   const isAdminRole =
-    canEdit &&
+    !readOnly &&
     (currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer');
-  const isParentRole = !canEdit || currentRole === 'Parent' || currentRole === 'Student';
+  const isParentRole = currentRole === 'Parent' || currentRole === 'Student';
+  const isReadOnlyViewer = Boolean(readOnly) || isParentRole;
 
   const [showCycleModal, setShowCycleModal] = useState(false);
   const [showUnlockModal, setShowUnlockModal] = useState(false);
@@ -457,7 +456,7 @@ export function ExamsModule({
     rawVal: string,
     resultStatus: ExamResultStatus = 'Scored'
   ) {
-    if (!activeCycle || isAllSubjectsMode || isParentRole) return;
+    if (!activeCycle || isAllSubjectsMode || isReadOnlyViewer) return;
     if (isCycleTermClosed) {
       onNotify(
         `Term "${activeCycleTerm?.name || activeCycle.term}" is Closed. Reopen the term in School Settings before editing marks.`,
@@ -913,7 +912,7 @@ export function ExamsModule({
               <BarChart3 className="h-3.5 w-3.5" />
               Class Analytics
             </button>
-            {!isParentRole && (
+            {!isReadOnlyViewer && (
               <button
                 type="button"
                 onClick={() => setActiveTab('entry')}
@@ -928,7 +927,7 @@ export function ExamsModule({
               </button>
             )}
           </div>
-          {!isParentRole && (
+          {!isReadOnlyViewer && (
             <button
               onClick={() => {
                 setQueueStreamFilter(effectiveStreamFilter);
@@ -942,7 +941,7 @@ export function ExamsModule({
               WhatsApp &amp; SMS Dispatch
             </button>
           )}
-          {!isParentRole && (
+          {!isReadOnlyViewer && (
             <button
               onClick={() => setShowCycleModal(true)}
               className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
@@ -988,12 +987,6 @@ export function ExamsModule({
         </div>
       </div>
 
-      {!canEdit && currentRole !== 'Parent' && currentRole !== 'Student' && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
-          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Exams &amp; Grades. Mark entry, creating cycles, publishing results, and parent dispatches are disabled.
-        </div>
-      )}
-
       {isCycleTermClosed && (
         <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
           <Lock className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" />
@@ -1006,7 +999,7 @@ export function ExamsModule({
         </div>
       )}
 
-      {activeTab === 'entry' ? (
+      {activeTab === 'entry' && !isReadOnlyViewer ? (
         <ExamResultsEntryPanel
           workspace={workspace}
           currentRole={currentRole}
@@ -1031,17 +1024,17 @@ export function ExamsModule({
             setSelectedGrade(g);
             setSelectedStream('All');
           }}
-          onJumpToMarkEntry={
-            isParentRole
-              ? undefined
-              : (target) => {
-                  setEntryPrefillTarget({
-                    ...target,
-                    requestKey: Date.now(),
-                  });
-                  setActiveTab('entry');
-                }
-          }
+          onJumpToMarkEntry={(target) => {
+            if (isReadOnlyViewer) {
+              onNotify('Read-Only access: exam score entry is disabled.', 'error');
+              return;
+            }
+            setEntryPrefillTarget({
+              ...target,
+              requestKey: Date.now(),
+            });
+            setActiveTab('entry');
+          }}
           onOpenReportCard={(studentId) => openReportCardModal(studentId, false)}
           onNotify={onNotify}
         />
@@ -1380,7 +1373,7 @@ export function ExamsModule({
                             <FileText className="h-3.5 w-3.5" />
                             Report Card
                           </button>
-                          {!isParentRole && (
+                          {!isReadOnlyViewer && (
                             <button
                               type="button"
                               onClick={() => openReportCardModal(row.student.id, true)}
@@ -1424,7 +1417,7 @@ export function ExamsModule({
                   singleSubjectRows.map((row) => {
                     const key = `${row.student.id}:${effectiveSubject}`;
                     const cycleLocked =
-                      activeCycle?.status === 'Published' || isCycleTermClosed || isParentRole;
+                      activeCycle?.status === 'Published' || isCycleTermClosed || isReadOnlyViewer;
                     const inputVal =
                       draftScores[key] !== undefined
                         ? draftScores[key]
@@ -1536,7 +1529,7 @@ export function ExamsModule({
                               <FileText className="h-3.5 w-3.5" />
                               Report Card
                             </button>
-                            {!isParentRole && (
+                            {!isReadOnlyViewer && (
                               <button
                                 type="button"
                                 onClick={() => openReportCardModal(row.student.id, true)}

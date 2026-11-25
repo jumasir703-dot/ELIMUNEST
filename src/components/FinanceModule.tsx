@@ -53,7 +53,7 @@ import {
 interface FinanceModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
-  canEdit?: boolean;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -113,7 +113,7 @@ function getStatusBadgeClass(status: ExpenseStatus): string {
 export function FinanceModule({
   workspace,
   currentRole,
-  canEdit = true,
+  readOnly = false,
   onRefresh,
   onNotify,
 }: FinanceModuleProps) {
@@ -163,14 +163,16 @@ export function FinanceModule({
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditSearch, setAuditSearch] = useState('');
 
-  const hasEditAccess = canEdit && currentRole !== 'Parent' && currentRole !== 'Student';
   const canManageExpenses =
-    hasEditAccess &&
-    (currentRole === 'Super Admin' ||
-      currentRole === 'Admin' ||
-      currentRole === 'Bursar' ||
-      currentRole === 'Developer');
-  const canApproveBudgets = currentRole === 'Budget Approver' || canManageExpenses;
+    !readOnly &&
+    (currentRole === 'Super Admin' || currentRole === 'Admin' || currentRole === 'Bursar');
+  const canApproveBudgets =
+    currentRole === 'Budget Approver' ||
+    (!readOnly &&
+      (currentRole === 'Admin' ||
+        currentRole === 'Super Admin' ||
+        currentRole === 'Developer' ||
+        currentRole === 'Bursar'));
   const canViewAudit =
     currentRole === 'Admin' || currentRole === 'Super Admin' || currentRole === 'Developer';
 
@@ -738,35 +740,13 @@ export function FinanceModule({
         </div>
       </div>
 
-      {!hasEditAccess && currentRole !== 'Parent' && currentRole !== 'Student' && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
-          {currentRole === 'Budget Approver' ? (
-            <>
-              <span className="font-semibold">Budget Approver Access:</span> Financial ledgers, fee billing, and expensing are read-only. Use the{' '}
-              <button
-                type="button"
-                onClick={() => setSubModule('budgets')}
-                className="font-semibold underline hover:text-amber-950 dark:hover:text-amber-100"
-              >
-                Budgets
-              </button>{' '}
-              tab to approve or reject pending budget voteheads.
-            </>
-          ) : (
-            <>
-              <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Finance &amp; Accounting. Editing fee structures, recording vouchers, payroll, and budgets are disabled.
-            </>
-          )}
-        </div>
-      )}
-
       {/* Active Sub-Module Content */}
       {subModule === 'fees' && (
         <FeesModule
           workspace={workspace}
           currentRole={currentRole}
-          canEdit={hasEditAccess}
           embeddedInHub
+          readOnly={readOnly}
           onRefresh={onRefresh}
           onNotify={onNotify}
         />
@@ -806,7 +786,7 @@ export function FinanceModule({
         <BudgetTrackingPanel
           workspace={workspace}
           canManage={canManageExpenses}
-          canApprove={canApproveBudgets}
+          canApproveBudgets={canApproveBudgets}
           actorRole={currentRole}
           onRefresh={onRefresh}
           onNotify={onNotify}

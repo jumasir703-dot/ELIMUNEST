@@ -31,7 +31,7 @@ import {
 interface AttendanceModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
-  canEdit?: boolean;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -60,7 +60,7 @@ function formatOfficialDate(isoDate: string): string {
 export function AttendanceModule({
   workspace,
   currentRole,
-  canEdit = true,
+  readOnly = false,
   onRefresh,
   onNotify,
 }: AttendanceModuleProps) {
@@ -73,9 +73,9 @@ export function AttendanceModule({
     timetable = [],
   } = workspace;
 
-  const isAdmin = canEdit && (currentRole === 'Admin' || currentRole === 'Super Admin');
-  const isTeacherRole = canEdit && currentRole === 'Teacher';
-  const isReadOnlyViewer = !canEdit || currentRole === 'Parent' || currentRole === 'Student';
+  const isAdmin = !readOnly && (currentRole === 'Admin' || currentRole === 'Super Admin');
+  const isTeacherRole = !readOnly && currentRole === 'Teacher';
+  const isReadOnlyViewer = Boolean(readOnly) || currentRole === 'Parent' || currentRole === 'Student';
 
   const defaultGrade = tenant.grades.includes('Grade 9')
     ? 'Grade 9'
@@ -96,6 +96,7 @@ export function AttendanceModule({
   const [nonTeachingDept, setNonTeachingDept] = useState<string>('All');
   const [summaryGradeFilter, setSummaryGradeFilter] = useState<string>('All');
   const [summaryStreamFilter, setSummaryStreamFilter] = useState<string>('All');
+  const [summaryPage, setSummaryPage] = useState(1);
   const [saving, setSaving] = useState(false);
 
   // Add Non-Teaching Staff inline form (Admin only)
@@ -329,8 +330,15 @@ export function AttendanceModule({
         )
       : [];
 
+    const attendanceByStudent = new Map<string, typeof attendance>();
+    attendance.forEach((r) => {
+      const list = attendanceByStudent.get(r.studentId);
+      if (list) list.push(r);
+      else attendanceByStudent.set(r.studentId, [r]);
+    });
+
     return scoped.map((stu) => {
-      const recs = attendance.filter((r) => r.studentId === stu.id);
+      const recs = attendanceByStudent.get(stu.id) || [];
       const total = recs.length;
       const present = recs.filter(
         (r) => r.status === 'Present' || r.status === 'Late'
@@ -388,6 +396,22 @@ export function AttendanceModule({
       return true;
     });
   }, [studentSummary, summaryGradeFilter, summaryStreamFilter]);
+
+  const SUMMARY_PAGE_SIZE = 50;
+  const summaryTotalPages = Math.max(1, Math.ceil(filteredStudentSummary.length / SUMMARY_PAGE_SIZE));
+  const safeSummaryPage = Math.min(summaryPage, summaryTotalPages);
+  const paginatedStudentSummary = useMemo(
+    () =>
+      filteredStudentSummary.slice(
+        (safeSummaryPage - 1) * SUMMARY_PAGE_SIZE,
+        safeSummaryPage * SUMMARY_PAGE_SIZE
+      ),
+    [filteredStudentSummary, safeSummaryPage]
+  );
+
+  useEffect(() => {
+    setSummaryPage(1);
+  }, [tenant.id, summaryGradeFilter, summaryStreamFilter]);
 
   const summaryAverageRate = useMemo(() => {
     if (filteredStudentSummary.length === 0) return 100;
@@ -1092,12 +1116,6 @@ export function AttendanceModule({
           </div>
         </div>
       </div>
-
-      {!canEdit && currentRole !== 'Parent' && currentRole !== 'Student' && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
-          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Attendance. Marking roll calls and issuing leave-out chits are disabled.
-        </div>
-      )}
 
       {isDateTermClosed && !isReadOnlyViewer && (
         <div className="flex items-start gap-2.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
@@ -2501,7 +2519,7 @@ export function AttendanceModule({
                     </td>
                   </tr>
                 ) : (
-                  filteredStudentSummary.map(({ student, total, absent, rate, activeChit }) => (
+                  paginatedStudentSummary.map(({ student, total, absent, rate, activeChit }) => (
                     <tr
                       key={student.id}
                       className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30"
@@ -2545,6 +2563,36 @@ export function AttendanceModule({
               </tbody>
             </table>
           </div>
+          {filteredStudentSummary.length > SUMMARY_PAGE_SIZE && (
+            <div className="flex flex-col gap-2 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:text-slate-400">
+              <span className="font-mono tabular-nums">
+                Showing {(safeSummaryPage - 1) * SUMMARY_PAGE_SIZE + 1}–
+                {Math.min(safeSummaryPage * SUMMARY_PAGE_SIZE, filteredStudentSummary.length)} of{' '}
+                {filteredStudentSummary.length} students
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={safeSummaryPage <= 1}
+                  onClick={() => setSummaryPage((p) => Math.max(1, p - 1))}
+                  className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                >
+                  Previous
+                </button>
+                <span className="font-mono tabular-nums">
+                  Page {safeSummaryPage} / {summaryTotalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={safeSummaryPage >= summaryTotalPages}
+                  onClick={() => setSummaryPage((p) => Math.min(summaryTotalPages, p + 1))}
+                  className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

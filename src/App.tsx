@@ -4,6 +4,7 @@ import {
   ArrowRight,
   BarChart3,
   Bell,
+  BookOpen,
   Building2,
   CalendarClock,
   CheckSquare,
@@ -54,6 +55,9 @@ const SettingsModule = lazy(() =>
 const SuperAdminModule = lazy(() =>
   import('./components/SuperAdminModule').then((m) => ({ default: m.SuperAdminModule }))
 );
+const TeacherAcademicsModule = lazy(() =>
+  import('./components/TeacherAcademicsModule').then((m) => ({ default: m.TeacherAcademicsModule }))
+);
 const TimetableModule = lazy(() =>
   import('./components/TimetableModule').then((m) => ({ default: m.TimetableModule }))
 );
@@ -72,9 +76,9 @@ import {
   resolveTenantSidebarTheme,
 } from './lib/theme';
 import {
-  canEditModule,
   DEFAULT_TENANT_BRANDING,
   getEffectiveUserModules,
+  getModuleAccessLevel,
   PASSWORD_MIN_LENGTH,
   validatePasswordStrength,
   type AuthSessionInfo,
@@ -92,6 +96,7 @@ type ModuleId =
   | 'timetable'
   | 'attendance'
   | 'exams'
+  | 'academics'
   | 'fees'
   | 'communications'
   | 'settings'
@@ -103,6 +108,7 @@ const NAV_ITEMS: Array<{ id: ModuleId; label: string; icon: typeof BarChart3; ad
   { id: 'timetable', label: 'Timetable', icon: CalendarClock },
   { id: 'attendance', label: 'Attendance', icon: CheckSquare },
   { id: 'exams', label: 'Exams & Grades', icon: GraduationCap },
+  { id: 'academics', label: 'Teacher Academics', icon: BookOpen },
   { id: 'fees', label: 'Finance & Accounting', icon: Landmark },
   { id: 'communications', label: 'Communications', icon: MessageSquare },
   { id: 'settings', label: 'School Settings', icon: Settings },
@@ -208,6 +214,13 @@ export default function App() {
     () => getEffectiveUserModules(authSession?.user),
     [authSession?.user]
   );
+  const activeModuleAccess =
+    activeModule === 'super-admin'
+      ? canAccessSuperAdmin
+        ? 'edit'
+        : 'none'
+      : getModuleAccessLevel(authSession?.user, activeModule as TenantModulePermission);
+  const isActiveModuleReadOnly = activeModuleAccess === 'read';
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1057,6 +1070,22 @@ export default function App() {
             </div>
           ) : workspace ? (
             <div key={workspace.tenant.id}>
+              {isActiveModuleReadOnly &&
+                currentRole !== 'Parent' &&
+                currentRole !== 'Student' && (
+                  <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50/80 px-4 py-2.5 text-xs text-amber-950 no-print dark:border-amber-800/70 dark:bg-amber-950/40 dark:text-amber-200">
+                    <span>
+                      <strong className="font-semibold">
+                        {activeModule === 'fees' && currentRole === 'Budget Approver'
+                          ? 'Budget Approver Access (Finance Read-Only + Budget Sign-Off):'
+                          : 'Read-Only Access:'}
+                      </strong>{' '}
+                      {activeModule === 'fees' && currentRole === 'Budget Approver'
+                        ? 'You can inspect all Finance reports and approve or reject departmental budgets under the Budgets tab. Fee billing, expense creation, and payroll edits remain restricted.'
+                        : `Your account has Read-Only access to ${activeNavLabel}. Viewing and exports are enabled; create, edit, and delete actions are disabled.`}
+                    </span>
+                  </div>
+                )}
               <Suspense
                 fallback={
                   <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
@@ -1074,7 +1103,7 @@ export default function App() {
                 {activeModule === 'admissions' && effectiveModules.includes('admissions') && (
                   <AdmissionsModule
                     workspace={workspace}
-                    canEdit={canEditModule(authSession.user, 'admissions')}
+                    readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1083,7 +1112,7 @@ export default function App() {
                   <TimetableModule
                     workspace={workspace}
                     currentRole={currentRole}
-                    canEdit={canEditModule(authSession.user, 'timetable')}
+                    readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1092,7 +1121,7 @@ export default function App() {
                   <AttendanceModule
                     workspace={workspace}
                     currentRole={currentRole}
-                    canEdit={canEditModule(authSession.user, 'attendance')}
+                    readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1101,7 +1130,18 @@ export default function App() {
                   <ExamsModule
                     workspace={workspace}
                     currentRole={currentRole}
-                    canEdit={canEditModule(authSession.user, 'exams')}
+                    readOnly={isActiveModuleReadOnly}
+                    onRefresh={() => loadWorkspace(tenantId, true)}
+                    onNotify={(msg, tone) => pushToast(msg, tone)}
+                  />
+                )}
+                {activeModule === 'academics' && effectiveModules.includes('academics') && (
+                  <TeacherAcademicsModule
+                    workspace={workspace}
+                    currentRole={currentRole}
+                    currentUserId={authSession.user.id}
+                    currentUserEmail={authSession.user.email}
+                    readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1110,7 +1150,7 @@ export default function App() {
                   <FinanceModule
                     workspace={workspace}
                     currentRole={currentRole}
-                    canEdit={canEditModule(authSession.user, 'fees')}
+                    readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1119,7 +1159,7 @@ export default function App() {
                   <CommunicationsModule
                     workspace={workspace}
                     currentRole={currentRole}
-                    canEdit={canEditModule(authSession.user, 'communications')}
+                    readOnly={isActiveModuleReadOnly}
                     wsConnected={wsConnected}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
@@ -1131,7 +1171,7 @@ export default function App() {
                     workspace={workspace}
                     currentRole={currentRole}
                     currentUserId={authSession.user.id}
-                    canEdit={canEditModule(authSession.user, 'settings')}
+                    readOnly={isActiveModuleReadOnly}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onSwitchTenant={(newId) => {
                       if (isPlatformSuperAdmin) {

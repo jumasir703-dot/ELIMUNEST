@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
+  AcademicDocumentStatus,
+  AcademicSubmissionDeadlineConfig,
   AcademicTerm,
   AcademicYear,
   AdminAuditEntry,
@@ -38,10 +40,12 @@ import type {
   ImpersonatorMeta,
   IndependentVotelineItem,
   LeaveOutChit,
+  LessonPlan,
   LifecycleAuditEntry,
   MpesaEnvironment,
   MpesaTransactionLog,
   NonTeachingStaffProfile,
+  NotificationItem,
   OnboardingChecklist,
   OptionalSubjectGroup,
   PayeBand,
@@ -56,6 +60,8 @@ import type {
   ReconciliationChannel,
   ReconciliationLine,
   ReconciliationStatus,
+  SchemeOfWork,
+  SchemeOfWorkWeek,
   SchoolExpense,
   StaffAttendanceRecord,
   StaffCategory,
@@ -453,7 +459,7 @@ export const saasApi = {
       id?: string;
       name: string;
       baseRole: UserRole;
-      defaultModules?: TenantModulePermission[];
+      defaultModules: TenantModulePermission[];
       defaultModuleAccess?: TenantModuleAccessMap;
       description?: string;
       syncExistingUsers?: boolean;
@@ -484,7 +490,7 @@ export const saasApi = {
     tenantId: string,
     role: UserRole,
     payload: {
-      defaultModules?: TenantModulePermission[];
+      defaultModules: TenantModulePermission[];
       defaultModuleAccess?: TenantModuleAccessMap;
       syncExistingUsers?: boolean;
     }
@@ -492,7 +498,7 @@ export const saasApi = {
     return apiRequest<{
       role: UserRole;
       defaultModules: TenantModulePermission[];
-      defaultModuleAccess: TenantModuleAccessMap;
+      defaultModuleAccess?: TenantModuleAccessMap;
       tenant: Tenant;
       updatedUsersCount: number;
     }>(`/api/auth/roles/builtin/${encodeURIComponent(role)}`, {
@@ -817,6 +823,7 @@ export const saasApi = {
       guardianEmail?: string;
       guardianPhone: string;
       enrolledAt?: string;
+      registeredSubjects?: string[];
     }
   ) {
     return apiRequest<{ student: Student; invoice: FeeInvoice }>('/api/students/enroll', {
@@ -841,12 +848,35 @@ export const saasApi = {
       guardianEmail?: string;
       guardianPhone?: string;
       enrolledAt?: string;
+      registeredSubjects?: string[];
     }
   ) {
     return apiRequest<{ student: Student }>(`/api/students/${studentId}`, {
       method: 'PATCH',
       tenantId,
       body: JSON.stringify(patch),
+    });
+  },
+
+  assignStudentSubjects(
+    tenantId: string,
+    payload: {
+      studentIds?: string[];
+      grade?: string;
+      section?: string;
+      subjects: string[];
+      mode?: 'replace' | 'add' | 'remove';
+    }
+  ) {
+    return apiRequest<{
+      updatedCount: number;
+      mode: 'replace' | 'add' | 'remove';
+      subjects: string[];
+      scopeLabel: string;
+    }>('/api/students/assign-subjects', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
     });
   },
 
@@ -2129,6 +2159,196 @@ export const saasApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  // Teacher Academics: Schemes of Work, Lesson Plans, Reviews, Visibility & Deadlines
+  saveSchemeOfWork(
+    tenantId: string,
+    payload: {
+      id?: string;
+      academicYear?: string;
+      term?: string;
+      grade: string;
+      section: string;
+      subject: string;
+      teacherId?: string;
+      title?: string;
+      referenceBook?: string;
+      weeksCount?: number;
+      weeks?: SchemeOfWorkWeek[];
+      autoFillWeeks?: boolean;
+      parentVisible?: boolean;
+      parentSummary?: string;
+      submitNow?: boolean;
+      status?: AcademicDocumentStatus;
+    }
+  ) {
+    const method = payload.id ? 'PUT' : 'POST';
+    const path = payload.id
+      ? `/api/academics/schemes/${encodeURIComponent(payload.id)}`
+      : '/api/academics/schemes';
+    return apiRequest<{ scheme: SchemeOfWork }>(path, {
+      method,
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  submitSchemeOfWork(tenantId: string, schemeId: string) {
+    return apiRequest<{ scheme: SchemeOfWork }>(
+      `/api/academics/schemes/${encodeURIComponent(schemeId)}/submit`,
+      { method: 'POST', tenantId }
+    );
+  },
+
+  reviewSchemeOfWork(
+    tenantId: string,
+    schemeId: string,
+    payload: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    }
+  ) {
+    return apiRequest<{ scheme: SchemeOfWork }>(
+      `/api/academics/schemes/${encodeURIComponent(schemeId)}/review`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  setSchemeParentVisibility(tenantId: string, schemeId: string, parentVisible: boolean) {
+    return apiRequest<{ scheme: SchemeOfWork }>(
+      `/api/academics/schemes/${encodeURIComponent(schemeId)}/parent-visibility`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify({ parentVisible }),
+      }
+    );
+  },
+
+  deleteSchemeOfWork(tenantId: string, schemeId: string) {
+    return apiRequest<{ deleted: boolean }>(
+      `/api/academics/schemes/${encodeURIComponent(schemeId)}`,
+      { method: 'DELETE', tenantId }
+    );
+  },
+
+  saveLessonPlan(
+    tenantId: string,
+    payload: {
+      id?: string;
+      schemeOfWorkId?: string;
+      academicYear?: string;
+      term?: string;
+      weekNumber: number;
+      lessonDate: string;
+      periodNumber?: number;
+      durationMinutes?: number;
+      grade?: string;
+      section?: string;
+      subject?: string;
+      teacherId?: string;
+      strand?: string;
+      subStrand?: string;
+      lessonTitle: string;
+      learningOutcomes: string;
+      learningResources?: string;
+      introductionActivity: string;
+      lessonDevelopment: string;
+      conclusionActivity: string;
+      extendedHomework?: string;
+      teacherReflection?: string;
+      parentVisible?: boolean;
+      submitNow?: boolean;
+      status?: AcademicDocumentStatus;
+    }
+  ) {
+    const method = payload.id ? 'PUT' : 'POST';
+    const path = payload.id
+      ? `/api/academics/lesson-plans/${encodeURIComponent(payload.id)}`
+      : '/api/academics/lesson-plans';
+    return apiRequest<{ lessonPlan: LessonPlan }>(path, {
+      method,
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  submitLessonPlan(tenantId: string, lessonPlanId: string) {
+    return apiRequest<{ lessonPlan: LessonPlan }>(
+      `/api/academics/lesson-plans/${encodeURIComponent(lessonPlanId)}/submit`,
+      { method: 'POST', tenantId }
+    );
+  },
+
+  reviewLessonPlan(
+    tenantId: string,
+    lessonPlanId: string,
+    payload: {
+      decision: 'Approved' | 'Revision Requested';
+      reviewFeedback?: string;
+      parentVisible?: boolean;
+    }
+  ) {
+    return apiRequest<{ lessonPlan: LessonPlan }>(
+      `/api/academics/lesson-plans/${encodeURIComponent(lessonPlanId)}/review`,
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  setLessonPlanParentVisibility(tenantId: string, lessonPlanId: string, parentVisible: boolean) {
+    return apiRequest<{ lessonPlan: LessonPlan }>(
+      `/api/academics/lesson-plans/${encodeURIComponent(lessonPlanId)}/parent-visibility`,
+      {
+        method: 'PATCH',
+        tenantId,
+        body: JSON.stringify({ parentVisible }),
+      }
+    );
+  },
+
+  deleteLessonPlan(tenantId: string, lessonPlanId: string) {
+    return apiRequest<{ deleted: boolean }>(
+      `/api/academics/lesson-plans/${encodeURIComponent(lessonPlanId)}`,
+      { method: 'DELETE', tenantId }
+    );
+  },
+
+  updateAcademicSubmissionConfig(
+    tenantId: string,
+    payload: Partial<AcademicSubmissionDeadlineConfig>
+  ) {
+    return apiRequest<{ config: AcademicSubmissionDeadlineConfig }>(
+      '/api/academics/submission-config',
+      {
+        method: 'PUT',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  sendAcademicSubmissionReminder(
+    tenantId: string,
+    payload: { teacherIds?: string[]; targetLabel?: string; message?: string }
+  ) {
+    return apiRequest<{ ok: boolean; recipientCount: number; notification: NotificationItem }>(
+      '/api/academics/submission-reminders',
+      {
+        method: 'POST',
+        tenantId,
+        body: JSON.stringify(payload),
+      }
+    );
   },
 };
 

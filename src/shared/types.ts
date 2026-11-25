@@ -419,6 +419,7 @@ export type UserRole =
 export type TenantModulePermission =
   | 'analytics'
   | 'admissions'
+  | 'academics'
   | 'timetable'
   | 'attendance'
   | 'exams'
@@ -435,6 +436,7 @@ export const ALL_TENANT_MODULES: Array<{
 }> = [
   { id: 'analytics', label: 'Analytics' },
   { id: 'admissions', label: 'Admissions' },
+  { id: 'academics', label: 'Teacher Academics' },
   { id: 'timetable', label: 'Timetable' },
   { id: 'attendance', label: 'Attendance' },
   { id: 'exams', label: 'Exams & Grades' },
@@ -450,21 +452,28 @@ export const DEFAULT_ROLE_MODULES: Record<UserRole, TenantModulePermission[]> = 
   Developer: [...ALL_MODULE_IDS],
   'Super Admin': [...ALL_MODULE_IDS],
   Admin: [...ALL_MODULE_IDS],
-  Registrar: ['analytics', 'admissions', 'attendance', 'communications'],
-  Teacher: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
+  Registrar: ['analytics', 'admissions', 'academics', 'attendance', 'communications'],
+  Teacher: ['analytics', 'academics', 'timetable', 'attendance', 'exams', 'communications'],
   Bursar: ['analytics', 'fees', 'communications'],
   'Budget Approver': ['analytics', 'fees', 'communications'],
-  Parent: ['analytics', 'exams', 'fees', 'communications'],
-  Student: ['analytics', 'timetable', 'attendance', 'exams', 'communications'],
+  Parent: ['analytics', 'academics', 'exams', 'fees', 'communications'],
+  Student: ['analytics', 'academics', 'timetable', 'attendance', 'exams', 'communications'],
 };
 
 export const DEFAULT_ROLE_MODULE_ACCESS: Record<UserRole, TenantModuleAccessMap> = {
   Developer: Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap,
   'Super Admin': Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap,
   Admin: Object.fromEntries(ALL_MODULE_IDS.map((m) => [m, 'edit'])) as TenantModuleAccessMap,
-  Registrar: { analytics: 'read', admissions: 'edit', attendance: 'edit', communications: 'edit' },
+  Registrar: {
+    analytics: 'read',
+    admissions: 'edit',
+    academics: 'read',
+    attendance: 'edit',
+    communications: 'edit',
+  },
   Teacher: {
     analytics: 'read',
+    academics: 'edit',
     timetable: 'edit',
     attendance: 'edit',
     exams: 'edit',
@@ -472,9 +481,10 @@ export const DEFAULT_ROLE_MODULE_ACCESS: Record<UserRole, TenantModuleAccessMap>
   },
   Bursar: { analytics: 'read', fees: 'edit', communications: 'edit' },
   'Budget Approver': { analytics: 'read', fees: 'read', communications: 'read' },
-  Parent: { analytics: 'read', exams: 'read', fees: 'read', communications: 'read' },
+  Parent: { analytics: 'read', academics: 'read', exams: 'read', fees: 'read', communications: 'read' },
   Student: {
     analytics: 'read',
+    academics: 'read',
     timetable: 'read',
     attendance: 'read',
     exams: 'read',
@@ -572,7 +582,20 @@ export function getDefaultModulesForTenantRole(
   customRoleId?: string
 ): TenantModulePermission[] {
   const accessMap = getDefaultModuleAccessForTenantRole(tenant, role, customRoleId);
-  return ALL_MODULE_IDS.filter((id) => accessMap[id] === 'read' || accessMap[id] === 'edit');
+  const enabled = ALL_MODULE_IDS.filter((id) => accessMap[id] === 'read' || accessMap[id] === 'edit');
+  if (customRoleId && tenant?.customRoles) {
+    const custom = tenant.customRoles.find((r) => r.id === customRoleId);
+    if (custom && Array.isArray(custom.defaultModules)) {
+      const enabledSet = new Set(enabled);
+      const preserved = custom.defaultModules.filter((id) => enabledSet.has(id));
+      const preservedSet = new Set(preserved);
+      for (const id of enabled) {
+        if (!preservedSet.has(id)) preserved.push(id);
+      }
+      return preserved;
+    }
+  }
+  return enabled;
 }
 
 export function getEffectiveUserModuleAccess(
@@ -645,7 +668,17 @@ export function getEffectiveUserModules(
 ): TenantModulePermission[] {
   if (!user) return [];
   const accessMap = getEffectiveUserModuleAccess(user);
-  return ALL_MODULE_IDS.filter((id) => accessMap[id] === 'read' || accessMap[id] === 'edit');
+  const enabled = ALL_MODULE_IDS.filter((id) => accessMap[id] === 'read' || accessMap[id] === 'edit');
+  if (Array.isArray(user.allowedModules) && user.allowedModules.length > 0) {
+    const enabledSet = new Set(enabled);
+    const preserved = user.allowedModules.filter((id) => enabledSet.has(id));
+    const preservedSet = new Set(preserved);
+    for (const id of enabled) {
+      if (!preservedSet.has(id)) preserved.push(id);
+    }
+    return preserved;
+  }
+  return enabled;
 }
 
 export type TenantStatus = 'Active' | 'Trial' | 'Suspended';
@@ -781,6 +814,7 @@ export type DayOfWeek = 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Frida
 
 export type NotificationCategory =
   | 'admission'
+  | 'academics'
   | 'attendance'
   | 'exam'
   | 'fee'
@@ -948,7 +982,103 @@ export interface Tenant {
   roleModuleOverrides?: Partial<Record<UserRole, TenantModulePermission[]>>;
   /** Per-tenant Read Only / Read & Edit access template overrides for built-in roles. */
   roleModuleAccessOverrides?: Partial<Record<UserRole, TenantModuleAccessMap>>;
+  /** Teacher Academics submission deadlines & parent-visibility governance settings. */
+  academicSubmissionConfig?: AcademicSubmissionDeadlineConfig;
   createdAt: string;
+}
+
+export type AcademicDocumentStatus =
+  | 'Draft'
+  | 'Submitted'
+  | 'Revision Requested'
+  | 'Approved';
+
+export interface AcademicSubmissionDeadlineConfig {
+  schemeDueDate?: string; // YYYY-MM-DD
+  lessonPlanLeadDays?: number;
+  lessonPlanCadence?: 'Weekly' | 'Daily';
+  currentWeekNumber?: number;
+  requireApprovalForParentVisibility?: boolean;
+}
+
+export interface SchemeOfWorkWeek {
+  weekNumber: number;
+  strand: string;
+  subStrand: string;
+  learningOutcomes: string;
+  keyInquiryQuestion?: string;
+  learningActivities: string;
+  resources: string;
+  assessmentMethod: string;
+  remarks?: string;
+}
+
+export interface SchemeOfWork {
+  id: string;
+  tenantId: string;
+  academicYear: string;
+  termId?: string;
+  term: string;
+  grade: string;
+  section: string;
+  subject: string;
+  teacherId: string;
+  teacherName: string;
+  createdByUserId?: string;
+  title: string;
+  referenceBook?: string;
+  weeksCount: number;
+  weeks: SchemeOfWorkWeek[];
+  status: AcademicDocumentStatus;
+  parentVisible: boolean;
+  parentSummary?: string;
+  dueDate?: string;
+  submittedAt?: string;
+  reviewedByUserId?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  reviewFeedback?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LessonPlan {
+  id: string;
+  tenantId: string;
+  schemeOfWorkId?: string;
+  academicYear: string;
+  termId?: string;
+  term: string;
+  weekNumber: number;
+  lessonDate: string; // YYYY-MM-DD
+  periodNumber?: number;
+  durationMinutes: number;
+  grade: string;
+  section: string;
+  subject: string;
+  teacherId: string;
+  teacherName: string;
+  createdByUserId?: string;
+  strand: string;
+  subStrand: string;
+  lessonTitle: string;
+  learningOutcomes: string;
+  learningResources: string;
+  introductionActivity: string;
+  lessonDevelopment: string;
+  conclusionActivity: string;
+  extendedHomework?: string;
+  teacherReflection?: string;
+  status: AcademicDocumentStatus;
+  parentVisible: boolean;
+  dueDate?: string;
+  submittedAt?: string;
+  reviewedByUserId?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  reviewFeedback?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface TenantUser {
@@ -1128,6 +1258,16 @@ export function getSubjectsForGrade(
   grade: string
 ): string[] {
   return getSubjectsForLevel(tenant, getClusterForGrade(grade));
+}
+
+export function getStudentRegisteredSubjects(
+  tenant: Pick<Tenant, 'subjects' | 'levelSubjects'>,
+  student: Pick<Student, 'grade' | 'registeredSubjects'>
+): string[] {
+  if (Array.isArray(student.registeredSubjects) && student.registeredSubjects.length > 0) {
+    return student.registeredSubjects;
+  }
+  return getSubjectsForGrade(tenant, student.grade);
 }
 
 export function getLessonsPerWeekForSubject(
@@ -1380,11 +1520,13 @@ export interface Student {
   deletedBy?: string;
   deleteReason?: string;
   creditBalance?: number;
+  registeredSubjects?: string[];
 }
 
 export type LifecycleAuditAction =
   | 'STUDENT_ENROLLED'
   | 'STUDENT_EDITED'
+  | 'STUDENT_SUBJECTS_ASSIGNED'
   | 'STUDENT_TRANSFERRED'
   | 'STUDENT_WITHDRAWN'
   | 'STUDENT_GRADUATED'
@@ -2086,6 +2228,7 @@ export interface BudgetAllocation {
   allocatedAmount: number;
   status?: BudgetApprovalStatus;
   createdByUserId?: string;
+  createdByName?: string;
   approvedBy?: string;
   approvedAt?: string;
   approvalNotes?: string;
@@ -2235,6 +2378,8 @@ export interface TenantWorkspaceData {
   archivedStudentsCount?: number;
   lifecycleAuditLogs?: LifecycleAuditEntry[];
   admissions: AdmissionApplication[];
+  schemesOfWork?: SchemeOfWork[];
+  lessonPlans?: LessonPlan[];
   timetable: TimetableSlot[];
   attendance: AttendanceRecord[];
   staffAttendance: StaffAttendanceRecord[];

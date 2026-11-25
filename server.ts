@@ -79,10 +79,10 @@ app.use(
             objectSrc: ["'none'"],
             baseUri: ["'self'"],
             formAction: ["'self'"],
+            frameAncestors: ["'none'"],
           },
         }
       : false,
-    xFrameOptions: false,
     crossOriginEmbedderPolicy: false,
   })
 );
@@ -93,31 +93,26 @@ const configuredOrigins = (process.env.APP_URL || '')
   .filter(Boolean);
 
 app.use(
-  cors((req, callback) => {
-    const origin = req.header('origin');
-    if (!origin) {
-      callback(null, { origin: true, credentials: true });
-      return;
-    }
-    const normalized = origin.replace(/\/+$/, '');
-    const hostHeader = (req.header('x-forwarded-host') || req.header('host') || '').split(',')[0].trim();
-    const isSameHost =
-      Boolean(hostHeader) &&
-      (normalized === `https://${hostHeader}` || normalized === `http://${hostHeader}`);
-    if (
-      isSameHost ||
-      configuredOrigins.includes(normalized) ||
-      (!IS_PROD && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized))
-    ) {
-      callback(null, {
-        origin: true,
-        credentials: true,
-        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
-      });
-      return;
-    }
-    callback(new ConflictError(`CORS origin "${origin}" is not allowed.`, 403));
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      const normalized = origin.replace(/\/+$/, '');
+      if (configuredOrigins.includes(normalized)) {
+        callback(null, true);
+        return;
+      }
+      if (!IS_PROD && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
+        callback(null, true);
+        return;
+      }
+      callback(new ConflictError(`CORS origin "${origin}" is not allowed.`, 403));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
   })
 );
 
@@ -686,7 +681,6 @@ app.put(
       const result = store.updateBuiltInRoleModules(authUser, targetTenantId, {
         role: decodeURIComponent(String(req.params.role)) as any,
         defaultModules: req.body?.defaultModules,
-        defaultModuleAccess: req.body?.defaultModuleAccess,
         syncExistingUsers: Boolean(req.body?.syncExistingUsers),
       });
       await store.flushRemotePersist();
@@ -1330,6 +1324,16 @@ app.post('/api/students/import', ...admissionsGuard, (req: AuthenticatedRequest,
   }
 });
 
+app.post('/api/students/assign-subjects', ...admissionsGuard, (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = store.bulkAssignStudentSubjects(tenantId, req.body || {}, req.authUser!);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.post(
   '/api/students/promotions/preview',
   ...admissionsGuard,
@@ -1743,40 +1747,266 @@ app.post(
   }
 );
 
-// Budget Approval endpoint: accessible by dedicated Budget Approver (with fees read/edit) plus Admin/Bursar with edit
-const budgetApprovalGuard = [
-  requireRole('Developer', 'Super Admin', 'Admin', 'Bursar', 'Budget Approver'),
-  requireModule('fees', { allowReadOnlyMutation: true }),
+// Teacher Academics: Schemes of Work, Lesson Plans, Submissions & Parent Visibility
+const academicsEditGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Teacher'),
+  requireModule('academics'),
 ];
-app.patch(
-  '/api/finance/budgets/approval',
-  ...budgetApprovalGuard,
-  (req: AuthenticatedRequest, res, next) => {
+const academicsAdminGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin'),
+  requireModule('academics'),
+];
+
+app.post('/api/academics/schemes', ...academicsEditGuard, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const scheme = store.upsertSchemeOfWork(tenantId, req.body || {}, req.authUser!);
+    await store.flushRemotePersist();
+    res.status(201).json({ scheme });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/academics/schemes/:id', ...academicsEditGuard, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const scheme = store.upsertSchemeOfWork(
+      tenantId,
+      { ...(req.body || {}), id: String(req.params.id) },
+      req.authUser!
+    );
+    await store.flushRemotePersist();
+    res.json({ scheme });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post(
+  '/api/academics/schemes/:id/submit',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
     try {
       const tenantId = getTenantId(req);
-      const budget = store.approveBudgetAllocation(
-        tenantId,
-        {
-          ...(req.body || {}),
-          approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
-        },
-        req.authUser!,
-        req.ip
-      );
-      res.json({ budget });
+      const scheme = store.submitSchemeOfWork(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json({ scheme });
     } catch (err) {
       next(err);
     }
   }
 );
 
-// Fees, Billing & Finance Controls (Admin & Bursar with edit permission only)
+app.post(
+  '/api/academics/schemes/:id/review',
+  ...academicsAdminGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const scheme = store.reviewSchemeOfWork(
+        tenantId,
+        String(req.params.id),
+        req.body || {},
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ scheme });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/academics/schemes/:id/parent-visibility',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const scheme = store.setSchemeParentVisibility(
+        tenantId,
+        String(req.params.id),
+        Boolean(req.body?.parentVisible),
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ scheme });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/academics/schemes/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.deleteSchemeOfWork(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post('/api/academics/lesson-plans', ...academicsEditGuard, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const lessonPlan = store.upsertLessonPlan(tenantId, req.body || {}, req.authUser!);
+    await store.flushRemotePersist();
+    res.status(201).json({ lessonPlan });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put(
+  '/api/academics/lesson-plans/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonPlan = store.upsertLessonPlan(
+        tenantId,
+        { ...(req.body || {}), id: String(req.params.id) },
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ lessonPlan });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/lesson-plans/:id/submit',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonPlan = store.submitLessonPlan(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json({ lessonPlan });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/lesson-plans/:id/review',
+  ...academicsAdminGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonPlan = store.reviewLessonPlan(
+        tenantId,
+        String(req.params.id),
+        req.body || {},
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ lessonPlan });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.patch(
+  '/api/academics/lesson-plans/:id/parent-visibility',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const lessonPlan = store.setLessonPlanParentVisibility(
+        tenantId,
+        String(req.params.id),
+        Boolean(req.body?.parentVisible),
+        req.authUser!
+      );
+      await store.flushRemotePersist();
+      res.json({ lessonPlan });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/academics/lesson-plans/:id',
+  ...academicsEditGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.deleteLessonPlan(tenantId, String(req.params.id), req.authUser!);
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.put(
+  '/api/academics/submission-config',
+  ...academicsAdminGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const config = store.updateAcademicSubmissionConfig(tenantId, req.body || {}, req.authUser!);
+      await store.flushRemotePersist();
+      res.json({ config });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/academics/submission-reminders',
+  ...academicsAdminGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const result = store.sendAcademicSubmissionReminder(tenantId, req.body || {}, req.authUser!);
+      await store.flushRemotePersist();
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Fees, Billing & Finance Controls (Admin & Bursar only)
 const financeGuard = [
   requireRole('Developer', 'Super Admin', 'Admin', 'Bursar'),
   requireModule('fees'),
 ];
+const budgetApprovalGuard = [
+  requireRole('Developer', 'Super Admin', 'Admin', 'Bursar', 'Budget Approver'),
+  requireModule('fees', { allowReadOnlyMutation: true }),
+];
 app.use('/api/fees', ...financeGuard);
-app.use('/api/finance', ...financeGuard);
+app.use('/api/finance', (req: AuthenticatedRequest, res, next) => {
+  if (req.method === 'PATCH' && req.path === '/budgets/approval') {
+    next();
+    return;
+  }
+  const [roleMw, modMw] = financeGuard;
+  roleMw(req, res, (err?: unknown) => {
+    if (err) {
+      next(err);
+      return;
+    }
+    modMw(req, res, next);
+  });
+});
 
 app.post('/api/fees/structures', (req: AuthenticatedRequest, res, next) => {
   try {
@@ -2242,6 +2472,28 @@ app.post('/api/finance/budgets', (req: AuthenticatedRequest, res, next) => {
   }
 });
 
+app.patch(
+  '/api/finance/budgets/approval',
+  ...budgetApprovalGuard,
+  (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+    const budget = store.approveBudgetAllocation(
+      tenantId,
+      {
+        ...(req.body || {}),
+        approvedBy: req.body?.approvedBy || req.authUser?.fullName || 'Finance Administrator',
+      },
+      req.authUser!,
+      req.ip
+    );
+      res.json({ budget });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Finance Controls: Board & Procurement Approvals Sign-Off
 app.post('/api/finance/approvals', (req: AuthenticatedRequest, res, next) => {
   try {
@@ -2287,7 +2539,15 @@ app.delete('/api/finance/approvals/:id', (req: AuthenticatedRequest, res, next) 
 
 // Communications & Notifications
 const communicationsGuard = [
-  requireRole('Developer', 'Super Admin', 'Admin', 'Registrar', 'Teacher', 'Bursar'),
+  requireRole(
+    'Developer',
+    'Super Admin',
+    'Admin',
+    'Registrar',
+    'Teacher',
+    'Bursar',
+    'Budget Approver'
+  ),
   requireModule('communications'),
 ];
 app.use('/api/communications', ...communicationsGuard);

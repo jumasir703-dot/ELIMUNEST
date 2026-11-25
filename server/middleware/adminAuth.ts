@@ -81,12 +81,14 @@ export function generateOneTimePassword(): string {
 }
 
 export const DEVELOPER_EMAIL = 'developer@elimunest.platform';
+export const DEFAULT_DEV_BOOTSTRAP_PASSWORD = 'ElimuDev2026!';
 
 /**
  * Initial password for the platform Developer account.
  * Read from DEVELOPER_BOOTSTRAP_PASSWORD (set it in .env / the hosting dashboard, never in code).
- * If unset or too weak, a random one-time password is generated instead.
- * The account is always created with mustChangePassword = true.
+ * In production without DEVELOPER_BOOTSTRAP_PASSWORD, a random one-time password is generated.
+ * In development/preview mode without DEVELOPER_BOOTSTRAP_PASSWORD, a deterministic dev password
+ * is used so container restarts never scramble developer access.
  */
 export function resolveDeveloperBootstrapPassword(): { password: string; fromEnv: boolean } {
   const fromEnv = (process.env.DEVELOPER_BOOTSTRAP_PASSWORD || '').trim();
@@ -97,6 +99,9 @@ export function resolveDeveloperBootstrapPassword(): { password: string; fromEnv
     } else {
       return { password: fromEnv, fromEnv: true };
     }
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    return { password: DEFAULT_DEV_BOOTSTRAP_PASSWORD, fromEnv: false };
   }
   return { password: generateOneTimePassword(), fromEnv: false };
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowRightLeft,
+  BookOpen,
   Check,
   CheckCircle2,
   Copy,
@@ -21,6 +22,8 @@ import {
 import { saasApi } from '../lib/api';
 import {
   getStreamsForGrade,
+  getStudentRegisteredSubjects,
+  getSubjectsForGrade,
   KENYAN_CBC_GRADES,
   type PromotionAction,
   type PromotionPreviewRow,
@@ -32,7 +35,7 @@ import {
 
 interface AdmissionsModuleProps {
   workspace: TenantWorkspaceData;
-  canEdit?: boolean;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -58,7 +61,12 @@ const STATUS_BADGE_CLASS: Record<StudentStatus, string> = {
   Withdrawn: 'bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900',
 };
 
-export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotify }: AdmissionsModuleProps) {
+export function AdmissionsModule({
+  workspace,
+  readOnly = false,
+  onRefresh,
+  onNotify,
+}: AdmissionsModuleProps) {
   const { tenant, students } = workspace;
   const academicTerms = workspace.academicTerms || [];
   const lifecycleAuditLogs = workspace.lifecycleAuditLogs || [];
@@ -73,6 +81,7 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
   const [gradeStreamFilter, setGradeStreamFilter] = useState<string>('All');
   const [yearFilter, setYearFilter] = useState<string>('All');
   const [statusFilter, setStatusFilter] = useState<'All' | StudentStatus>('All');
+  const [studentPage, setStudentPage] = useState(1);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showStreamsModal, setShowStreamsModal] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -112,6 +121,7 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
     guardianEmail: '',
     guardianPhone: '',
     enrolledAt: '',
+    registeredSubjects: [] as string[],
   });
 
   const [lifecycleStudent, setLifecycleStudent] = useState<Student | null>(null);
@@ -161,6 +171,16 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
 
   // Lifecycle Audit Trail Drawer/Modal
   const [showAuditModal, setShowAuditModal] = useState(false);
+
+  // Bulk Assign Subjects Modal State
+  const [showAssignSubjectsModal, setShowAssignSubjectsModal] = useState(false);
+  const [assignGrade, setAssignGrade] = useState(availableGrades[0] || 'Grade 7');
+  const [assignStream, setAssignStream] = useState('All');
+  const [assignMode, setAssignMode] = useState<'replace' | 'add' | 'remove'>('replace');
+  const [assignSelectedSubjects, setAssignSelectedSubjects] = useState<string[]>(() =>
+    getSubjectsForGrade(tenant, availableGrades[0] || 'Grade 7')
+  );
+  const [assignSaving, setAssignSaving] = useState(false);
 
   const modalGradeStreams = useMemo(
     () => getStreamsForGrade(tenant, formState.grade),
@@ -243,12 +263,8 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
   }, [students, statusFilter, gradeStreamFilter, yearFilter, searchQuery]);
 
   const STUDENTS_PAGE_SIZE = 50;
-  const [studentPage, setStudentPage] = useState(1);
-  useEffect(() => {
-    setStudentPage(1);
-  }, [statusFilter, gradeStreamFilter, yearFilter, searchQuery, tenant.id]);
-  const totalStudentPages = Math.max(1, Math.ceil(filteredStudents.length / STUDENTS_PAGE_SIZE));
-  const safeStudentPage = Math.min(studentPage, totalStudentPages);
+  const studentTotalPages = Math.max(1, Math.ceil(filteredStudents.length / STUDENTS_PAGE_SIZE));
+  const safeStudentPage = Math.min(studentPage, studentTotalPages);
   const paginatedStudents = useMemo(
     () =>
       filteredStudents.slice(
@@ -257,6 +273,10 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
       ),
     [filteredStudents, safeStudentPage]
   );
+
+  useEffect(() => {
+    setStudentPage(1);
+  }, [tenant.id, statusFilter, gradeStreamFilter, yearFilter, searchQuery]);
 
   function openGradesStreamsEditor() {
     const rows: EditableGradeRow[] = availableGrades.map((g, idx) => ({
@@ -459,12 +479,50 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
       guardianEmail: stu.guardianEmail || '',
       guardianPhone: stu.guardianPhone,
       enrolledAt: stu.enrolledAt,
+      registeredSubjects: [...getStudentRegisteredSubjects(tenant, stu)],
     });
+  }
+
+  function openBulkAssignSubjectsModal() {
+    const defaultG = availableGrades[0] || 'Playgroup';
+    setAssignGrade(defaultG);
+    setAssignStream('All');
+    setAssignMode('replace');
+    setAssignSelectedSubjects([...getSubjectsForGrade(tenant, defaultG)]);
+    setShowAssignSubjectsModal(true);
+  }
+
+  async function handleBulkAssignSubjects(e: React.FormEvent) {
+    e.preventDefault();
+    if (assignSelectedSubjects.length === 0) {
+      onNotify('Select at least one curriculum subject.', 'error');
+      return;
+    }
+    setAssignSaving(true);
+    try {
+      const res = await saasApi.assignStudentSubjects(tenant.id, {
+        grade: assignGrade,
+        section: assignStream,
+        subjects: assignSelectedSubjects,
+        mode: assignMode,
+      });
+      await onRefresh();
+      setShowAssignSubjectsModal(false);
+      onNotify(`Assigned ${res.subjects.length} subject(s) across ${res.updatedCount} learner(s).`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Failed to assign subjects.', 'error');
+    } finally {
+      setAssignSaving(false);
+    }
   }
 
   async function handleSaveStudentEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!editingStudent) return;
+    if (editForm.registeredSubjects.length === 0) {
+      onNotify('Assign at least one subject to the learner.', 'error');
+      return;
+    }
     setSaving(true);
     try {
       const { student } = await saasApi.updateStudentDetails(tenant.id, editingStudent.id, editForm);
@@ -729,7 +787,7 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
             <History className="h-3.5 w-3.5" />
             Lifecycle Audit ({lifecycleAuditLogs.length})
           </button>
-          {canEdit && (
+          {!readOnly && (
             <>
               <button
                 type="button"
@@ -754,6 +812,14 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
               </button>
               <button
                 type="button"
+                onClick={openBulkAssignSubjectsModal}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <BookOpen className="h-3.5 w-3.5" />
+                Assign Subjects
+              </button>
+              <button
+                type="button"
                 onClick={openGradesStreamsEditor}
                 className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
               >
@@ -772,12 +838,6 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
           )}
         </div>
       </div>
-
-      {!canEdit && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-300">
-          <span className="font-semibold">Read-Only Access:</span> Your account has view-only permissions for Admissions. Enrolling, editing, importing, promoting, and archiving learners are disabled.
-        </div>
-      )}
 
       {/* Issued Student Portal Credentials Banner */}
       {issuedStudentPortalCreds && (
@@ -940,7 +1000,7 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {paginatedStudents.length === 0 ? (
+              {filteredStudents.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                     No students match the selected filters.
@@ -966,7 +1026,20 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
                       </div>
                     </td>
                     <td className="px-4 py-3 text-slate-700 dark:text-slate-300">
-                      {stu.grade} · Stream {stu.section}
+                      <div>
+                        {stu.grade} · Stream {stu.section}
+                      </div>
+                      {(() => {
+                        const assigned = getStudentRegisteredSubjects(tenant, stu);
+                        return (
+                          <div
+                            className="mt-0.5 max-w-[210px] truncate font-mono text-[11px] text-slate-500 dark:text-slate-400"
+                            title={assigned.join(', ')}
+                          >
+                            {assigned.length} subject{assigned.length === 1 ? '' : 's'} assigned
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3">
                       <span
@@ -992,7 +1065,9 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {canEdit ? (
+                      {readOnly ? (
+                        <span className="font-mono text-[11px] text-slate-400">Read Only</span>
+                      ) : (
                         <div className="inline-flex flex-wrap items-center justify-end gap-1">
                           <button
                             type="button"
@@ -1038,8 +1113,6 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
                             <Trash2 className="h-3 w-3" />
                           </button>
                         </div>
-                      ) : (
-                        <span className="text-[11px] text-slate-400">Read-only</span>
                       )}
                     </td>
                   </tr>
@@ -1049,8 +1122,8 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
           </table>
         </div>
         {filteredStudents.length > STUDENTS_PAGE_SIZE && (
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-400">
-            <span className="tabular-nums">
+          <div className="flex flex-col gap-2 border-t border-slate-200 px-5 py-3 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800 dark:text-slate-400">
+            <span className="font-mono tabular-nums">
               Showing {(safeStudentPage - 1) * STUDENTS_PAGE_SIZE + 1}–
               {Math.min(safeStudentPage * STUDENTS_PAGE_SIZE, filteredStudents.length)} of{' '}
               {filteredStudents.length} learners
@@ -1060,18 +1133,18 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
                 type="button"
                 disabled={safeStudentPage <= 1}
                 onClick={() => setStudentPage((p) => Math.max(1, p - 1))}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
               >
                 Previous
               </button>
               <span className="font-mono tabular-nums">
-                Page {safeStudentPage} / {totalStudentPages}
+                Page {safeStudentPage} / {studentTotalPages}
               </span>
               <button
                 type="button"
-                disabled={safeStudentPage >= totalStudentPages}
-                onClick={() => setStudentPage((p) => Math.min(totalStudentPages, p + 1))}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                disabled={safeStudentPage >= studentTotalPages}
+                onClick={() => setStudentPage((p) => Math.min(studentTotalPages, p + 1))}
+                className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
               >
                 Next
               </button>
@@ -1241,6 +1314,53 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
                   <option value="Non-binary">Non-binary</option>
                 </select>
               </div>
+              <div className="sm:col-span-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Assigned Subjects ({editForm.registeredSubjects.length})
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditForm({
+                        ...editForm,
+                        registeredSubjects: [...getSubjectsForGrade(tenant, editForm.grade)],
+                      })
+                    }
+                    className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                  >
+                    Select All {editForm.grade} Subjects
+                  </button>
+                </div>
+                <div className="mt-1.5 grid grid-cols-1 gap-1.5 rounded-lg border border-slate-200 bg-slate-50/60 p-2.5 sm:grid-cols-2 dark:border-slate-700 dark:bg-slate-800/40">
+                  {Array.from(
+                    new Set([...getSubjectsForGrade(tenant, editForm.grade), ...editForm.registeredSubjects])
+                  ).map((sub) => {
+                    const checked = editForm.registeredSubjects.includes(sub);
+                    return (
+                      <label
+                        key={sub}
+                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-700 hover:bg-white dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? [...editForm.registeredSubjects, sub]
+                              : editForm.registeredSubjects.filter((s) => s !== sub);
+                            setEditForm({ ...editForm, registeredSubjects: next });
+                          }}
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                        />
+                        <span className="truncate" title={sub}>
+                          {sub}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="flex justify-end gap-2 pt-2 sm:col-span-2">
                 <button
                   type="button"
@@ -1255,6 +1375,155 @@ export function AdmissionsModule({ workspace, canEdit = true, onRefresh, onNotif
                   className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                 >
                   {saving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Assign Subjects Modal */}
+      {showAssignSubjectsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  Assign Subjects to Learners
+                </h2>
+                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                  Bulk-assign or update curriculum subjects across a Grade or Stream.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAssignSubjectsModal(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={handleBulkAssignSubjects} className="mt-4 space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Grade
+                  </label>
+                  <select
+                    value={assignGrade}
+                    onChange={(e) => {
+                      const nextGrade = e.target.value;
+                      setAssignGrade(nextGrade);
+                      setAssignStream('All');
+                      setAssignSelectedSubjects([...getSubjectsForGrade(tenant, nextGrade)]);
+                    }}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    {availableGrades.map((g) => (
+                      <option key={g} value={g}>
+                        {g}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Stream
+                  </label>
+                  <select
+                    value={assignStream}
+                    onChange={(e) => setAssignStream(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    <option value="All">All Streams</option>
+                    {getStreamsForGrade(tenant, assignGrade).map((sec) => (
+                      <option key={sec} value={sec}>
+                        Stream {sec}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Assignment Mode
+                  </label>
+                  <select
+                    value={assignMode}
+                    onChange={(e) => setAssignMode(e.target.value as 'replace' | 'add' | 'remove')}
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                  >
+                    <option value="replace">Set Exact Subjects</option>
+                    <option value="add">Add Subjects</option>
+                    <option value="remove">Remove Subjects</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                    Subjects for {assignGrade} ({assignSelectedSubjects.length} selected)
+                  </label>
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAssignSelectedSubjects([...getSubjectsForGrade(tenant, assignGrade)])
+                      }
+                      className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAssignSelectedSubjects([])}
+                      className="text-[11px] font-medium text-slate-500 hover:underline dark:text-slate-400"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-1.5 grid grid-cols-1 gap-1.5 rounded-lg border border-slate-200 bg-slate-50/60 p-3 sm:grid-cols-2 dark:border-slate-700 dark:bg-slate-800/40">
+                  {getSubjectsForGrade(tenant, assignGrade).map((sub) => {
+                    const checked = assignSelectedSubjects.includes(sub);
+                    return (
+                      <label
+                        key={sub}
+                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-slate-700 hover:bg-white dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            setAssignSelectedSubjects((prev) =>
+                              e.target.checked ? [...prev, sub] : prev.filter((s) => s !== sub)
+                            );
+                          }}
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600"
+                        />
+                        <span className="truncate" title={sub}>
+                          {sub}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAssignSubjectsModal(false)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={assignSaving}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {assignSaving ? 'Assigning...' : 'Apply Subjects to Learners'}
                 </button>
               </div>
             </form>

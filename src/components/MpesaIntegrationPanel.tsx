@@ -19,6 +19,7 @@ import type {
 interface MpesaIntegrationPanelProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
+  readOnly?: boolean;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -26,16 +27,18 @@ interface MpesaIntegrationPanelProps {
 export function MpesaIntegrationPanel({
   workspace,
   currentRole,
+  readOnly = false,
   onRefresh,
   onNotify,
 }: MpesaIntegrationPanelProps) {
   const { tenant, invoices } = workspace;
   const transactions = workspace.mpesaTransactions || [];
   const canConfigure =
-    currentRole === 'Admin' ||
-    currentRole === 'Super Admin' ||
-    currentRole === 'Developer' ||
-    currentRole === 'Bursar';
+    !readOnly &&
+    (currentRole === 'Admin' ||
+      currentRole === 'Super Admin' ||
+      currentRole === 'Developer' ||
+      currentRole === 'Bursar');
 
   const existing = tenant.mpesaConfig;
   const openInvoices = useMemo(
