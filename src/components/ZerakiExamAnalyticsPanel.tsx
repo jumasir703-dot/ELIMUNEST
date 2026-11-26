@@ -10,6 +10,7 @@ import {
   ClipboardCheck,
   Download,
   FileSpreadsheet,
+  FileText,
   GraduationCap,
   Layers,
   Printer,
@@ -18,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
+import { downloadExamBroadsheetPdf } from '../lib/pdfDocuments';
 import {
   buildGradeAnalyticsReport,
   sortExamCyclesChronologically,
@@ -220,6 +222,63 @@ export function ZerakiExamAnalyticsPanel({
       best7AvgPoints,
     };
   }, [report, effectiveStreamFilter]);
+
+  async function handleDownloadBroadsheetPdf() {
+    if (!activeCycle) {
+      onNotify('Create or select an exam cycle first.', 'error');
+      return;
+    }
+    try {
+      const fileName = await downloadExamBroadsheetPdf({
+        tenant,
+        cycle: activeCycle,
+        grade: selectedGrade,
+        streamScope: effectiveStreamFilter,
+        scaleLabel: report.is844 ? '8-4-4 KCSE' : 'KNEC CBE',
+        cohortMeanScore: cohortSummary.meanScore,
+        cohortMeanGrade: cohortSummary.meanGrade,
+        candidatesSat: cohortSummary.sat,
+        candidatesEnrolled: cohortSummary.enrolled,
+        streamSummaries: [...report.streamComparisons, report.overallStreamSummary].map((s) => ({
+          rank: s.rank,
+          stream: s.stream,
+          candidatesSat: s.candidatesSat,
+          enrolledCount: s.enrolledCount,
+          meanScore: s.meanScore,
+          meanPoints: s.meanPoints,
+          meanGrade: s.meanGrade,
+          passRate: s.passRate,
+          deviation: s.deviation,
+        })),
+        gradeHeaders: report.scale.map((b) => b.grade),
+        subjectMatrix: report.subjectMatrix.map((row) => ({
+          subject: row.subject,
+          gradeCounts: row.gradeCounts,
+          meanScore: row.meanScore,
+          meanGrade: row.meanGrade,
+        })),
+        registeredSubjects: report.registeredSubjects,
+        broadsheetRows: report.broadsheetRows.map((row) => ({
+          rank: row.rank,
+          studentCode: row.student.studentCode,
+          fullName: row.student.fullName,
+          section: row.student.section,
+          subjectMap: row.subjectMap,
+          subjectsSat: row.subjectsSat,
+          totalScore: row.totalScore,
+          meanScore: row.meanScore,
+          overallGrade: row.overallGrade,
+          meanDeviation: row.meanDeviation,
+        })),
+      });
+      onNotify(`Downloaded Exam Broadsheet PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to generate Broadsheet PDF',
+        'error'
+      );
+    }
+  }
 
   function handleExportAnalyticsPack() {
     if (!activeCycle) {
@@ -491,6 +550,15 @@ export function ZerakiExamAnalyticsPanel({
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleDownloadBroadsheetPdf}
+              disabled={!activeCycle || report.broadsheetRows.length === 0}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+            >
+              <FileText className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400" />
+              Download Broadsheet (.pdf)
+            </button>
             <button
               type="button"
               onClick={() => setShowPrintModal(true)}
@@ -1491,6 +1559,14 @@ export function ZerakiExamAnalyticsPanel({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  onClick={handleDownloadBroadsheetPdf}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  Download PDF
+                </button>
+                <button
+                  type="button"
                   onClick={handleExportAnalyticsPack}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
@@ -1500,10 +1576,10 @@ export function ZerakiExamAnalyticsPanel({
                 <button
                   type="button"
                   onClick={() => window.print()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
                   <Printer className="h-3.5 w-3.5" />
-                  Print / Save PDF
+                  Print
                 </button>
                 <button
                   type="button"

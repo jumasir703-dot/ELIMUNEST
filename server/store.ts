@@ -140,6 +140,8 @@ import {
   type SubscriptionCycle,
   type SuperAdminTenantSummary,
   type TeacherClassAssignment,
+  type TeacherLeaveDutyDelegation,
+  type TeacherLeaveOutChit,
   type TeacherLessonAttendanceRecord,
   type TeacherLessonAttendanceStatus,
   type TeacherProfile,
@@ -555,6 +557,10 @@ export class TenantStore {
       parsed.leaveOutChits = [];
       dirty = true;
     }
+    if (!Array.isArray(parsed.teacherLeaveOutChits)) {
+      parsed.teacherLeaveOutChits = [];
+      dirty = true;
+    }
     if (!Array.isArray(parsed.examCycles)) {
       parsed.examCycles = [];
       dirty = true;
@@ -857,6 +863,10 @@ export class TenantStore {
           });
           if (!Array.isArray(parsed.leaveOutChits)) {
             parsed.leaveOutChits = [];
+            dirty = true;
+          }
+          if (!Array.isArray(parsed.teacherLeaveOutChits)) {
+            parsed.teacherLeaveOutChits = [];
             dirty = true;
           }
           if (!Array.isArray(parsed.staffAttendance)) {
@@ -1693,6 +1703,7 @@ export class TenantStore {
       ['staffAttendance', this.state.staffAttendance],
       ['teacherLessonAttendance', this.state.teacherLessonAttendance || []],
       ['leaveOutChits', this.state.leaveOutChits],
+      ['teacherLeaveOutChits', this.state.teacherLeaveOutChits || []],
       ['examCycles', this.state.examCycles],
       ['examResults', this.state.examResults],
       ['progressiveReports', this.state.progressiveReports || []],
@@ -1985,6 +1996,9 @@ export class TenantStore {
       (a) => a.tenantId === tenantId
     );
     const allLeaveChits = this.state.leaveOutChits.filter((c) => c.tenantId === tenantId);
+    const allTeacherLeaveChits = (this.state.teacherLeaveOutChits || []).filter(
+      (c) => c.tenantId === tenantId
+    );
     const allExamCycles = this.state.examCycles.filter((e) => e.tenantId === tenantId);
     const allExamResults = this.state.examResults.filter((r) => r.tenantId === tenantId);
     const allProgressiveReports = (this.state.progressiveReports || []).filter(
@@ -2102,6 +2116,7 @@ export class TenantStore {
         staffAttendance: [],
         teacherLessonAttendance: [],
         leaveOutChits: allLeaveChits.filter((c) => ownIds.has(c.studentId)),
+        teacherLeaveOutChits: [],
         examCycles: publishedCycles,
         examResults: allExamResults.filter(
           (r) => ownIds.has(r.studentId) && publishedCycleIds.has(r.examCycleId)
@@ -2196,6 +2211,7 @@ export class TenantStore {
         staffAttendance: [],
         teacherLessonAttendance: [],
         leaveOutChits: allLeaveChits.filter((c) => childIds.has(c.studentId)),
+        teacherLeaveOutChits: [],
         examCycles: publishedCycles,
         examResults: allExamResults.filter(
           (r) => childIds.has(r.studentId) && publishedCycleIds.has(r.examCycleId)
@@ -2305,6 +2321,13 @@ export class TenantStore {
         leaveOutChits: canReadAdmissions
           ? allLeaveChits
           : allLeaveChits.filter((c) => teacherStudentIds.has(c.studentId)),
+        teacherLeaveOutChits: teacherProfile
+          ? allTeacherLeaveChits.filter(
+              (c) =>
+                c.teacherId === teacherProfile.id ||
+                c.dutiesDelegations.some((d) => d.delegateTeacherId === teacherProfile.id)
+            )
+          : [],
         examCycles: allExamCycles,
         examResults: allExamResults.filter((r) => teacherStudentIds.has(r.studentId)),
         progressiveReports: allProgressiveReports.filter((p) => teacherStudentIds.has(p.studentId)),
@@ -2368,6 +2391,7 @@ export class TenantStore {
         staffAttendance: [],
         teacherLessonAttendance: [],
         leaveOutChits: canReadAttendance ? allLeaveChits : [],
+        teacherLeaveOutChits: canReadAttendance ? allTeacherLeaveChits : [],
         examCycles: canReadExams ? allExamCycles : [],
         examResults: canReadExams ? allExamResults : [],
         progressiveReports: canReadExams ? allProgressiveReports : [],
@@ -2412,6 +2436,7 @@ export class TenantStore {
         staffAttendance: [],
         teacherLessonAttendance: [],
         leaveOutChits: allLeaveChits,
+        teacherLeaveOutChits: allTeacherLeaveChits,
         examCycles: allExamCycles,
         examResults: allExamResults,
         progressiveReports: allProgressiveReports,
@@ -2455,6 +2480,7 @@ export class TenantStore {
       staffAttendance: allStaffAttendance,
       teacherLessonAttendance: allTeacherLessonAttendance,
       leaveOutChits: allLeaveChits,
+      teacherLeaveOutChits: allTeacherLeaveChits,
       examCycles: allExamCycles,
       examResults: allExamResults,
       progressiveReports: allProgressiveReports,
@@ -2886,6 +2912,9 @@ export class TenantStore {
     this.state.attendance = this.state.attendance.filter((a) => a.tenantId !== tenantId);
     this.state.staffAttendance = this.state.staffAttendance.filter((a) => a.tenantId !== tenantId);
     this.state.leaveOutChits = this.state.leaveOutChits.filter((c) => c.tenantId !== tenantId);
+    this.state.teacherLeaveOutChits = (this.state.teacherLeaveOutChits || []).filter(
+      (c) => c.tenantId !== tenantId
+    );
     this.state.examCycles = this.state.examCycles.filter((e) => e.tenantId !== tenantId);
     this.state.examResults = this.state.examResults.filter((r) => r.tenantId !== tenantId);
     this.state.feeStructures = this.state.feeStructures.filter((f) => f.tenantId !== tenantId);
@@ -6991,6 +7020,339 @@ export class TenantStore {
     );
     this.persist();
     this.syncTenant(tenantId, 'attendance:leave-chit-deleted');
+  }
+
+  createTeacherLeaveOutChit(
+    tenantId: string,
+    input: {
+      teacherId?: string;
+      startDate: string;
+      days: number;
+      reason: string;
+      handoverNotes?: string;
+      emergencyContact?: string;
+      issuedBy?: string;
+      termId?: string;
+      dutiesDelegations?: Array<{
+        dutyTitle: string;
+        delegateTeacherId: string;
+        grade?: string;
+        section?: string;
+        subject?: string;
+        scheduleOrWindow?: string;
+        handoverInstructions?: string;
+      }>;
+    },
+    authUser?: TenantUser
+  ): TeacherLeaveOutChit {
+    const tenant = this.requireTenant(tenantId);
+    const role = authUser?.role;
+    if (
+      role &&
+      role !== 'Admin' &&
+      role !== 'Super Admin' &&
+      role !== 'Developer' &&
+      role !== 'Teacher'
+    ) {
+      throw new ConflictError(
+        'Only School Admin or Teachers may issue Teacher Leave Out Chits.',
+        403
+      );
+    }
+
+    const ownTeacher =
+      role === 'Teacher' && authUser
+        ? this.findTeacherProfileForUser(tenantId, authUser)
+        : undefined;
+    if (role === 'Teacher' && !ownTeacher) {
+      throw new ConflictError('No teacher profile linked to your account.', 403);
+    }
+
+    const requestedTeacherId =
+      role === 'Teacher' && ownTeacher
+        ? input.teacherId?.trim() || ownTeacher.id
+        : (input.teacherId || '').trim();
+    if (role === 'Teacher' && ownTeacher && requestedTeacherId !== ownTeacher.id) {
+      throw new ConflictError(
+        'Teachers can only submit Teacher Leave Out Chits for themselves.',
+        403
+      );
+    }
+
+    const teacher = tenant.teachers.find((t) => t.id === requestedTeacherId);
+    if (!teacher) {
+      throw new ConflictError('Selected teacher was not found in this school.', 404);
+    }
+
+    const reason = (input.reason || '').trim();
+    if (!reason) {
+      throw new ConflictError('Provide a reason for the teacher leave out chit.', 400);
+    }
+    const startDate = (input.startDate || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      throw new ConflictError('Provide a valid start date (YYYY-MM-DD).', 400);
+    }
+    const resolvedTerm = this.assertTermOpen(tenantId, {
+      termId: input.termId,
+      date: startDate,
+      actionLabel: 'Issuing a teacher leave out chit',
+    });
+
+    const rawDelegations = Array.isArray(input.dutiesDelegations) ? input.dutiesDelegations : [];
+    if (rawDelegations.length === 0) {
+      throw new ConflictError(
+        'A Teacher Leave Out Chit must include at least one duty delegation with a covering teacher.',
+        400
+      );
+    }
+
+    const dutiesDelegations: TeacherLeaveDutyDelegation[] = rawDelegations.map((raw, idx) => {
+      const dutyTitle = String(raw.dutyTitle || '').trim();
+      if (!dutyTitle) {
+        throw new ConflictError(
+          `Duty delegation row #${idx + 1} must specify the duty, class, or lesson being delegated.`,
+          400
+        );
+      }
+      const delId = String(raw.delegateTeacherId || '').trim();
+      if (!delId) {
+        throw new ConflictError(
+          `Duty delegation "${dutyTitle}" must select the covering teacher given the mandate.`,
+          400
+        );
+      }
+      if (delId === teacher.id) {
+        throw new ConflictError(
+          `Covering teacher for "${dutyTitle}" cannot be the teacher going on leave.`,
+          400
+        );
+      }
+      const delegateTeacher = tenant.teachers.find((t) => t.id === delId);
+      if (!delegateTeacher) {
+        throw new ConflictError(
+          `Delegated teacher for "${dutyTitle}" was not found in this school.`,
+          404
+        );
+      }
+      return {
+        id: `tdel-${randomUUID().slice(0, 8)}`,
+        dutyTitle,
+        delegateTeacherId: delegateTeacher.id,
+        delegateTeacherName: delegateTeacher.name,
+        delegateDepartment: delegateTeacher.department,
+        grade: String(raw.grade || '').trim() || undefined,
+        section: String(raw.section || '').trim() || undefined,
+        subject: String(raw.subject || '').trim() || undefined,
+        scheduleOrWindow: String(raw.scheduleOrWindow || '').trim() || undefined,
+        handoverInstructions: String(raw.handoverInstructions || '').trim() || undefined,
+      };
+    });
+
+    const days = Math.max(1, Math.min(90, Math.round(Number(input.days) || 1)));
+    const endDate = addDaysIso(startDate, days - 1);
+    const issuedBy =
+      (input.issuedBy || '').trim() || authUser?.fullName || 'Administration Desk';
+    const now = new Date().toISOString();
+
+    const chit: TeacherLeaveOutChit = {
+      id: `tloc-${randomUUID().slice(0, 8)}`,
+      tenantId,
+      termId: resolvedTerm?.id,
+      teacherId: teacher.id,
+      teacherName: teacher.name,
+      department: teacher.department || 'Faculty',
+      startDate,
+      days,
+      endDate,
+      reason,
+      dutiesDelegations,
+      handoverNotes: String(input.handoverNotes || '').trim() || undefined,
+      emergencyContact: String(input.emergencyContact || '').trim() || undefined,
+      issuedBy,
+      issuedByUserId: authUser?.id,
+      createdAt: now,
+    };
+
+    if (!Array.isArray(this.state.teacherLeaveOutChits)) {
+      this.state.teacherLeaveOutChits = [];
+    }
+    this.state.teacherLeaveOutChits.unshift(chit);
+
+    const delegateSummary = Array.from(
+      new Set(dutiesDelegations.map((d) => d.delegateTeacherName))
+    ).join(', ');
+    const staffRemark = `Teacher Leave Chit (${days}d: ${startDate} to ${endDate}) · Duties delegated to ${delegateSummary}: ${reason}`;
+
+    const weekdayFromIso = (isoDate: string): DayOfWeek | null => {
+      const [y, m, d] = isoDate.split('-').map(Number);
+      if (!y || !m || !d) return null;
+      const dayIdx = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+      const map: Record<number, DayOfWeek | undefined> = {
+        1: 'Monday',
+        2: 'Tuesday',
+        3: 'Wednesday',
+        4: 'Thursday',
+        5: 'Friday',
+      };
+      return map[dayIdx] || null;
+    };
+
+    if (!Array.isArray(this.state.teacherLessonAttendance)) {
+      this.state.teacherLessonAttendance = [];
+    }
+
+    const teacherSlots = this.state.timetable.filter(
+      (slot) => slot.tenantId === tenantId && slot.teacherId === teacher.id
+    );
+
+    for (let offset = 0; offset < days; offset += 1) {
+      const targetDate = addDaysIso(startDate, offset);
+      // 1. Mark Teaching Staff roll-call Absent for the leave duration
+      const existingStaffRec = this.state.staffAttendance.find(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.date === targetDate &&
+          r.staffId === teacher.id &&
+          (r.staffCategory || 'Teaching') !== 'Non-Teaching'
+      );
+      if (existingStaffRec) {
+        existingStaffRec.status = 'Absent';
+        existingStaffRec.remarks = staffRemark;
+        existingStaffRec.recordedBy = issuedBy;
+        existingStaffRec.updatedAt = now;
+      } else {
+        this.state.staffAttendance.push({
+          id: `stf-att-${targetDate}-${teacher.id}`,
+          tenantId,
+          date: targetDate,
+          staffCategory: 'Teaching',
+          staffId: teacher.id,
+          staffName: teacher.name,
+          role: 'Teacher',
+          department: teacher.department || 'Faculty',
+          phone: teacher.phone || '',
+          status: 'Absent',
+          remarks: staffRemark,
+          recordedBy: issuedBy,
+          updatedAt: now,
+        });
+      }
+
+      // 2. Sync Teacher Lesson Attendance as Delegated for scheduled slots on weekdays
+      const dow = weekdayFromIso(targetDate);
+      if (dow && teacherSlots.length > 0) {
+        const daySlots = teacherSlots.filter((s) => s.day === dow);
+        for (const slot of daySlots) {
+          const matchedDelegation =
+            dutiesDelegations.find(
+              (d) =>
+                (d.grade &&
+                  d.subject &&
+                  d.grade.toLowerCase() === slot.grade.toLowerCase() &&
+                  d.subject.toLowerCase() === slot.subject.toLowerCase() &&
+                  (!d.section || d.section.toLowerCase() === slot.section.toLowerCase())) ||
+                (d.subject && d.subject.toLowerCase() === slot.subject.toLowerCase()) ||
+                (d.grade && d.grade.toLowerCase() === slot.grade.toLowerCase())
+            ) || dutiesDelegations[0];
+
+          const existingLesson = this.state.teacherLessonAttendance.find(
+            (r) =>
+              r.tenantId === tenantId &&
+              r.date === targetDate &&
+              r.timetableSlotId === slot.id
+          );
+          if (existingLesson && existingLesson.status === 'Recovered') continue;
+
+          const lessonRecord: TeacherLessonAttendanceRecord = {
+            id: existingLesson?.id || `tla-${randomUUID().slice(0, 8)}`,
+            tenantId,
+            termId: resolvedTerm?.id || existingLesson?.termId,
+            date: targetDate,
+            dayOfWeek: dow,
+            timetableSlotId: slot.id,
+            periodNumber: slot.period,
+            timeSlot: `${slot.startTime} - ${slot.endTime}`,
+            grade: slot.grade,
+            section: slot.section,
+            subject: slot.subject,
+            scheduledTeacherId: teacher.id,
+            scheduledTeacherName: teacher.name,
+            status: 'Delegated',
+            delegatedTeacherId: matchedDelegation.delegateTeacherId,
+            delegatedTeacherName: matchedDelegation.delegateTeacherName,
+            delegationNotes:
+              matchedDelegation.handoverInstructions ||
+              `Covered under Leave Chit (${matchedDelegation.dutyTitle})`,
+            topicCovered: existingLesson?.topicCovered,
+            remarks: `Leave Chit (${startDate} – ${endDate}): ${reason}`,
+            recordedBy: issuedBy,
+            recordedByUserId: authUser?.id,
+            createdAt: existingLesson?.createdAt || now,
+            updatedAt: now,
+          };
+          if (existingLesson) {
+            const idx = this.state.teacherLessonAttendance.findIndex(
+              (r) => r.id === existingLesson.id
+            );
+            if (idx !== -1) this.state.teacherLessonAttendance[idx] = lessonRecord;
+          } else {
+            this.state.teacherLessonAttendance.unshift(lessonRecord);
+          }
+        }
+      }
+    }
+
+    this.persist();
+    this.pushNotification(
+      tenantId,
+      'attendance',
+      `Teacher Leave Out Chit: ${teacher.name}`,
+      `${days} day(s) (${startDate} – ${endDate}) · ${dutiesDelegations.length} delegated ${
+        dutiesDelegations.length === 1 ? 'duty' : 'duties'
+      } (${delegateSummary}).`,
+      'attendance'
+    );
+    this.syncTenant(tenantId, 'attendance:teacher-leave-chit-created');
+    return chit;
+  }
+
+  deleteTeacherLeaveOutChit(tenantId: string, chitId: string, authUser?: TenantUser) {
+    this.requireTenant(tenantId);
+    const chit = (this.state.teacherLeaveOutChits || []).find(
+      (c) => c.id === chitId && c.tenantId === tenantId
+    );
+    if (!chit) {
+      throw new ConflictError('Teacher leave out chit not found.', 404);
+    }
+    if (authUser?.role === 'Teacher') {
+      const ownTeacher = this.findTeacherProfileForUser(tenantId, authUser);
+      const isOwner =
+        (ownTeacher && chit.teacherId === ownTeacher.id) ||
+        (chit.issuedByUserId && chit.issuedByUserId === authUser.id);
+      if (!isOwner) {
+        throw new ConflictError(
+          'Forbidden: You can only revoke your own Teacher Leave Out Chit.',
+          403
+        );
+      }
+    } else if (
+      authUser?.role &&
+      authUser.role !== 'Admin' &&
+      authUser.role !== 'Super Admin' &&
+      authUser.role !== 'Developer'
+    ) {
+      throw new ConflictError('Forbidden: Insufficient permissions to revoke leave chit.', 403);
+    }
+    this.assertTermOpen(tenantId, {
+      termId: chit.termId,
+      date: chit.startDate,
+      actionLabel: 'Revoking a teacher leave out chit',
+    });
+    this.state.teacherLeaveOutChits = (this.state.teacherLeaveOutChits || []).filter(
+      (c) => !(c.id === chitId && c.tenantId === tenantId)
+    );
+    this.persist();
+    this.syncTenant(tenantId, 'attendance:teacher-leave-chit-deleted');
   }
 
   addNonTeachingStaff(

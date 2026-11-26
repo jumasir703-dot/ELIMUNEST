@@ -60,11 +60,14 @@
   .print-only {
     display: block !important;
   }
-  body.print-leave-note-only * {
+  body.print-leave-note-only *,
+  body.print-teacher-leave-note-only * {
     visibility: hidden !important;
   }
   body.print-leave-note-only #leave-out-official-note-print,
-  body.print-leave-note-only #leave-out-official-note-print * {
+  body.print-leave-note-only #leave-out-official-note-print *,
+  body.print-teacher-leave-note-only #teacher-leave-official-note-print,
+  body.print-teacher-leave-note-only #teacher-leave-official-note-print * {
     visibility: visible !important;
   }
   body.print-leave-note-only #leave-out-official-note-print {
@@ -82,6 +85,22 @@
     background: #ffffff !important;
     color: #0f172a !important;
     text-align: center !important;
+  }
+  body.print-teacher-leave-note-only #teacher-leave-official-note-print {
+    display: block !important;
+    visibility: visible !important;
+    position: fixed !important;
+    left: 50% !important;
+    top: 20px !important;
+    transform: translateX(-50%) !important;
+    width: calc(100% - 40px) !important;
+    max-width: 720px !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 8px !important;
+    padding: 24px !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+    text-align: left !important;
   }
   body:has(.print-modal-root) * {
     visibility: hidden !important;

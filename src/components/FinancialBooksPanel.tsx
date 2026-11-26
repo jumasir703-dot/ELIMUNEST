@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Download,
   FileSpreadsheet,
+  FileText,
   Printer,
   Scale,
 } from 'lucide-react';
@@ -12,6 +13,7 @@ import {
   downloadFinancialBooksExcel,
   type AccountingExportBook,
 } from '../lib/accounting';
+import { downloadFinancialBookPdf } from '../lib/pdfDocuments';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import type { TenantWorkspaceData } from '../shared/types';
 import { TenantDocumentHeader } from './TenantDocumentHeader';
@@ -55,6 +57,20 @@ export function FinancialBooksPanel({ workspace, onNotify }: FinancialBooksPanel
       onNotify(`Downloaded ${label} (${fileName}).`);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : 'Excel export failed', 'error');
+    }
+  }
+
+  async function handleDownloadStatementPdf() {
+    try {
+      const fileName = await downloadFinancialBookPdf(
+        tenant,
+        report,
+        activeBook,
+        scheduleTab
+      );
+      onNotify(`Downloaded Financial Statement PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'PDF export failed', 'error');
     }
   }
 
@@ -104,6 +120,15 @@ export function FinancialBooksPanel({ workspace, onNotify }: FinancialBooksPanel
               </button>
             )}
           </div>
+
+          <button
+            type="button"
+            onClick={handleDownloadStatementPdf}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+          >
+            <FileText className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400" />
+            Download PDF
+          </button>
 
           <button
             type="button"

@@ -2009,6 +2009,38 @@ export function isDateInLeaveChit(
   return date >= chit.startDate && date <= chit.endDate;
 }
 
+export interface TeacherLeaveDutyDelegation {
+  id: string;
+  dutyTitle: string;
+  delegateTeacherId: string;
+  delegateTeacherName: string;
+  delegateDepartment?: string;
+  grade?: string;
+  section?: string;
+  subject?: string;
+  scheduleOrWindow?: string;
+  handoverInstructions?: string;
+}
+
+export interface TeacherLeaveOutChit {
+  id: string;
+  tenantId: string;
+  termId?: string;
+  teacherId: string;
+  teacherName: string;
+  department: string;
+  startDate: string; // YYYY-MM-DD (inclusive)
+  days: number;
+  endDate: string; // YYYY-MM-DD (inclusive)
+  reason: string;
+  dutiesDelegations: TeacherLeaveDutyDelegation[];
+  handoverNotes?: string;
+  emergencyContact?: string;
+  issuedBy: string;
+  issuedByUserId?: string;
+  createdAt: string;
+}
+
 export interface ExamCycle {
   id: string;
   tenantId: string;
@@ -2552,6 +2584,7 @@ export interface TenantWorkspaceData {
   staffAttendance: StaffAttendanceRecord[];
   teacherLessonAttendance?: TeacherLessonAttendanceRecord[];
   leaveOutChits: LeaveOutChit[];
+  teacherLeaveOutChits?: TeacherLeaveOutChit[];
   examCycles: ExamCycle[];
   examResults: ExamResult[];
   progressiveReports?: LearnerProgressiveEntry[];

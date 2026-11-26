@@ -44,6 +44,7 @@ import {
   type SchoolExpense,
   type StaffAttendanceRecord,
   type Student,
+  type TeacherLeaveOutChit,
   type TeacherLessonAttendanceRecord,
   type Tenant,
   type TenantUser,
@@ -270,6 +271,7 @@ export interface DatabaseState {
   staffAttendance: StaffAttendanceRecord[];
   teacherLessonAttendance?: TeacherLessonAttendanceRecord[];
   leaveOutChits: LeaveOutChit[];
+  teacherLeaveOutChits?: TeacherLeaveOutChit[];
   examCycles: ExamCycle[];
   examResults: ExamResult[];
   progressiveReports?: LearnerProgressiveEntry[];
@@ -842,6 +844,7 @@ export function createEmptyDatabase(): DatabaseState {
     staffAttendance: [],
     teacherLessonAttendance: [],
     leaveOutChits: [],
+    teacherLeaveOutChits: [],
     examCycles: [],
     examResults: [],
     progressiveReports: [],
@@ -2659,6 +2662,7 @@ export async function createSeedDatabase(options?: {
   ];
 
   const leaveOutChits: LeaveOutChit[] = [];
+  const teacherLeaveOutChits: TeacherLeaveOutChit[] = [];
   const receiptCounters: Record<string, number> = {
     'tenant-oakridge': 10,
     'tenant-westfield': 10,
@@ -2728,6 +2732,7 @@ export async function createSeedDatabase(options?: {
     attendance.push(...stRaphael.attendance);
     teacherLessonAttendance.push(...stRaphael.teacherLessonAttendance);
     leaveOutChits.push(...stRaphael.leaveOutChits);
+    teacherLeaveOutChits.push(...stRaphael.teacherLeaveOutChits);
     examCycles.push(...stRaphael.examCycles);
     examResults.push(...stRaphael.examResults);
     progressiveReports.push(...stRaphael.progressiveReports);
@@ -2771,6 +2776,7 @@ export async function createSeedDatabase(options?: {
       staffAttendance: [],
       teacherLessonAttendance,
       leaveOutChits,
+      teacherLeaveOutChits,
       examCycles,
       examResults,
       progressiveReports,

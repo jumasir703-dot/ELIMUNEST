@@ -23,6 +23,10 @@ import {
 import { saasApi } from '../lib/api';
 import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
 import {
+  downloadAcademicReportCardPdf,
+  downloadExamBroadsheetPdf,
+} from '../lib/pdfDocuments';
+import {
   buildBroadsheetRows,
   buildGradeAnalyticsReport,
   isNonSatExamResult,
@@ -716,9 +720,9 @@ export function ExamsModule({
     );
   }, [classWhatsAppQueue, queueSelectedStudentId]);
 
-  const reportCardData = useMemo(() => {
-    if (!reportCardStudentId || !activeCycle) return null;
-    const student = students.find((s) => s.id === reportCardStudentId);
+  function buildReportCardCore(studentId: string) {
+    if (!activeCycle) return null;
+    const student = students.find((s) => s.id === studentId);
     if (!student) return null;
     const studentIs844 = is844FormFourGrade(student.grade);
     const studentMaxPts = studentIs844 ? 12 : 8;
@@ -820,31 +824,6 @@ export function ExamsModule({
     });
 
     const guardianContact = resolveStudentGuardianContact(student, admissions);
-    const effectivePhone = whatsAppPhoneOverride.trim() || guardianContact.guardianPhone;
-    const whatsappMessage = buildReportCardWhatsAppMessage({
-      tenant,
-      cycle: activeCycle,
-      student,
-      guardianName: guardianContact.guardianName,
-      subjects: results.map((r) => ({
-        subject: r.subject,
-        score: r.score,
-        maxScore: r.maxScore || 100,
-        letterGrade: r.letterGrade,
-        remarks: r.remarks,
-      })),
-      totalMarks,
-      maxPossible,
-      avgScore,
-      meanGrade: overallGradeInfo?.letterGrade || '—',
-      meanPoints: overallGradeInfo ? String(overallGradeInfo.gpaPoints) : '0',
-      maxPoints: studentMaxPts,
-      overallRank: rankRow?.rank || null,
-      totalRanked,
-      customNote: whatsAppCustomNote,
-    });
-    const whatsappUrl = buildWhatsAppUrl(effectivePhone, whatsappMessage);
-    const lastDispatch = reportCardDispatchesByStudent.get(student.id) || null;
     return {
       student,
       results,
@@ -861,6 +840,155 @@ export function ExamsModule({
       previousCyclePoint,
       subjectComparison,
       guardianContact,
+    };
+  }
+
+  async function handleDownloadReportCardPdf(studentId: string, customRemark?: string) {
+    if (!activeCycle) return;
+    const core = buildReportCardCore(studentId);
+    if (!core) {
+      onNotify('Unable to load student report card data.', 'error');
+      return;
+    }
+    try {
+      const fileName = await downloadAcademicReportCardPdf({
+        tenant,
+        cycle: activeCycle,
+        student: core.student,
+        studentSystemLabel: core.studentSystemLabel,
+        guardianName: core.guardianContact.guardianName,
+        guardianPhone: core.guardianContact.guardianPhone,
+        totalMarks: core.totalMarks,
+        maxPossible: core.maxPossible,
+        avgScore: core.avgScore,
+        meanGrade: core.meanGrade,
+        meanPoints: core.meanPoints,
+        studentMaxPts: core.studentMaxPts,
+        overallRank: core.overallRank,
+        totalRanked: core.totalRanked,
+        results: core.results.map((r) => ({
+          subject: r.subject,
+          score: r.score,
+          maxScore: r.maxScore || 100,
+          letterGrade: r.letterGrade,
+          gpaPoints: r.gpaPoints,
+          resultStatus: r.resultStatus,
+          isNonSat: r.isNonSat,
+          remarks: r.remarks,
+          teacherInitials: r.teacherInitials,
+        })),
+        progressionPoints: core.progressionPoints.map((pt) => ({
+          title: pt.title,
+          term: pt.term,
+          avgScore: pt.avgScore,
+          meanGrade: pt.meanGrade,
+          deltaFromPrev: pt.deltaFromPrev,
+        })),
+        principalRemark: customRemark,
+      });
+      onNotify(`Downloaded Report Card PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to generate Report Card PDF',
+        'error'
+      );
+    }
+  }
+
+  async function handleDownloadMeritBroadsheetPdf() {
+    if (!activeCycle) return;
+    try {
+      const summaryRow =
+        effectiveStreamFilter === 'All'
+          ? gradeAnalyticsSummary.overallStreamSummary
+          : gradeAnalyticsSummary.streamComparisons.find(
+              (s) => s.stream === effectiveStreamFilter
+            ) || gradeAnalyticsSummary.overallStreamSummary;
+      const fileName = await downloadExamBroadsheetPdf({
+        tenant,
+        cycle: activeCycle,
+        grade: selectedGrade,
+        streamScope: effectiveStreamFilter,
+        scaleLabel: gradeAnalyticsSummary.is844 ? '8-4-4 KCSE' : 'KNEC CBE',
+        cohortMeanScore: summaryRow.meanScore,
+        cohortMeanGrade: summaryRow.meanGrade,
+        candidatesSat: summaryRow.candidatesSat,
+        candidatesEnrolled: summaryRow.enrolledCount,
+        streamSummaries: [
+          ...gradeAnalyticsSummary.streamComparisons,
+          gradeAnalyticsSummary.overallStreamSummary,
+        ].map((s) => ({
+          rank: s.rank,
+          stream: s.stream,
+          candidatesSat: s.candidatesSat,
+          enrolledCount: s.enrolledCount,
+          meanScore: s.meanScore,
+          meanPoints: s.meanPoints,
+          meanGrade: s.meanGrade,
+          passRate: s.passRate,
+          deviation: s.deviation,
+        })),
+        gradeHeaders: gradeAnalyticsSummary.scale.map((b) => b.grade),
+        subjectMatrix: gradeAnalyticsSummary.subjectMatrix.map((row) => ({
+          subject: row.subject,
+          gradeCounts: row.gradeCounts,
+          meanScore: row.meanScore,
+          meanGrade: row.meanGrade,
+        })),
+        registeredSubjects: gradeAnalyticsSummary.registeredSubjects,
+        broadsheetRows: gradeAnalyticsSummary.broadsheetRows.map((row) => ({
+          rank: row.rank,
+          studentCode: row.student.studentCode,
+          fullName: row.student.fullName,
+          section: row.student.section,
+          subjectMap: row.subjectMap,
+          subjectsSat: row.subjectsSat,
+          totalScore: row.totalScore,
+          meanScore: row.meanScore,
+          overallGrade: row.overallGrade,
+          meanDeviation: row.meanDeviation,
+        })),
+      });
+      onNotify(`Downloaded Merit Broadsheet PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to generate Broadsheet PDF',
+        'error'
+      );
+    }
+  }
+
+  const reportCardData = useMemo(() => {
+    if (!reportCardStudentId || !activeCycle) return null;
+    const core = buildReportCardCore(reportCardStudentId);
+    if (!core) return null;
+    const effectivePhone = whatsAppPhoneOverride.trim() || core.guardianContact.guardianPhone;
+    const whatsappMessage = buildReportCardWhatsAppMessage({
+      tenant,
+      cycle: activeCycle,
+      student: core.student,
+      guardianName: core.guardianContact.guardianName,
+      subjects: core.results.map((r) => ({
+        subject: r.subject,
+        score: r.score,
+        maxScore: r.maxScore || 100,
+        letterGrade: r.letterGrade,
+        remarks: r.remarks,
+      })),
+      totalMarks: core.totalMarks,
+      maxPossible: core.maxPossible,
+      avgScore: core.avgScore,
+      meanGrade: core.meanGrade,
+      meanPoints: core.meanPoints,
+      maxPoints: core.studentMaxPts,
+      overallRank: core.overallRank,
+      totalRanked: core.totalRanked,
+      customNote: whatsAppCustomNote,
+    });
+    const whatsappUrl = buildWhatsAppUrl(effectivePhone, whatsappMessage);
+    const lastDispatch = reportCardDispatchesByStudent.get(core.student.id) || null;
+    return {
+      ...core,
       effectivePhone,
       whatsappMessage,
       whatsappUrl,
@@ -1170,15 +1298,26 @@ export function ExamsModule({
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             {isAllSubjectsMode && (
-              <button
-                type="button"
-                onClick={handleExportMeritListExcel}
-                disabled={!activeCycle || allSubjectsRankedRows.length === 0}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
-              >
-                <Download className="h-3.5 w-3.5" />
-                Export Merit (.xlsx)
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={handleDownloadMeritBroadsheetPdf}
+                  disabled={!activeCycle || allSubjectsRankedRows.length === 0}
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  <FileText className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400" />
+                  Broadsheet PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportMeritListExcel}
+                  disabled={!activeCycle || allSubjectsRankedRows.length === 0}
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Export Merit (.xlsx)
+                </button>
+              </>
             )}
             <button
               type="button"
@@ -1401,6 +1540,15 @@ export function ExamsModule({
                             <FileText className="h-3.5 w-3.5" />
                             Report Card
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadReportCardPdf(row.student.id)}
+                            title={`Download ${row.student.fullName} Report Card (.pdf)`}
+                            className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-rose-600 hover:underline dark:text-rose-400"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            PDF
+                          </button>
                           {!isReadOnlyViewer && (
                             <button
                               type="button"
@@ -1557,6 +1705,15 @@ export function ExamsModule({
                               <FileText className="h-3.5 w-3.5" />
                               Report Card
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDownloadReportCardPdf(row.student.id)}
+                              title={`Download ${row.student.fullName} Report Card (.pdf)`}
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-rose-600 hover:underline dark:text-rose-400"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              PDF
+                            </button>
                             {!isReadOnlyViewer && (
                               <button
                                 type="button"
@@ -1598,6 +1755,19 @@ export function ExamsModule({
               >
                 <MessageCircle className="h-3.5 w-3.5" />
                 Send via WhatsApp
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void handleDownloadReportCardPdf(
+                    reportCardData.student.id,
+                    whatsAppCustomNote
+                  )
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download PDF
               </button>
               <button
                 type="button"

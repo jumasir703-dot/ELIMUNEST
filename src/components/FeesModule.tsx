@@ -46,6 +46,10 @@ import {
   type ParsedPaymentRow,
 } from '../lib/feesHelpers';
 import { saasApi } from '../lib/api';
+import {
+  downloadFeeStructurePdf,
+  downloadOfficialFeeReceiptPdf,
+} from '../lib/pdfDocuments';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import {
   buildFeeReminderWhatsAppMessage,
@@ -605,38 +609,34 @@ export function FeesModule({
     [votelineDrafts]
   );
 
-  // Proportional Official Fee Receipt allocation derived from matching Fee Structure votelines
-  const receiptBreakdown = useMemo(() => {
-    if (!receiptInvoice) return null;
+  function buildInvoiceBreakdown(inv: FeeInvoice, paymentSelector = 'LATEST') {
     const matchedStructure =
       feeStructures.find(
-        (fs) => fs.grade === receiptInvoice.grade && fs.term === receiptInvoice.term
-      ) || feeStructures.find((fs) => fs.grade === receiptInvoice.grade);
+        (fs) => fs.grade === inv.grade && fs.term === inv.term
+      ) || feeStructures.find((fs) => fs.grade === inv.grade);
 
     const votelines: FeeVoteline[] = matchedStructure
       ? getStructureVotelines(matchedStructure)
-      : [{ id: 'vl-general', name: 'Tuition & School Fees', amount: receiptInvoice.totalAmount }];
+      : [{ id: 'vl-general', name: 'Tuition & School Fees', amount: inv.totalAmount }];
 
     const weights = votelines.map((v) => Math.max(0, v.amount));
     const weightSum = weights.reduce((a, b) => a + b, 0);
 
     const latestPayment =
-      receiptInvoice.payments.length > 0
-        ? receiptInvoice.payments[receiptInvoice.payments.length - 1]
-        : null;
+      inv.payments.length > 0 ? inv.payments[inv.payments.length - 1] : null;
     const activePayment =
-      selectedReceiptPaymentId === 'ALL'
+      paymentSelector === 'ALL'
         ? null
-        : selectedReceiptPaymentId === 'LATEST'
+        : paymentSelector === 'LATEST'
         ? latestPayment
-        : receiptInvoice.payments.find((p) => p.id === selectedReceiptPaymentId) || latestPayment;
+        : inv.payments.find((p) => p.id === paymentSelector) || latestPayment;
 
     const receiptTargetAmount = activePayment
       ? Math.max(0, activePayment.appliedAmount ?? activePayment.amount)
-      : receiptInvoice.paidAmount;
-    const billedAlloc = allocateProportionally(receiptInvoice.totalAmount, weights);
+      : inv.paidAmount;
+    const billedAlloc = allocateProportionally(inv.totalAmount, weights);
     const receiptAlloc = allocateProportionally(receiptTargetAmount, weights);
-    const paidAlloc = allocateProportionally(receiptInvoice.paidAmount, weights);
+    const paidAlloc = allocateProportionally(inv.paidAmount, weights);
 
     const rows = votelines.map((v, idx) => {
       const sharePct =
@@ -662,7 +662,51 @@ export function FeesModule({
       receiptTargetAmount,
       rows,
     };
+  }
+
+  // Proportional Official Fee Receipt allocation derived from matching Fee Structure votelines
+  const receiptBreakdown = useMemo(() => {
+    if (!receiptInvoice) return null;
+    return buildInvoiceBreakdown(receiptInvoice, selectedReceiptPaymentId);
   }, [receiptInvoice, feeStructures, selectedReceiptPaymentId]);
+
+  async function handleDownloadInvoicePdf(inv: FeeInvoice, paymentSelector = 'LATEST') {
+    try {
+      const breakdown = buildInvoiceBreakdown(inv, paymentSelector);
+      const fileName = await downloadOfficialFeeReceiptPdf({
+        tenant,
+        invoice: inv,
+        activePayment: breakdown.activePayment,
+        receiptTargetAmount: breakdown.receiptTargetAmount,
+        matchedStructureLabel: breakdown.matchedStructure
+          ? `${breakdown.matchedStructure.grade} - ${breakdown.matchedStructure.term}`
+          : undefined,
+        rows: breakdown.rows,
+        independentVotelines: getInvoiceIndependentVotelines(inv),
+      });
+      onNotify(
+        `Downloaded ${inv.payments.length > 0 ? 'Official Fee Receipt' : 'Fee Statement'} PDF (${fileName}).`
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to generate PDF', 'error');
+    }
+  }
+
+  async function handleDownloadStructurePdf(fs: FeeStructure) {
+    try {
+      const fileName = await downloadFeeStructurePdf(
+        tenant,
+        fs,
+        independentVotelines
+      );
+      onNotify(`Downloaded Fee Structure PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to generate Fee Structure PDF',
+        'error'
+      );
+    }
+  }
 
   const metrics = useMemo(() => {
     const totalBilled = invoices.reduce((a, i) => a + i.totalAmount, 0);
@@ -2126,6 +2170,19 @@ export function FeesModule({
                                 Receipt
                               </button>
                             )}
+                            <button
+                              type="button"
+                              onClick={() => void handleDownloadInvoicePdf(inv)}
+                              title={
+                                inv.payments.length > 0
+                                  ? `Download Official Receipt PDF for ${inv.studentName}`
+                                  : `Download Fee Statement PDF for ${inv.studentName}`
+                              }
+                              className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-semibold text-rose-600 hover:underline dark:text-rose-400"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              PDF
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -2694,11 +2751,19 @@ export function FeesModule({
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setShareStructureModal(savedFs)}
+                      onClick={() => void handleDownloadStructurePdf(savedFs)}
                       className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
                     >
+                      <Download className="h-3.5 w-3.5" />
+                      Download PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShareStructureModal(savedFs)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-300"
+                    >
                       <Printer className="h-3.5 w-3.5" />
-                      Download / Print Fee Structure
+                      Preview / Print
                     </button>
                     <button
                       type="button"
@@ -2812,12 +2877,21 @@ export function FeesModule({
                           </button>
                           <button
                             type="button"
-                            onClick={() => setShareStructureModal(fs)}
-                            title="Print / Download Fee Structure with School Logo & Contacts"
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                            onClick={() => void handleDownloadStructurePdf(fs)}
+                            title="Download Fee Structure PDF"
+                            className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 dark:border-rose-800/70 dark:bg-rose-950/40 dark:text-rose-300"
                           >
                             <Download className="h-3 w-3" />
-                            PDF / Print
+                            PDF
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShareStructureModal(fs)}
+                            title="Preview / Print Fee Structure with School Logo & Contacts"
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                          >
+                            <Printer className="h-3 w-3" />
+                            Preview
                           </button>
                           <button
                             type="button"
@@ -3605,6 +3679,16 @@ export function FeesModule({
                   Remind Balance
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() =>
+                  void handleDownloadInvoicePdf(receiptInvoice, selectedReceiptPaymentId)
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download PDF
+              </button>
               <button
                 type="button"
                 onClick={() => window.print()}
@@ -4558,6 +4642,7 @@ export function FeesModule({
             setShareStructureModal(null);
             setActiveTab('independent');
           }}
+          onNotify={onNotify}
         />
       )}
 

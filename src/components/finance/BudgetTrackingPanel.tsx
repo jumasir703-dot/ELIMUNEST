@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { CheckCircle2, Download, Plus, Printer, X, XCircle } from 'lucide-react';
+import { CheckCircle2, Download, FileText, Plus, Printer, X, XCircle } from 'lucide-react';
 import { TenantDocumentHeader } from '../TenantDocumentHeader';
 import { createBrandedWorksheetFromObjects } from '../../lib/documentBranding';
+import { downloadBudgetReportPdf } from '../../lib/pdfDocuments';
 import { saasApi } from '../../lib/api';
 import { formatCurrency, formatDateShort } from '../../lib/format';
 import {
@@ -425,6 +426,21 @@ export function BudgetTrackingPanel({
     onNotify('Exported Budget vs Actuals Variance report to Excel.');
   }
 
+  async function handleDownloadBudgetPdf() {
+    try {
+      const fileName = await downloadBudgetReportPdf({
+        tenant,
+        fiscalYear: selectedFiscalYear,
+        term: selectedTerm,
+        totals,
+        rows,
+      });
+      onNotify(`Downloaded Budget Tracking PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Unable to generate Budget PDF', 'error');
+    }
+  }
+
   async function handleConfirmBudgetDecision(e: React.FormEvent) {
     e.preventDefault();
     if (!approvalTarget) return;
@@ -528,6 +544,14 @@ export function BudgetTrackingPanel({
                 Create Budget
               </button>
             )}
+            <button
+              type="button"
+              onClick={handleDownloadBudgetPdf}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+            >
+              <FileText className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400" />
+              Download PDF
+            </button>
             <button
               type="button"
               onClick={() => window.print()}

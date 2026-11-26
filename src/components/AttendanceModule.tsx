@@ -18,6 +18,7 @@ import {
   resolveTenantDocumentMeta,
 } from '../lib/documentBranding';
 import { saasApi } from '../lib/api';
+import { downloadTeacherLeaveChitPdf } from '../lib/pdfDocuments';
 import {
   addDaysIso,
   getStreamsForGrade,
@@ -27,6 +28,7 @@ import {
   isTeacherAssignedToCohort,
   type DayOfWeek,
   type LeaveOutChit,
+  type TeacherLeaveOutChit,
   type TeacherLessonAttendanceRecord,
   type TeacherLessonAttendanceStatus,
   type Tenant,
@@ -121,6 +123,7 @@ export function AttendanceModule({
     staffAttendance = [],
     teacherLessonAttendance = [],
     leaveOutChits = [],
+    teacherLeaveOutChits = [],
     timetable = [],
   } = workspace;
 
@@ -186,13 +189,48 @@ export function AttendanceModule({
   const [newStaffPhone, setNewStaffPhone] = useState('');
   const [addingStaff, setAddingStaff] = useState(false);
 
-  // Leave Out Chit form state
+  // Leave Out Chit form state (Student)
   const [chitStudentId, setChitStudentId] = useState('');
   const [chitStartDate, setChitStartDate] = useState('2026-11-16');
   const [chitDays, setChitDays] = useState<number>(1);
   const [chitReason, setChitReason] = useState('');
   const [chitSaving, setChitSaving] = useState(false);
   const [selectedNoteChitId, setSelectedNoteChitId] = useState<string>('');
+
+  // Teacher Leave Out Chit with Duties Delegation state
+  const [tChitTeacherId, setTChitTeacherId] = useState<string>(
+    tenant.teachers[0]?.id || ''
+  );
+  const [tChitStartDate, setTChitStartDate] = useState<string>('2026-11-16');
+  const [tChitDays, setTChitDays] = useState<number>(1);
+  const [tChitReason, setTChitReason] = useState<string>('');
+  const [tChitHandoverNotes, setTChitHandoverNotes] = useState<string>('');
+  const [tChitEmergencyContact, setTChitEmergencyContact] = useState<string>('');
+  const [tChitDelegations, setTChitDelegations] = useState<
+    Array<{
+      rowId: string;
+      dutyTitle: string;
+      delegateTeacherId: string;
+      grade: string;
+      section: string;
+      subject: string;
+      scheduleOrWindow: string;
+      handoverInstructions: string;
+    }>
+  >(() => [
+    {
+      rowId: 'tdel-init-1',
+      dutyTitle: '',
+      delegateTeacherId: tenant.teachers[1]?.id || '',
+      grade: '',
+      section: '',
+      subject: '',
+      scheduleOrWindow: '',
+      handoverInstructions: '',
+    },
+  ]);
+  const [tChitSaving, setTChitSaving] = useState(false);
+  const [selectedTeacherChitId, setSelectedTeacherChitId] = useState<string>('');
 
   // Enforce Admin-only viewership for Teaching and Non-Teaching Staff attendance, while allowing Teachers Student + Lesson Attendance
   useEffect(() => {
@@ -321,7 +359,49 @@ export function AttendanceModule({
   // Keep leave chit start date aligned when user switches roll-call date
   useEffect(() => {
     setChitStartDate(date);
+    setTChitStartDate(date);
   }, [date]);
+
+  useEffect(() => {
+    if (isTeacherRole && selectedTeacher?.id) {
+      setTChitTeacherId(selectedTeacher.id);
+    } else if (!tenant.teachers.some((t) => t.id === tChitTeacherId)) {
+      setTChitTeacherId(tenant.teachers[0]?.id || '');
+    }
+  }, [isTeacherRole, selectedTeacher?.id, tenant.teachers, tChitTeacherId]);
+
+  const effectiveTChitTeacherId =
+    isTeacherRole && selectedTeacher ? selectedTeacher.id : tChitTeacherId;
+
+  const visibleTeacherLeaveChits = useMemo(() => {
+    if (isAdmin) return teacherLeaveOutChits;
+    if (isTeacherRole && selectedTeacher) {
+      return teacherLeaveOutChits.filter(
+        (c) =>
+          c.teacherId === selectedTeacher.id ||
+          c.dutiesDelegations.some((d) => d.delegateTeacherId === selectedTeacher.id)
+      );
+    }
+    return [];
+  }, [teacherLeaveOutChits, isAdmin, isTeacherRole, selectedTeacher]);
+
+  useEffect(() => {
+    if (visibleTeacherLeaveChits.length === 0) {
+      if (selectedTeacherChitId) setSelectedTeacherChitId('');
+      return;
+    }
+    if (!visibleTeacherLeaveChits.some((c) => c.id === selectedTeacherChitId)) {
+      setSelectedTeacherChitId(visibleTeacherLeaveChits[0].id);
+    }
+  }, [visibleTeacherLeaveChits, selectedTeacherChitId]);
+
+  const selectedTeacherLeaveChit = useMemo(
+    () =>
+      visibleTeacherLeaveChits.find((c) => c.id === selectedTeacherChitId) ||
+      visibleTeacherLeaveChits[0] ||
+      null,
+    [visibleTeacherLeaveChits, selectedTeacherChitId]
+  );
 
   const visibleLeaveOutChits = useMemo(() => {
     if (isAdmin || isReadOnlyViewer) return leaveOutChits;
@@ -1530,6 +1610,209 @@ export function AttendanceModule({
     window.addEventListener('afterprint', cleanup);
     window.print();
     setTimeout(cleanup, 1500);
+  }
+
+  function handleAddTeacherDutyRow() {
+    const defaultDelegate =
+      tenant.teachers.find((t) => t.id !== effectiveTChitTeacherId)?.id || '';
+    setTChitDelegations((prev) => [
+      ...prev,
+      {
+        rowId: `tdel-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        dutyTitle: '',
+        delegateTeacherId: defaultDelegate,
+        grade: '',
+        section: '',
+        subject: '',
+        scheduleOrWindow: '',
+        handoverInstructions: '',
+      },
+    ]);
+  }
+
+  function handleAutoLoadTeacherDuties() {
+    if (!effectiveTChitTeacherId) {
+      onNotify('Select a teacher first.', 'error');
+      return;
+    }
+    const targetTeacher = tenant.teachers.find((t) => t.id === effectiveTChitTeacherId);
+    const otherTeachers = tenant.teachers.filter((t) => t.id !== effectiveTChitTeacherId);
+    const sameDeptDelegate =
+      otherTeachers.find((t) => t.department === targetTeacher?.department) ||
+      otherTeachers[0];
+    const defaultDelegateId = sameDeptDelegate?.id || '';
+
+    const weekdaysInWindow = new Set<DayOfWeek>();
+    const safeDays = Math.max(1, Math.min(30, tChitDays || 1));
+    for (let i = 0; i < safeDays; i++) {
+      const wd = resolveWeekdayFromIso(addDaysIso(tChitStartDate || date, i));
+      if (wd) weekdaysInWindow.add(wd);
+    }
+
+    const teacherSlots = timetable.filter((s) => s.teacherId === effectiveTChitTeacherId);
+    const matchedSlots =
+      weekdaysInWindow.size > 0
+        ? teacherSlots.filter((s) => weekdaysInWindow.has(s.day))
+        : teacherSlots;
+
+    if (matchedSlots.length === 0) {
+      onNotify(
+        `No scheduled timetable slots found for ${targetTeacher?.name || 'teacher'} in that window. Add duties manually below.`,
+        'error'
+      );
+      return;
+    }
+
+    setTChitDelegations(
+      matchedSlots.map((slot, idx) => ({
+        rowId: `tdel-slot-${slot.id}-${idx}`,
+        dutyTitle: `${slot.subject} Lesson (${slot.grade} ${slot.section})`,
+        delegateTeacherId: defaultDelegateId,
+        grade: slot.grade,
+        section: slot.section,
+        subject: slot.subject,
+        scheduleOrWindow: `${slot.day} P${slot.period}`,
+        handoverInstructions: `Cover ${slot.subject} Period ${slot.period} per scheme of work.`,
+      }))
+    );
+    onNotify(
+      `Loaded ${matchedSlots.length} scheduled lesson(s) for ${targetTeacher?.name || 'teacher'}. Confirm or adjust covering teachers.`
+    );
+  }
+
+  async function handleIssueTeacherLeaveChit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canUseTeacherLessonAttendance) return;
+    if (!effectiveTChitTeacherId) {
+      onNotify('Select the teacher taking leave.', 'error');
+      return;
+    }
+    if (!tChitReason.trim()) {
+      onNotify('Enter the reason for teacher leave.', 'error');
+      return;
+    }
+
+    const validDelegations = tChitDelegations
+      .map((d) => ({
+        dutyTitle: d.dutyTitle.trim(),
+        delegateTeacherId: d.delegateTeacherId,
+        grade: d.grade.trim() || undefined,
+        section: d.section.trim() || undefined,
+        subject: d.subject.trim() || undefined,
+        scheduleOrWindow: d.scheduleOrWindow.trim() || undefined,
+        handoverInstructions: d.handoverInstructions.trim() || undefined,
+      }))
+      .filter((d) => d.dutyTitle.length > 0 || d.delegateTeacherId.length > 0);
+
+    if (validDelegations.length === 0) {
+      onNotify(
+        'Include at least one delegated duty and covering teacher before issuing a teacher leave out chit.',
+        'error'
+      );
+      return;
+    }
+
+    for (const del of validDelegations) {
+      if (!del.dutyTitle) {
+        onNotify('Every delegation row must specify the duty or lesson being delegated.', 'error');
+        return;
+      }
+      if (!del.delegateTeacherId) {
+        onNotify(`Select a covering teacher for "${del.dutyTitle}".`, 'error');
+        return;
+      }
+      if (del.delegateTeacherId === effectiveTChitTeacherId) {
+        onNotify('Covering teacher must be different from the teacher going on leave.', 'error');
+        return;
+      }
+    }
+
+    setTChitSaving(true);
+    try {
+      const actorLabel =
+        isTeacherRole && selectedTeacher ? selectedTeacher.name : `${currentRole} Desk`;
+      const { chit } = await saasApi.createTeacherLeaveOutChit(tenant.id, {
+        teacherId: effectiveTChitTeacherId,
+        startDate: tChitStartDate || date,
+        days: Math.max(1, tChitDays || 1),
+        reason: tChitReason.trim(),
+        handoverNotes: tChitHandoverNotes.trim() || undefined,
+        emergencyContact: tChitEmergencyContact.trim() || undefined,
+        issuedBy: actorLabel,
+        dutiesDelegations: validDelegations,
+      });
+      await onRefresh();
+      setSelectedTeacherChitId(chit.id);
+      setTChitReason('');
+      setTChitHandoverNotes('');
+      setTChitDays(1);
+      setTChitDelegations([
+        {
+          rowId: `tdel-reset-${Date.now()}`,
+          dutyTitle: '',
+          delegateTeacherId:
+            tenant.teachers.find((t) => t.id !== effectiveTChitTeacherId)?.id || '',
+          grade: '',
+          section: '',
+          subject: '',
+          scheduleOrWindow: '',
+          handoverInstructions: '',
+        },
+      ]);
+      onNotify(
+        `Teacher leave out chit issued for ${chit.teacherName} (${chit.dutiesDelegations.length} delegated duty mandate(s) synced).`
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Failed to issue teacher leave out chit',
+        'error'
+      );
+    } finally {
+      setTChitSaving(false);
+    }
+  }
+
+  async function handleDeleteTeacherLeaveChit(chit: TeacherLeaveOutChit) {
+    if (!canUseTeacherLessonAttendance) return;
+    setTChitSaving(true);
+    try {
+      await saasApi.deleteTeacherLeaveOutChit(tenant.id, chit.id);
+      await onRefresh();
+      onNotify(`Revoked teacher leave out chit for ${chit.teacherName}.`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Failed to revoke teacher leave out chit',
+        'error'
+      );
+    } finally {
+      setTChitSaving(false);
+    }
+  }
+
+  async function handleDownloadTeacherLeavePdf(chit: TeacherLeaveOutChit) {
+    try {
+      const fileName = await downloadTeacherLeaveChitPdf(tenant, chit);
+      onNotify(`Downloaded Teacher Leave Out Chit PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to generate Teacher Leave Chit PDF',
+        'error'
+      );
+    }
+  }
+
+  function handlePrintTeacherLeaveChit(chit: TeacherLeaveOutChit) {
+    setSelectedTeacherChitId(chit.id);
+    setTimeout(() => {
+      document.body.classList.add('print-teacher-leave-note-only');
+      const cleanup = () => {
+        document.body.classList.remove('print-teacher-leave-note-only');
+        window.removeEventListener('afterprint', cleanup);
+      };
+      window.addEventListener('afterprint', cleanup);
+      window.print();
+      setTimeout(cleanup, 1500);
+    }, 40);
   }
 
   const summaryTabLabel =
@@ -2940,6 +3223,540 @@ export function AttendanceModule({
               </table>
             </div>
           </div>
+
+          {/* Teacher Leave Out Chit & Duties Delegation Panel */}
+          {(() => {
+            const tChitEndDate = addDaysIso(tChitStartDate || date, Math.max(1, tChitDays) - 1);
+            const tOtherCandidates = tenant.teachers.filter(
+              (t) => t.id !== effectiveTChitTeacherId
+            );
+            return (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+                  <div className="flex flex-col gap-2 border-b border-slate-100 pb-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
+                    <div className="flex items-start gap-2.5">
+                      <CalendarOff className="mt-0.5 h-4 w-4 text-blue-600 dark:text-blue-400" />
+                      <div>
+                        <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          Teacher Leave Out Chit &amp; Duties Delegation
+                        </h2>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Issue an official teacher leave out chit with structured duty &amp; lesson delegations. Active leave auto-marks staff roll call Absent and sets scheduled lessons to Delegated.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleAutoLoadTeacherDuties}
+                      disabled={isDateTermClosed || !effectiveTChitTeacherId}
+                      className="inline-flex items-center gap-1.5 self-start whitespace-nowrap shrink-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-40 sm:self-auto dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300"
+                    >
+                      <UserPlus className="h-3.5 w-3.5" />
+                      Auto-Load Timetable Lessons
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleIssueTeacherLeaveChit} className="mt-4 space-y-4">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                      <div className="sm:col-span-3">
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Teacher Taking Leave *
+                        </label>
+                        <select
+                          aria-label="Teacher taking leave"
+                          disabled={isTeacherRole || isDateTermClosed}
+                          value={effectiveTChitTeacherId}
+                          onChange={(e) => setTChitTeacherId(e.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 disabled:opacity-70 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        >
+                          {tenant.teachers.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name} ({t.department})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Start Date *
+                        </label>
+                        <input
+                          required
+                          type="date"
+                          aria-label="Teacher leave start date"
+                          disabled={isDateTermClosed}
+                          value={tChitStartDate}
+                          onChange={(e) => setTChitStartDate(e.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Days *
+                        </label>
+                        <input
+                          required
+                          type="number"
+                          min={1}
+                          max={90}
+                          aria-label="Teacher leave duration days"
+                          disabled={isDateTermClosed}
+                          value={tChitDays}
+                          onChange={(e) => setTChitDays(Math.max(1, Number(e.target.value) || 1))}
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono text-xs text-slate-900 tabular-nums dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Reason for Leave *
+                        </label>
+                        <input
+                          required
+                          type="text"
+                          aria-label="Teacher leave reason"
+                          disabled={isDateTermClosed}
+                          value={tChitReason}
+                          onChange={(e) => setTChitReason(e.target.value)}
+                          placeholder="e.g. KNEC Workshop, Medical Appointment..."
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          Emergency Phone
+                        </label>
+                        <input
+                          type="text"
+                          disabled={isDateTermClosed}
+                          value={tChitEmergencyContact}
+                          onChange={(e) => setTChitEmergencyContact(e.target.value)}
+                          placeholder="+254 7..."
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Structured Duties Delegation Rows */}
+                    <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 space-y-2.5 dark:border-slate-800 dark:bg-slate-950/40">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                            Mandatory Duties &amp; Lesson Delegations ({tChitDelegations.length})
+                          </span>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            Assign every class, duty-on-week role, or club/co-curricular responsibility to a covering teacher.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleAddTeacherDutyRow}
+                          disabled={isDateTermClosed}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                        >
+                          <Plus className="h-3 w-3" />
+                          Add Duty Row
+                        </button>
+                      </div>
+
+                      <div className="space-y-2">
+                        {tChitDelegations.map((del, idx) => (
+                          <div
+                            key={del.rowId}
+                            className="grid grid-cols-1 gap-2 rounded-lg border border-slate-200 bg-white p-2.5 sm:grid-cols-12 sm:items-end dark:border-slate-800 dark:bg-slate-900"
+                          >
+                            <div className="sm:col-span-3">
+                              <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                                Duty / Lesson #{idx + 1} *
+                              </label>
+                              <input
+                                type="text"
+                                aria-label={`Delegated duty title ${idx + 1}`}
+                                disabled={isDateTermClosed}
+                                value={del.dutyTitle}
+                                onChange={(e) =>
+                                  setTChitDelegations((prev) =>
+                                    prev.map((row) =>
+                                      row.rowId === del.rowId
+                                        ? { ...row, dutyTitle: e.target.value }
+                                        : row
+                                    )
+                                  )
+                                }
+                                placeholder="e.g. Grade 9 Mathematics P2 / Games Duty"
+                                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              />
+                            </div>
+                            <div className="sm:col-span-3">
+                              <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                                Covering Mandate Teacher *
+                              </label>
+                              <select
+                                aria-label={`Delegate teacher ${idx + 1}`}
+                                disabled={isDateTermClosed}
+                                value={del.delegateTeacherId}
+                                onChange={(e) =>
+                                  setTChitDelegations((prev) =>
+                                    prev.map((row) =>
+                                      row.rowId === del.rowId
+                                        ? { ...row, delegateTeacherId: e.target.value }
+                                        : row
+                                    )
+                                  )
+                                }
+                                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              >
+                                <option value="">Select covering teacher...</option>
+                                {tOtherCandidates.map((t) => (
+                                  <option key={t.id} value={t.id}>
+                                    {t.name} ({t.department})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                                Window / Period
+                              </label>
+                              <input
+                                type="text"
+                                disabled={isDateTermClosed}
+                                value={del.scheduleOrWindow}
+                                onChange={(e) =>
+                                  setTChitDelegations((prev) =>
+                                    prev.map((row) =>
+                                      row.rowId === del.rowId
+                                        ? { ...row, scheduleOrWindow: e.target.value }
+                                        : row
+                                    )
+                                  )
+                                }
+                                placeholder="e.g. Mon P2 / Full Week"
+                                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              />
+                            </div>
+                            <div className="sm:col-span-3">
+                              <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                                Handover Instructions
+                              </label>
+                              <input
+                                type="text"
+                                disabled={isDateTermClosed}
+                                value={del.handoverInstructions}
+                                onChange={(e) =>
+                                  setTChitDelegations((prev) =>
+                                    prev.map((row) =>
+                                      row.rowId === del.rowId
+                                        ? { ...row, handoverInstructions: e.target.value }
+                                        : row
+                                    )
+                                  )
+                                }
+                                placeholder="Worksheet, exercise book location..."
+                                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                              />
+                            </div>
+                            <div className="sm:col-span-1 sm:flex sm:justify-end">
+                              <button
+                                type="button"
+                                disabled={tChitDelegations.length <= 1 || isDateTermClosed}
+                                onClick={() =>
+                                  setTChitDelegations((prev) =>
+                                    prev.filter((row) => row.rowId !== del.rowId)
+                                  )
+                                }
+                                aria-label={`Remove duty row ${idx + 1}`}
+                                className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-30 dark:hover:bg-rose-950/30"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                          General Handover &amp; Materials Note (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          disabled={isDateTermClosed}
+                          value={tChitHandoverNotes}
+                          onChange={(e) => setTChitHandoverNotes(e.target.value)}
+                          placeholder="e.g. Keys and marked scripts placed in Staffroom Locker 4."
+                          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        />
+                        <p className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                          Leave window: {tChitStartDate || date} → {tChitEndDate} ({tChitDays} day
+                          {tChitDays === 1 ? '' : 's'})
+                        </p>
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={tChitSaving || isDateTermClosed}
+                        className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-700"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        {tChitSaving ? 'Issuing Chit...' : 'Issue Teacher Leave Chit'}
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Teacher Leave Out Chits Register Table */}
+                  {visibleTeacherLeaveChits.length > 0 && (
+                    <div className="mt-5 overflow-x-auto border-t border-slate-100 pt-4 dark:border-slate-800">
+                      <table className="w-full text-left text-xs">
+                        <thead>
+                          <tr className="text-[11px] font-medium uppercase text-slate-500 dark:text-slate-400">
+                            <th className="py-2 pr-3">Teacher</th>
+                            <th className="py-2 pr-3">Window</th>
+                            <th className="py-2 pr-3">Reason</th>
+                            <th className="py-2 pr-3">Duties Delegated &amp; Mandate Holders</th>
+                            <th className="py-2 pr-3">Status ({date})</th>
+                            <th className="py-2 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {visibleTeacherLeaveChits.map((chit) => {
+                            const activeToday = isDateInLeaveChit(chit, date);
+                            const lapsed = date > chit.endDate;
+                            const canDelete =
+                              isAdmin ||
+                              (isTeacherRole &&
+                                selectedTeacher &&
+                                chit.teacherId === selectedTeacher.id);
+                            return (
+                              <tr key={chit.id} className="align-top">
+                                <td className="py-2.5 pr-3">
+                                  <div className="font-semibold text-slate-900 dark:text-slate-100">
+                                    {chit.teacherName}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                    {chit.department}
+                                  </div>
+                                </td>
+                                <td className="py-2.5 pr-3 font-mono text-slate-700 tabular-nums whitespace-nowrap dark:text-slate-300">
+                                  {chit.days}d ({chit.startDate} → {chit.endDate})
+                                </td>
+                                <td className="py-2.5 pr-3 text-slate-700 dark:text-slate-300">
+                                  <div>{chit.reason}</div>
+                                  {chit.handoverNotes && (
+                                    <div className="mt-0.5 text-[11px] text-slate-500">
+                                      Handover: {chit.handoverNotes}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2.5 pr-3">
+                                  <ul className="space-y-1">
+                                    {chit.dutiesDelegations.map((del) => (
+                                      <li
+                                        key={del.id}
+                                        className="rounded border border-blue-200/80 bg-blue-50/50 px-2 py-1 text-[11px] dark:border-blue-900/60 dark:bg-blue-950/20"
+                                      >
+                                        <span className="font-semibold text-slate-900 dark:text-slate-100">
+                                          {del.dutyTitle}
+                                        </span>{' '}
+                                        →{' '}
+                                        <span className="font-semibold text-blue-700 dark:text-blue-300">
+                                          {del.delegateTeacherName}
+                                        </span>
+                                        {del.scheduleOrWindow && (
+                                          <span className="ml-1 font-mono text-slate-500">
+                                            ({del.scheduleOrWindow})
+                                          </span>
+                                        )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </td>
+                                <td className="py-2.5 pr-3 whitespace-nowrap">
+                                  <span
+                                    className={`inline-block rounded border px-2 py-0.5 text-[11px] font-medium ${
+                                      activeToday
+                                        ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300'
+                                        : lapsed
+                                        ? 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400'
+                                        : 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300'
+                                    }`}
+                                  >
+                                    {activeToday
+                                      ? 'Active · Lessons Delegated'
+                                      : lapsed
+                                      ? 'Lapsed'
+                                      : `Starts ${chit.startDate}`}
+                                  </span>
+                                </td>
+                                <td className="py-2.5 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-2.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDownloadTeacherLeavePdf(chit)}
+                                      className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 hover:underline dark:text-rose-400"
+                                    >
+                                      <Download className="h-3.5 w-3.5" />
+                                      PDF
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handlePrintTeacherLeaveChit(chit)}
+                                      className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400"
+                                    >
+                                      <Printer className="h-3.5 w-3.5" />
+                                      Print
+                                    </button>
+                                    {canDelete && (
+                                      <button
+                                        type="button"
+                                        disabled={tChitSaving || isDateTermClosed}
+                                        onClick={() => void handleDeleteTeacherLeaveChit(chit)}
+                                        className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-red-600 disabled:opacity-40 dark:text-slate-400 dark:hover:text-red-400"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                        Revoke
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Official Printable Teacher Leave Out Chit & Delegation Slip */}
+                {selectedTeacherLeaveChit && (
+                  <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between no-print">
+                      <div className="flex items-center gap-2">
+                        <FileText className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                            Official Teacher Leave Out Chit &amp; Delegation Slip
+                          </h3>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Includes full duty &amp; lesson mandate schedule and handover sign-off.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          aria-label="Select teacher leave chit for PDF or print"
+                          value={selectedTeacherLeaveChit.id}
+                          onChange={(e) => setSelectedTeacherChitId(e.target.value)}
+                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                        >
+                          {visibleTeacherLeaveChits.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.teacherName} · {c.startDate} ({c.dutiesDelegations.length} duties)
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleDownloadTeacherLeavePdf(selectedTeacherLeaveChit)
+                          }
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Download PDF
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handlePrintTeacherLeaveChit(selectedTeacherLeaveChit)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          <Printer className="h-3.5 w-3.5" />
+                          Print Chit
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      id="teacher-leave-official-note-print"
+                      className="hidden mx-auto max-w-3xl rounded-lg border border-slate-300 bg-white p-6 text-slate-900"
+                    >
+                      <TenantDocumentHeader
+                        tenant={tenant}
+                        documentTitle="Official Teacher Leave Out Chit & Duties Delegation"
+                        subtitle={`Issued: ${formatOfficialDate(
+                          selectedTeacherLeaveChit.createdAt.slice(0, 10)
+                        )} · Department: ${selectedTeacherLeaveChit.department}`}
+                        rightMeta={[
+                          { label: 'Chit Ref', value: selectedTeacherLeaveChit.id.toUpperCase() },
+                          {
+                            label: 'Duration',
+                            value: `${selectedTeacherLeaveChit.days} Day${
+                              selectedTeacherLeaveChit.days === 1 ? '' : 's'
+                            }`,
+                          },
+                        ]}
+                        compact
+                      />
+                      <div className="mt-3 grid grid-cols-2 gap-3 border-b border-slate-200 pb-3 text-xs sm:grid-cols-3">
+                        <div>
+                          <span className="text-slate-500">Teacher on Leave:</span>{' '}
+                          <strong>{selectedTeacherLeaveChit.teacherName}</strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Leave Window:</span>{' '}
+                          <strong className="font-mono">
+                            {formatOfficialDate(selectedTeacherLeaveChit.startDate)} →{' '}
+                            {formatOfficialDate(selectedTeacherLeaveChit.endDate)}
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Authorized By:</span>{' '}
+                          <strong>{selectedTeacherLeaveChit.issuedBy}</strong>
+                        </div>
+                        <div className="col-span-2 sm:col-span-3">
+                          <span className="text-slate-500">Reason:</span>{' '}
+                          <span>{selectedTeacherLeaveChit.reason}</span>
+                        </div>
+                      </div>
+                      <table className="mt-3 w-full text-left text-xs border border-slate-200">
+                        <thead className="bg-slate-50 text-[11px] uppercase text-slate-600">
+                          <tr>
+                            <th className="px-2.5 py-2">#</th>
+                            <th className="px-2.5 py-2">Duty / Lesson Delegated</th>
+                            <th className="px-2.5 py-2">Mandate Holder</th>
+                            <th className="px-2.5 py-2">Schedule</th>
+                            <th className="px-2.5 py-2">Handover Instructions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200">
+                          {selectedTeacherLeaveChit.dutiesDelegations.map((del, idx) => (
+                            <tr key={del.id}>
+                              <td className="px-2.5 py-1.5 font-mono">{idx + 1}</td>
+                              <td className="px-2.5 py-1.5 font-semibold">{del.dutyTitle}</td>
+                              <td className="px-2.5 py-1.5">{del.delegateTeacherName}</td>
+                              <td className="px-2.5 py-1.5 font-mono">
+                                {del.scheduleOrWindow || 'Full Leave Period'}
+                              </td>
+                              <td className="px-2.5 py-1.5">
+                                {del.handoverInstructions || 'Follow scheme of work.'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="mt-5 grid grid-cols-2 gap-4 border-t border-dashed border-slate-300 pt-3 text-[11px] text-slate-600">
+                        <span>Applicant Teacher Signature: ____________________</span>
+                        <span>Delegate Acceptance: ____________________</span>
+                        <span>Authorized By ({selectedTeacherLeaveChit.issuedBy}): ____________________</span>
+                        <span>Official Stamp: ____________________</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </>
       ) : activeTab === 'rollcall' && isAdmin && rollCallTarget === 'teaching' ? (
         <>
@@ -3131,6 +3948,29 @@ export function AttendanceModule({
               </table>
             </div>
           </div>
+
+          {visibleTeacherLeaveChits.length > 0 && (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    Teacher Leave Out Chits &amp; Duties Delegation ({visibleTeacherLeaveChits.length})
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Teachers with active leave chits are automatically marked Absent above; manage delegations or download official chits in Teacher Lesson Attendance.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRollCallTarget('teacher-lesson')}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-800/70 dark:bg-blue-950/40 dark:text-blue-300"
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  Issue / Manage Leave Chits
+                </button>
+              </div>
+            </div>
+          )}
         </>
       ) : activeTab === 'rollcall' && isAdmin && rollCallTarget === 'non-teaching' ? (
         <>

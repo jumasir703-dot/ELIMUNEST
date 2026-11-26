@@ -9,6 +9,7 @@ import {
   ClipboardCheck,
   Clock,
   Copy,
+  Download,
   Eye,
   EyeOff,
   FileCheck2,
@@ -24,6 +25,12 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import {
+  downloadLessonPlanPdf,
+  downloadParentCurriculumSummaryPdf,
+  downloadRecordOfWorkPdf,
+  downloadSchemeOfWorkPdf,
+} from '../lib/pdfDocuments';
 import {
   CLASS_TEACHER_SUBJECT_TOKEN,
   getStreamsForGrade,
@@ -1684,13 +1691,42 @@ export function TeacherAcademicsModule({
               {tenant.academicYear} ({tenant.currentTerm})
             </p>
           </div>
-          <button
-            onClick={() => window.print()}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <Printer className="h-3.5 w-3.5" />
-            Print Summary
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {activeChild && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const fileName = await downloadParentCurriculumSummaryPdf(
+                      tenant,
+                      activeChild,
+                      childSchemes,
+                      childLessonPlans,
+                      childRecordsOfWork
+                    );
+                    onNotify(`Downloaded Curriculum Summary PDF (${fileName}).`, 'success');
+                  } catch (err) {
+                    onNotify(
+                      err instanceof Error ? err.message : 'Unable to generate PDF.',
+                      'error'
+                    );
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download PDF
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <Printer className="h-3.5 w-3.5" />
+              Print Summary
+            </button>
+          </div>
         </div>
 
         {/* Child selector + subject filter */}
@@ -3418,6 +3454,25 @@ export function TeacherAcademicsModule({
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const fileName = await downloadSchemeOfWorkPdf(tenant, inspectScheme);
+                      onNotify(`Downloaded Scheme of Work PDF (${fileName}).`, 'success');
+                    } catch (err) {
+                      onNotify(
+                        err instanceof Error ? err.message : 'Unable to generate PDF.',
+                        'error'
+                      );
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download PDF
+                </button>
+                <button
+                  type="button"
                   onClick={() => window.print()}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
                 >
@@ -3589,6 +3644,25 @@ export function TeacherAcademicsModule({
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const fileName = await downloadLessonPlanPdf(tenant, inspectLessonPlan);
+                      onNotify(`Downloaded Lesson Plan PDF (${fileName}).`, 'success');
+                    } catch (err) {
+                      onNotify(
+                        err instanceof Error ? err.message : 'Unable to generate PDF.',
+                        'error'
+                      );
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download PDF
+                </button>
+                <button
+                  type="button"
                   onClick={() => window.print()}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
                 >
@@ -3758,6 +3832,25 @@ export function TeacherAcademicsModule({
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const fileName = await downloadRecordOfWorkPdf(tenant, inspectRecordOfWork);
+                      onNotify(`Downloaded Record of Work PDF (${fileName}).`, 'success');
+                    } catch (err) {
+                      onNotify(
+                        err instanceof Error ? err.message : 'Unable to generate PDF.',
+                        'error'
+                      );
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download PDF
+                </button>
+                <button
+                  type="button"
                   onClick={() => window.print()}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200"
                 >

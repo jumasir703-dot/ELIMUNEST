@@ -1,5 +1,6 @@
 import {
   Copy,
+  Download,
   FileSpreadsheet,
   MessageCircle,
   Plus,
@@ -12,6 +13,7 @@ import {
   getStructureVotelines,
   summarizeIndependentVotelinesForStructure,
 } from '../../lib/feesHelpers';
+import { downloadFeeStructurePdf } from '../../lib/pdfDocuments';
 import type {
   FeeStructure,
   IndependentVotelineItem,
@@ -28,6 +30,7 @@ interface PrintableFeeStructureModalProps {
   onCopyText: (fs: FeeStructure) => void;
   buildWhatsAppHref: (fs: FeeStructure) => string;
   onAddIndependentVoteline: (fs: FeeStructure) => void;
+  onNotify?: (title: string, tone?: 'success' | 'error') => void;
 }
 
 export function PrintableFeeStructureModal({
@@ -40,12 +43,29 @@ export function PrintableFeeStructureModal({
   onCopyText,
   buildWhatsAppHref,
   onAddIndependentVoteline,
+  onNotify,
 }: PrintableFeeStructureModalProps) {
   const modalLines = getStructureVotelines(structure);
   const independentSummary = summarizeIndependentVotelinesForStructure(
     structure,
     independentVotelines
   );
+
+  async function handleDownloadPdf() {
+    try {
+      const fileName = await downloadFeeStructurePdf(
+        tenant,
+        structure,
+        independentVotelines
+      );
+      onNotify?.(`Downloaded Fee Structure PDF (${fileName}).`);
+    } catch (err) {
+      onNotify?.(
+        err instanceof Error ? err.message : 'Unable to generate Fee Structure PDF',
+        'error'
+      );
+    }
+  }
 
   return (
     <div className="print-modal-root fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4">
@@ -54,11 +74,19 @@ export function PrintableFeeStructureModal({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={handleDownloadPdf}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
             >
+              <Download className="h-3.5 w-3.5" />
+              Download PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
               <Printer className="h-3.5 w-3.5" />
-              Print / Save PDF
+              Print
             </button>
             <button
               type="button"

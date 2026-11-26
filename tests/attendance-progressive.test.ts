@@ -516,4 +516,195 @@ describe('Teacher Lesson Attendance & Learners Progressive Reports', () => {
       expect(p.recordedByUserId).toBeUndefined();
     }
   });
+
+  it('issues Teacher Leave Out Chits with mandatory duties delegation, syncs staff & lesson attendance, enforces RBAC/privacy, and seeds St. Raphael', async () => {
+    // Bursar, Registrar, and Parent cannot create teacher leave out chits
+    for (const token of [oakBursarToken, oakRegistrarToken, oakParentToken]) {
+      const forbiddenRes = await request(app)
+        .post('/api/attendance/teacher-leave-chits')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          teacherId: 't-oak-1',
+          startDate: '2026-11-24',
+          days: 1,
+          reason: 'County Science Fair',
+          dutiesDelegations: [
+            {
+              dutyTitle: 'Grade 9A Mathematics Lesson',
+              delegateTeacherId: 't-oak-2',
+            },
+          ],
+        });
+      expect(forbiddenRes.status).toBe(403);
+    }
+
+    // Missing or empty dutiesDelegations must be rejected with 400
+    const missingDelegationRes = await request(app)
+      .post('/api/attendance/teacher-leave-chits')
+      .set('Authorization', `Bearer ${oakAdminToken}`)
+      .send({
+        teacherId: 't-oak-1',
+        startDate: '2026-11-24',
+        days: 1,
+        reason: 'Medical Appointment',
+        dutiesDelegations: [],
+      });
+    expect(missingDelegationRes.status).toBe(400);
+
+    // Self-delegation must be rejected with 400
+    const selfDelegationRes = await request(app)
+      .post('/api/attendance/teacher-leave-chits')
+      .set('Authorization', `Bearer ${oakAdminToken}`)
+      .send({
+        teacherId: 't-oak-1',
+        startDate: '2026-11-24',
+        days: 1,
+        reason: 'Medical Appointment',
+        dutiesDelegations: [
+          {
+            dutyTitle: 'Grade 9A Mathematics Lesson',
+            delegateTeacherId: 't-oak-1',
+          },
+        ],
+      });
+    expect(selfDelegationRes.status).toBe(400);
+
+    // Teacher cannot submit a Leave Out Chit on behalf of another teacher
+    const wrongTeacherRes = await request(app)
+      .post('/api/attendance/teacher-leave-chits')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        teacherId: 't-oak-3',
+        startDate: '2026-11-24',
+        days: 1,
+        reason: 'Workshop',
+        dutiesDelegations: [
+          {
+            dutyTitle: 'Grade 9A English',
+            delegateTeacherId: 't-oak-1',
+          },
+        ],
+      });
+    expect(wrongTeacherRes.status).toBe(403);
+
+    // Teacher (Mr. Kamau, t-oak-1) submits own 2-day Leave Out Chit (Tue 2026-11-24 .. Wed 2026-11-25) with 2 delegated duties
+    const teacherChitRes = await request(app)
+      .post('/api/attendance/teacher-leave-chits')
+      .set('Authorization', `Bearer ${oakTeacherToken}`)
+      .send({
+        teacherId: 't-oak-1',
+        startDate: '2026-11-24',
+        days: 2,
+        reason: 'KNEC Mathematics Panel Moderation Workshop',
+        handoverNotes: 'Worksheet folders are on the Mathematics staffroom desk.',
+        emergencyContact: '+254711000222',
+        dutiesDelegations: [
+          {
+            dutyTitle: 'Grade 9 A · Mathematics (P2)',
+            delegateTeacherId: 't-oak-2',
+            grade: 'Grade 9',
+            section: 'A',
+            subject: 'Mathematics',
+            scheduleOrWindow: 'Tuesday · Period 2 (08:40 - 09:20)',
+            handoverInstructions: 'Administer simultaneous equations worksheet B.',
+          },
+          {
+            dutyTitle: 'Grade 10 A · Mathematics (P3) & Math Club Duty',
+            delegateTeacherId: 't-oak-3',
+            grade: 'Grade 10',
+            section: 'A',
+            subject: 'Mathematics',
+            scheduleOrWindow: 'Tuesday · Period 3 & Afternoon Prep',
+            handoverInstructions: 'Supervise revision quiz and afternoon prep.',
+          },
+        ],
+      });
+    expect(teacherChitRes.status).toBe(201);
+    const createdChit = teacherChitRes.body.chit;
+    expect(createdChit.teacherId).toBe('t-oak-1');
+    expect(createdChit.teacherName).toBe('Mr. Kamau Njoroge');
+    expect(createdChit.endDate).toBe('2026-11-25');
+    expect(createdChit.dutiesDelegations).toHaveLength(2);
+    expect(createdChit.dutiesDelegations[0].delegateTeacherName).toBe('Mrs. Achieng Odhiambo');
+    expect(createdChit.dutiesDelegations[1].delegateTeacherName).toBe('Ms. Chebet Kiprono');
+
+    // Verify staffAttendance & teacherLessonAttendance auto-synced across leave dates
+    const adminWsAfter = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakAdminToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(adminWsAfter.status).toBe(200);
+
+    const syncedStaffTue = adminWsAfter.body.staffAttendance.find(
+      (r: any) => r.staffId === 't-oak-1' && r.date === '2026-11-24'
+    );
+    expect(syncedStaffTue).toBeDefined();
+    expect(syncedStaffTue.status).toBe('Absent');
+    expect(syncedStaffTue.remarks).toContain('Mrs. Achieng Odhiambo');
+
+    const syncedStaffWed = adminWsAfter.body.staffAttendance.find(
+      (r: any) => r.staffId === 't-oak-1' && r.date === '2026-11-25'
+    );
+    expect(syncedStaffWed).toBeDefined();
+    expect(syncedStaffWed.status).toBe('Absent');
+
+    const syncedLessonGrade9 = adminWsAfter.body.teacherLessonAttendance.find(
+      (r: any) =>
+        r.date === '2026-11-24' &&
+        r.scheduledTeacherId === 't-oak-1' &&
+        r.grade === 'Grade 9' &&
+        r.subject === 'Mathematics'
+    );
+    expect(syncedLessonGrade9).toBeDefined();
+    expect(syncedLessonGrade9.status).toBe('Delegated');
+    expect(syncedLessonGrade9.delegatedTeacherId).toBe('t-oak-2');
+    expect(syncedLessonGrade9.delegatedTeacherName).toBe('Mrs. Achieng Odhiambo');
+
+    // Parent workspace must strictly hide teacherLeaveOutChits
+    const parentWs = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${oakParentToken}`)
+      .set('x-tenant-id', oakridgeTenantId);
+    expect(parentWs.status).toBe(200);
+    expect(parentWs.body.teacherLeaveOutChits).toEqual([]);
+
+    // Another teacher (Chebet/peer) cannot revoke Mr. Kamau's chit; Admin can issue & revoke chits
+    const peerDeleteRes = await request(app)
+      .delete(`/api/attendance/teacher-leave-chits/${createdChit.id}`)
+      .set('Authorization', `Bearer ${oakPeerTeacherToken}`);
+    expect(peerDeleteRes.status).toBe(403);
+
+    const adminDeleteRes = await request(app)
+      .delete(`/api/attendance/teacher-leave-chits/${createdChit.id}`)
+      .set('Authorization', `Bearer ${oakAdminToken}`);
+    expect(adminDeleteRes.status).toBe(200);
+    expect(adminDeleteRes.body.deleted).toBe(true);
+
+    // St. Raphael seeded workspace includes tloc-straph-1 with structured dutiesDelegations
+    await store.resetForTests({ empty: false, includeLargeTenants: true });
+    const stRaphAdminPass = ST_RAPHAEL_DEFAULT_PASSWORDS['juma.j@straphael.ac.ke'];
+    const stRaphAdminRes = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'juma.j@straphael.ac.ke', password: stRaphAdminPass });
+    expect(stRaphAdminRes.status).toBe(200);
+    let stRaphAdminToken = stRaphAdminRes.body.token as string;
+    if (stRaphAdminRes.body.user.mustChangePassword) {
+      const chg = await request(app)
+        .post('/api/auth/change-password')
+        .set('Authorization', `Bearer ${stRaphAdminToken}`)
+        .send({ currentPassword: stRaphAdminPass, newPassword: 'StRaphaelAdminNew2026!' });
+      expect(chg.status).toBe(200);
+      stRaphAdminToken = chg.body.token as string;
+    }
+    const stRaphWs = await request(app)
+      .get('/api/workspace')
+      .set('Authorization', `Bearer ${stRaphAdminToken}`)
+      .set('x-tenant-id', ST_RAPHAEL_TENANT_ID);
+    expect(stRaphWs.status).toBe(200);
+    expect(Array.isArray(stRaphWs.body.teacherLeaveOutChits)).toBe(true);
+    const seededChit = stRaphWs.body.teacherLeaveOutChits.find((c: any) => c.id === 'tloc-straph-1');
+    expect(seededChit).toBeDefined();
+    expect(seededChit.dutiesDelegations.length).toBeGreaterThanOrEqual(2);
+  });
 });
+

@@ -6,6 +6,7 @@ import {
   Download,
   Edit3,
   FileSpreadsheet,
+  FileText,
   Plus,
   Printer,
   Save,
@@ -18,6 +19,7 @@ import {
   createBrandedWorksheetFromObjects,
   parseExcelSheetRowsSmart,
 } from '../lib/documentBranding';
+import { downloadProgressiveReportPdf } from '../lib/pdfDocuments';
 import { isNonSatExamResult, shortenCycleTitle, sortExamCyclesChronologically } from '../lib/examAnalytics';
 import { computeClientGrade, formatDateShort } from '../lib/format';
 import {
@@ -404,6 +406,43 @@ export function ProgressiveReportsPanel({
     unifiedCheckpoints.length >= 2 && latestCheckpoint && firstCheckpoint
       ? Math.round((latestCheckpoint.meanScore - firstCheckpoint.meanScore) * 10) / 10
       : null;
+
+  async function handleDownloadProgressivePdf() {
+    if (!activeStudent) {
+      onNotify('Select a learner to download their progressive report PDF.', 'error');
+      return;
+    }
+    try {
+      const fileName = await downloadProgressiveReportPdf({
+        tenant,
+        student: activeStudent,
+        latestMeanScore: latestCheckpoint?.meanScore ?? null,
+        latestTitle: latestCheckpoint?.title,
+        latestGrade: latestCheckpoint?.meanGrade,
+        netGain,
+        checkpoints: unifiedCheckpoints.map((cp) => ({
+          title: cp.title,
+          academicYear: cp.academicYear,
+          term: cp.term,
+          date: cp.date,
+          kind: cp.kind,
+          totalScore: cp.totalScore,
+          maxPossible: cp.maxPossible,
+          meanScore: cp.meanScore,
+          meanGrade: cp.meanGrade,
+          deltaFromPrev: cp.deltaFromPrev,
+          classTeacherRemarks: cp.classTeacherRemarks,
+          subjects: cp.subjects,
+        })),
+      });
+      onNotify(`Downloaded Progressive Report PDF (${fileName}).`);
+    } catch (err) {
+      onNotify(
+        err instanceof Error ? err.message : 'Unable to generate Progressive Report PDF',
+        'error'
+      );
+    }
+  }
 
   async function handleSaveManualReport(e: React.FormEvent) {
     e.preventDefault();
@@ -853,14 +892,24 @@ export function ProgressiveReportsPanel({
           )}
 
           {mode === 'viewer' && activeStudent && (
-            <button
-              type="button"
-              onClick={() => window.print()}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <Printer className="h-3.5 w-3.5" />
-              Print Progressive Report
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleDownloadProgressivePdf}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
+              >
+                <FileText className="h-3.5 w-3.5" />
+                Download PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Print Progressive Report
+              </button>
+            </>
           )}
         </div>
       </div>

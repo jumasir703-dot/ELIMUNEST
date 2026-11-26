@@ -78,6 +78,7 @@ import type {
   SubscriptionCycle,
   SuperAdminTenantSummary,
   TeacherClassAssignment,
+  TeacherLeaveOutChit,
   TeacherLessonAttendanceRecord,
   TeacherLessonAttendanceStatus,
   TeacherProfile,
@@ -1273,6 +1274,41 @@ export const saasApi = {
 
   deleteLeaveOutChit(tenantId: string, chitId: string) {
     return apiRequest<{ deleted: boolean }>(`/api/attendance/leave-chits/${chitId}`, {
+      method: 'DELETE',
+      tenantId,
+    });
+  },
+
+  createTeacherLeaveOutChit(
+    tenantId: string,
+    payload: {
+      teacherId?: string;
+      startDate: string;
+      days: number;
+      reason: string;
+      handoverNotes?: string;
+      emergencyContact?: string;
+      issuedBy?: string;
+      dutiesDelegations: Array<{
+        dutyTitle: string;
+        delegateTeacherId: string;
+        grade?: string;
+        section?: string;
+        subject?: string;
+        scheduleOrWindow?: string;
+        handoverInstructions?: string;
+      }>;
+    }
+  ) {
+    return apiRequest<{ chit: TeacherLeaveOutChit }>('/api/attendance/teacher-leave-chits', {
+      method: 'POST',
+      tenantId,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteTeacherLeaveOutChit(tenantId: string, chitId: string) {
+    return apiRequest<{ deleted: boolean }>(`/api/attendance/teacher-leave-chits/${chitId}`, {
       method: 'DELETE',
       tenantId,
     });

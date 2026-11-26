@@ -39,6 +39,7 @@ import {
   type SchoolExpense,
   type Student,
   type TeacherClassAssignment,
+  type TeacherLeaveOutChit,
   type TeacherLessonAttendanceRecord,
   type TeacherProfile,
   type Tenant,
@@ -175,6 +176,7 @@ export interface StRaphaelSeedBundle {
   attendance: AttendanceRecord[];
   teacherLessonAttendance: TeacherLessonAttendanceRecord[];
   leaveOutChits: LeaveOutChit[];
+  teacherLeaveOutChits: TeacherLeaveOutChit[];
   examCycles: ExamCycle[];
   examResults: ExamResult[];
   progressiveReports: LearnerProgressiveEntry[];
@@ -1218,6 +1220,57 @@ export async function buildStRaphaelSeedData(
     },
   ];
 
+  const t1 = teachers[0];
+  const t2 = teachers[1] || teachers[0];
+  const t3 = teachers[2] || teachers[1] || teachers[0];
+  const t1LeadClass = t1?.assignedClasses?.[0];
+  const teacherLeaveOutChits: TeacherLeaveOutChit[] =
+    t1 && t2 && t1.id !== t2.id
+      ? [
+          {
+            id: 'tloc-straph-1',
+            tenantId,
+            termId: 'term-straph-2026-3',
+            teacherId: t1.id,
+            teacherName: t1.name,
+            department: t1.department,
+            startDate: '2026-11-26',
+            days: 2,
+            endDate: '2026-11-27',
+            reason: 'KNEC CBC Assessment Moderation Workshop (Regional Centre)',
+            dutiesDelegations: [
+              {
+                id: 'tdel-straph-1',
+                dutyTitle: `${t1.subjects[0] || 'Core Subject'} Lessons (${t1LeadClass?.grade || 'Grade 7'})`,
+                delegateTeacherId: t2.id,
+                delegateTeacherName: t2.name,
+                delegateDepartment: t2.department,
+                grade: t1LeadClass?.grade || tenant.grades[0],
+                section: t1LeadClass?.section || 'A',
+                subject: t1.subjects[0] || 'Mathematics',
+                scheduleOrWindow: 'Periods 2 & 4 (Thu & Fri)',
+                handoverInstructions: 'Complete Topic 4 worked examples and collect weekly exercise books.',
+              },
+              {
+                id: 'tdel-straph-2',
+                dutyTitle: 'Morning Assembly & Form/Stream Supervision',
+                delegateTeacherId: t3.id,
+                delegateTeacherName: t3.name,
+                delegateDepartment: t3.department,
+                grade: t1LeadClass?.grade || tenant.grades[0],
+                section: t1LeadClass?.section || 'A',
+                scheduleOrWindow: '07:45–08:15 Daily',
+                handoverInstructions: 'Mark morning register and clear any student leave-out notes.',
+              },
+            ],
+            handoverNotes: 'Marked scheme and answer key folder placed in Staffroom Locker 4.',
+            emergencyContact: t1.phone || '+254712000101',
+            issuedBy: 'Juma J',
+            createdAt: '2026-11-25T16:15:00Z',
+          },
+        ]
+      : [];
+
   // ---------------------------------------------------------------------------
   // 11. Payroll (2 months x 85 staff = 170 entries), Budgets (48), Expenses, Approvals
   // ---------------------------------------------------------------------------
@@ -1553,6 +1606,7 @@ export async function buildStRaphaelSeedData(
     attendance,
     teacherLessonAttendance,
     leaveOutChits,
+    teacherLeaveOutChits,
     examCycles,
     examResults,
     progressiveReports,

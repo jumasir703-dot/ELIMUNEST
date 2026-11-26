@@ -1694,6 +1694,36 @@ app.delete(
   }
 );
 
+app.post(
+  '/api/attendance/teacher-leave-chits',
+  ...attendanceGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      const chit = store.createTeacherLeaveOutChit(tenantId, req.body || {}, req.authUser);
+      await store.flushRemotePersist();
+      res.status(201).json({ chit });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.delete(
+  '/api/attendance/teacher-leave-chits/:id',
+  ...attendanceGuard,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const tenantId = getTenantId(req);
+      store.deleteTeacherLeaveOutChit(tenantId, String(req.params.id), req.authUser);
+      await store.flushRemotePersist();
+      res.json({ deleted: true });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Exams & Assessment
 const examsWriteGuard = [
   requireRole('Developer', 'Super Admin', 'Admin', 'Teacher'),
