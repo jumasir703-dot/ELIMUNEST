@@ -18,6 +18,7 @@ import {
   resolveTenantDocumentMeta,
 } from '../lib/documentBranding';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import { downloadTeacherLeaveChitPdf } from '../lib/pdfDocuments';
 import {
   addDaysIso,
@@ -40,6 +41,7 @@ interface AttendanceModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -113,6 +115,7 @@ export function AttendanceModule({
   workspace,
   currentRole,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: AttendanceModuleProps) {
@@ -253,6 +256,68 @@ export function AttendanceModule({
       setSelectedTeacherId(tenant.teachers[0]?.id || '');
     }
   }, [tenant.teachers, selectedTeacherId]);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'attendance') return;
+    if (navigationTarget.subTab === 'rollcall' || navigationTarget.subTab === 'summary') {
+      setActiveTab(navigationTarget.subTab);
+    }
+    const sec = navigationTarget.subSection;
+    if (sec === 'student' || sec === 'student-leave-chits') {
+      setRollCallTarget('student');
+    } else if (
+      (sec === 'teacher-lesson' || sec === 'teacher-leave-chits') &&
+      canUseTeacherLessonAttendance
+    ) {
+      setRollCallTarget('teacher-lesson');
+    } else if (sec === 'teaching' && isAdmin) {
+      setRollCallTarget('teaching');
+    } else if (sec === 'non-teaching' && isAdmin) {
+      setRollCallTarget('non-teaching');
+    }
+
+    if (navigationTarget.grade && tenant.grades.includes(navigationTarget.grade)) {
+      setGrade(navigationTarget.grade);
+      const nextStreams = getStreamsForGrade(tenant, navigationTarget.grade);
+      if (navigationTarget.section && nextStreams.includes(navigationTarget.section)) {
+        setSection(navigationTarget.section);
+      } else if (nextStreams[0]) {
+        setSection(nextStreams[0]);
+      }
+    }
+
+    if (sec === 'teacher-leave-chits') {
+      if (navigationTarget.entityId) {
+        const matchedChit = (workspace.teacherLeaveOutChits || []).find(
+          (c) => c.id === navigationTarget.entityId
+        );
+        if (matchedChit) {
+          setSelectedTeacherChitId(matchedChit.id);
+        } else if (tenant.teachers.some((t) => t.id === navigationTarget.entityId)) {
+          setTChitTeacherId(navigationTarget.entityId);
+        }
+      }
+      window.setTimeout(() => {
+        document
+          .getElementById('teacher-leave-chits-section')
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 60);
+    } else if (sec === 'student-leave-chits' && navigationTarget.entityId) {
+      setSelectedNoteChitId(navigationTarget.entityId);
+    } else if (
+      sec === 'teacher-lesson' &&
+      navigationTarget.entityId &&
+      tenant.teachers.some((t) => t.id === navigationTarget.entityId)
+    ) {
+      setLessonTeacherFilter(navigationTarget.entityId);
+    }
+  }, [
+    navigationTarget,
+    canUseTeacherLessonAttendance,
+    isAdmin,
+    tenant,
+    workspace.teacherLeaveOutChits,
+  ]);
 
   const selectedTeacher = useMemo(
     () => tenant.teachers.find((t) => t.id === selectedTeacherId) || tenant.teachers[0],
@@ -3231,7 +3296,7 @@ export function AttendanceModule({
               (t) => t.id !== effectiveTChitTeacherId
             );
             return (
-              <div className="space-y-4">
+              <div id="teacher-leave-chits-section" className="space-y-4">
                 <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
                   <div className="flex flex-col gap-2 border-b border-slate-100 pb-3 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
                     <div className="flex items-start gap-2.5">

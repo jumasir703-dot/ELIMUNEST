@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import {
   getStreamsForGrade,
   getStudentRegisteredSubjects,
@@ -36,6 +37,7 @@ import {
 interface AdmissionsModuleProps {
   workspace: TenantWorkspaceData;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -64,6 +66,7 @@ const STATUS_BADGE_CLASS: Record<StudentStatus, string> = {
 export function AdmissionsModule({
   workspace,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: AdmissionsModuleProps) {
@@ -181,6 +184,30 @@ export function AdmissionsModule({
     getSubjectsForGrade(tenant, availableGrades[0] || 'Grade 7')
   );
   const [assignSaving, setAssignSaving] = useState(false);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'admissions') return;
+    if (navigationTarget.searchQuery !== undefined) {
+      setSearchQuery(navigationTarget.searchQuery);
+      setStatusFilter('All');
+      setStudentPage(1);
+    }
+    if (navigationTarget.grade) {
+      setGradeStreamFilter(
+        navigationTarget.section
+          ? `${navigationTarget.grade}::${navigationTarget.section}`
+          : `grade:${navigationTarget.grade}`
+      );
+      setStudentPage(1);
+    } else if (navigationTarget.searchQuery) {
+      setGradeStreamFilter('All');
+    }
+    if (navigationTarget.subSection === 'import' && !readOnly) {
+      setShowImportModal(true);
+    } else if (navigationTarget.subSection === 'promotion' && !readOnly) {
+      setShowPromoModal(true);
+    }
+  }, [navigationTarget, readOnly]);
 
   const modalGradeStreams = useMemo(
     () => getStreamsForGrade(tenant, formState.grade),

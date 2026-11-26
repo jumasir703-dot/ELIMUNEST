@@ -56,6 +56,7 @@ import {
   buildWhatsAppUrl,
   resolveStudentGuardianContact,
 } from '../lib/whatsapp';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import {
   getStreamsForGrade,
   INDEPENDENT_VOTELINE_PRESETS,
@@ -80,6 +81,7 @@ interface FeesModuleProps {
   currentRole: UserRole;
   embeddedInHub?: boolean;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -89,6 +91,7 @@ export function FeesModule({
   currentRole,
   embeddedInHub = false,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: FeesModuleProps) {
@@ -132,6 +135,29 @@ export function FeesModule({
   const [ivlStreamFilter, setIvlStreamFilter] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [invoicePage, setInvoicePage] = useState(1);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'fees') return;
+    if (navigationTarget.subTab && navigationTarget.subTab !== 'fees') return;
+    const sec = navigationTarget.subSection;
+    if (sec === 'invoices' || sec === 'payments' || sec === 'structures' || sec === 'independent') {
+      setActiveTab(sec);
+    }
+    if (navigationTarget.searchQuery !== undefined) {
+      setSearchQuery(navigationTarget.searchQuery);
+      setStatusFilter('All');
+      setInvoiceGradeFilter('All');
+      setInvoiceStreamFilter('All');
+      setInvoicePage(1);
+    }
+    if (navigationTarget.action === 'open-receipt' && navigationTarget.entityId) {
+      const inv = invoices.find((i) => i.id === navigationTarget.entityId);
+      if (inv) {
+        setReceiptInvoice(inv);
+        setSelectedReceiptPaymentId('LATEST');
+      }
+    }
+  }, [navigationTarget, invoices]);
 
   const [paymentModalInvoice, setPaymentModalInvoice] = useState<FeeInvoice | null>(null);
   const [receiptInvoice, setReceiptInvoice] = useState<FeeInvoice | null>(null);

@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
-import { BellRing, Megaphone, Send } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { BellRing, Megaphone, Search, Send, X } from 'lucide-react';
 import { saasApi } from '../lib/api';
 import { formatTimeAgo } from '../lib/format';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import type { Announcement, TenantWorkspaceData, UserRole } from '../shared/types';
 
 interface CommunicationsModuleProps {
@@ -9,6 +10,7 @@ interface CommunicationsModuleProps {
   currentRole: UserRole;
   readOnly?: boolean;
   wsConnected: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
   onNavigate: (module: string) => void;
@@ -21,6 +23,7 @@ export function CommunicationsModule({
   currentRole,
   readOnly = false,
   wsConnected,
+  navigationTarget,
   onRefresh,
   onNotify,
   onNavigate,
@@ -31,8 +34,19 @@ export function CommunicationsModule({
   const [activeChannel, setActiveChannel] = useState(
     isReadOnlyViewer ? 'Parent Liaison' : CHANNELS[0]
   );
+  const [searchFilter, setSearchFilter] = useState('');
   const [messageText, setMessageText] = useState('');
   const [sendingMsg, setSendingMsg] = useState(false);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'communications') return;
+    if (navigationTarget.subSection && CHANNELS.includes(navigationTarget.subSection)) {
+      setActiveChannel(navigationTarget.subSection);
+    }
+    if (navigationTarget.searchQuery !== undefined) {
+      setSearchFilter(navigationTarget.searchQuery);
+    }
+  }, [navigationTarget]);
 
   const [annForm, setAnnForm] = useState({
     title: '',
@@ -42,10 +56,28 @@ export function CommunicationsModule({
   });
   const [publishingAnn, setPublishingAnn] = useState(false);
 
-  const channelMessages = useMemo(
-    () => messages.filter((m) => m.channel === activeChannel),
-    [messages, activeChannel]
-  );
+  const filteredAnnouncements = useMemo(() => {
+    const q = searchFilter.trim().toLowerCase();
+    if (!q) return announcements;
+    return announcements.filter(
+      (a) =>
+        a.title.toLowerCase().includes(q) ||
+        a.body.toLowerCase().includes(q) ||
+        a.authorName.toLowerCase().includes(q) ||
+        a.audience.toLowerCase().includes(q)
+    );
+  }, [announcements, searchFilter]);
+
+  const channelMessages = useMemo(() => {
+    const base = messages.filter((m) => m.channel === activeChannel);
+    const q = searchFilter.trim().toLowerCase();
+    if (!q) return base;
+    return base.filter(
+      (m) =>
+        m.body.toLowerCase().includes(q) ||
+        m.senderName.toLowerCase().includes(q)
+    );
+  }, [messages, activeChannel, searchFilter]);
 
   async function handlePublishAnnouncement(e: React.FormEvent) {
     e.preventDefault();
@@ -108,13 +140,35 @@ export function CommunicationsModule({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400">
-          <span
-            className={`inline-block h-2 w-2 rounded-full ${
-              wsConnected ? 'bg-emerald-600' : 'bg-amber-500'
-            }`}
-          />
-          <span>{wsConnected ? 'WebSocket Connected' : 'Reconnecting Socket'}</span>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              placeholder="Filter announcements & messages..."
+              className="w-60 rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-7 text-xs text-slate-900 focus:border-blue-500 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+            />
+            {searchFilter && (
+              <button
+                type="button"
+                onClick={() => setSearchFilter('')}
+                aria-label="Clear filter"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400">
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${
+                wsConnected ? 'bg-emerald-600' : 'bg-amber-500'
+              }`}
+            />
+            <span>{wsConnected ? 'WebSocket Connected' : 'Reconnecting Socket'}</span>
+          </div>
         </div>
       </div>
 
@@ -200,12 +254,14 @@ export function CommunicationsModule({
               Recent Bulletins
             </h2>
             <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
-              {announcements.length === 0 ? (
+              {filteredAnnouncements.length === 0 ? (
                 <p className="py-8 text-center text-xs text-slate-500">
-                  No announcements broadcast yet.
+                  {searchFilter.trim()
+                    ? 'No announcements matched your filter.'
+                    : 'No announcements broadcast yet.'}
                 </p>
               ) : (
-                announcements.map((ann) => (
+                filteredAnnouncements.map((ann) => (
                   <article key={ann.id} className="py-4 first:pt-0 last:pb-0">
                     <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
                       <span>

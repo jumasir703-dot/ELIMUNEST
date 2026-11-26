@@ -16,6 +16,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import { formatCurrency } from '../lib/format';
 import {
   getContrastForeground,
@@ -45,6 +46,7 @@ import {
 interface SuperAdminModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onPreviewBrandingChange?: (branding: TenantBranding | null) => void;
   onSwitchTenant: (tenantId: string, targetModule?: string) => void;
@@ -96,6 +98,7 @@ const STATUS_BADGE_STYLES: Record<TenantStatus, string> = {
 export function SuperAdminModule({
   workspace,
   currentRole = 'Super Admin',
+  navigationTarget,
   onRefresh,
   onPreviewBrandingChange,
   onSwitchTenant,
@@ -115,6 +118,25 @@ export function SuperAdminModule({
   const [statusFilter, setStatusFilter] = useState<'All' | TenantStatus>('All');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'super-admin') return;
+    if (
+      navigationTarget.subTab === 'directory' ||
+      navigationTarget.subTab === 'branding' ||
+      navigationTarget.subTab === 'provision' ||
+      navigationTarget.subTab === 'audit'
+    ) {
+      if ((navigationTarget.subTab === 'directory' || navigationTarget.subTab === 'provision') && !isDeveloper) {
+        setActiveTab('branding');
+      } else {
+        setActiveTab(navigationTarget.subTab);
+      }
+    }
+    if (navigationTarget.searchQuery !== undefined) {
+      setSearchQuery(navigationTarget.searchQuery);
+    }
+  }, [navigationTarget, isDeveloper]);
 
   // Customization editor state
   const [editingTenantId, setEditingTenantId] = useState<string>(workspace.tenant.id);

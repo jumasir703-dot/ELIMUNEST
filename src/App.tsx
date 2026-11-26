@@ -17,6 +17,7 @@ import {
   Menu,
   MessageSquare,
   Moon,
+  Search,
   Settings,
   ShieldCheck,
   Sun,
@@ -26,7 +27,9 @@ import {
   X,
 } from 'lucide-react';
 import { AuthPortal } from './components/AuthPortal';
+import { GlobalSearchModal } from './components/GlobalSearchModal';
 import type { DevRouteSection } from './components/DeveloperPanel';
+import type { SystemNavigationTarget } from './lib/globalSearch';
 
 const AnalyticsDashboard = lazy(() =>
   import('./components/AnalyticsDashboard').then((m) => ({ default: m.AnalyticsDashboard }))
@@ -188,6 +191,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifDrawerOpen, setNotifDrawerOpen] = useState(false);
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const [navigationTarget, setNavigationTarget] = useState<SystemNavigationTarget | null>(null);
   const [darkMode, setDarkMode] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [previewBrandingOverride, setPreviewBrandingOverride] = useState<TenantBranding | null>(null);
@@ -486,6 +491,65 @@ export default function App() {
       setNotifDrawerOpen(false);
     }
   };
+
+  const handleNavigateTarget = useCallback(
+    (rawTarget: Omit<SystemNavigationTarget, 'nonce'>) => {
+      if (rawTarget.action === 'toggle-theme') {
+        setDarkMode((d) => !d);
+        return;
+      }
+      if (rawTarget.action === 'open-notifications') {
+        setNotifDrawerOpen(true);
+        return;
+      }
+      if (rawTarget.action === 'open-dev' && isPlatformSuperAdmin) {
+        navigatePath(rawTarget.devPath || '/dev/telemetry');
+        return;
+      }
+      if (rawTarget.action === 'switch-tenant' && isPlatformSuperAdmin && rawTarget.targetTenantId) {
+        setTenantId(rawTarget.targetTenantId);
+        setActiveModule('analytics');
+        setMobileMenuOpen(false);
+        setNotifDrawerOpen(false);
+        return;
+      }
+
+      const valid = visibleNavItems.find((n) => n.id === rawTarget.module);
+      if (valid) {
+        setActiveModule(valid.id);
+        setNavigationTarget({ ...rawTarget, nonce: Date.now() });
+        setMobileMenuOpen(false);
+        setNotifDrawerOpen(false);
+      }
+    },
+    [visibleNavItems, isPlatformSuperAdmin, navigatePath]
+  );
+
+  useEffect(() => {
+    if (!authSession || requiresPasswordChange || routeInfo.isDevRoute) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchModalOpen((prev) => !prev);
+        return;
+      }
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const targetEl = e.target as HTMLElement | null;
+        const tag = targetEl?.tagName?.toLowerCase();
+        const isEditable =
+          tag === 'input' ||
+          tag === 'textarea' ||
+          tag === 'select' ||
+          Boolean(targetEl?.isContentEditable);
+        if (!isEditable && !searchModalOpen) {
+          e.preventDefault();
+          setSearchModalOpen(true);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [authSession, requiresPasswordChange, routeInfo.isDevRoute, searchModalOpen]);
 
   async function handleMarkAllRead() {
     if (!workspace) return;
@@ -1000,6 +1064,20 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {workspace && (
+              <button
+                type="button"
+                onClick={() => setSearchModalOpen(true)}
+                aria-label="Search system (Ctrl+K)"
+                className="flex h-10 items-center gap-2 whitespace-nowrap rounded-lg border border-slate-200 bg-slate-50/70 px-3 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:bg-white hover:text-slate-900 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+              >
+                <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                <span className="hidden sm:inline">Search anything...</span>
+                <kbd className="hidden rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-400 md:inline dark:border-slate-700 dark:bg-slate-900">
+                  Ctrl K
+                </kbd>
+              </button>
+            )}
             {isPlatformSuperAdmin && (
               <button
                 type="button"
@@ -1104,6 +1182,7 @@ export default function App() {
                   <AdmissionsModule
                     workspace={workspace}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1113,6 +1192,7 @@ export default function App() {
                     workspace={workspace}
                     currentRole={currentRole}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1122,6 +1202,7 @@ export default function App() {
                     workspace={workspace}
                     currentRole={currentRole}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1133,6 +1214,7 @@ export default function App() {
                     currentUserId={authSession.user.id}
                     currentUserEmail={authSession.user.email}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1144,6 +1226,7 @@ export default function App() {
                     currentUserId={authSession.user.id}
                     currentUserEmail={authSession.user.email}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1153,6 +1236,7 @@ export default function App() {
                     workspace={workspace}
                     currentRole={currentRole}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                   />
@@ -1163,6 +1247,7 @@ export default function App() {
                     currentRole={currentRole}
                     readOnly={isActiveModuleReadOnly}
                     wsConnected={wsConnected}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onNotify={(msg, tone) => pushToast(msg, tone)}
                     onNavigate={handleNavigate}
@@ -1174,6 +1259,7 @@ export default function App() {
                     currentRole={currentRole}
                     currentUserId={authSession.user.id}
                     readOnly={isActiveModuleReadOnly}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onSwitchTenant={(newId) => {
                       if (isPlatformSuperAdmin) {
@@ -1188,6 +1274,7 @@ export default function App() {
                   <SuperAdminModule
                     workspace={workspace}
                     currentRole={currentRole}
+                    navigationTarget={navigationTarget}
                     onRefresh={() => loadWorkspace(tenantId, true)}
                     onPreviewBrandingChange={setPreviewBrandingOverride}
                     onSwitchTenant={(newId, targetModule) => {
@@ -1208,6 +1295,20 @@ export default function App() {
           ) : null}
         </main>
       </div>
+
+      {workspace && (
+        <GlobalSearchModal
+          isOpen={searchModalOpen}
+          onClose={() => setSearchModalOpen(false)}
+          workspace={workspace}
+          currentRole={currentRole}
+          effectiveModules={effectiveModules}
+          canAccessSuperAdmin={canAccessSuperAdmin}
+          isPlatformSuperAdmin={isPlatformSuperAdmin}
+          darkMode={darkMode}
+          onSelectTarget={handleNavigateTarget}
+        />
+      )}
 
       {/* Real-Time Notifications Slide-Over Drawer */}
       {notifDrawerOpen && workspace && (

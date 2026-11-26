@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
   BookMarked,
@@ -25,6 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import {
   downloadLessonPlanPdf,
   downloadParentCurriculumSummaryPdf,
@@ -60,6 +61,7 @@ interface TeacherAcademicsModuleProps {
   currentUserId: string;
   currentUserEmail?: string;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => void | Promise<void>;
   onNotify: (msg: string, tone?: 'success' | 'error' | 'info') => void;
 }
@@ -352,6 +354,7 @@ export function TeacherAcademicsModule({
   currentUserId,
   currentUserEmail,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: TeacherAcademicsModuleProps) {
@@ -423,6 +426,63 @@ export function TeacherAcademicsModule({
   const [reviewFeedbackInput, setReviewFeedbackInput] = useState('');
   const [reviewShareWithParents, setReviewShareWithParents] = useState(true);
   const [submittingAction, setSubmittingAction] = useState(false);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'academics') return;
+    const validTabs: AcademicsTab[] = [
+      'schemes',
+      'lesson-plans',
+      'lesson-notes',
+      'record-of-work',
+      'tracking',
+      'parent-preview',
+    ];
+    if (navigationTarget.subTab && validTabs.includes(navigationTarget.subTab as AcademicsTab)) {
+      setActiveTab(navigationTarget.subTab as AcademicsTab);
+      if (isParentOrStudent) {
+        if (navigationTarget.subTab === 'schemes') setParentTab('schemes');
+        else if (navigationTarget.subTab === 'lesson-plans') setParentTab('lessons');
+        else if (navigationTarget.subTab === 'record-of-work') setParentTab('covered');
+      }
+    }
+    if (navigationTarget.searchQuery !== undefined) {
+      setSearchTerm(navigationTarget.searchQuery);
+      setFilterGrade('ALL');
+      setFilterStream('ALL');
+      setFilterSubject('ALL');
+      setFilterStatus('ALL');
+      setFilterTeacherId('ALL');
+      setFilterWeek('ALL');
+    }
+    if (navigationTarget.entityId) {
+      const matchedScheme = (workspace.schemesOfWork || []).find(
+        (s) => s.id === navigationTarget.entityId
+      );
+      if (matchedScheme) {
+        setInspectScheme(matchedScheme);
+        return;
+      }
+      const matchedLp = (workspace.lessonPlans || []).find(
+        (lp) => lp.id === navigationTarget.entityId
+      );
+      if (matchedLp) {
+        setInspectLessonPlan(matchedLp);
+        return;
+      }
+      const matchedRow = (workspace.recordsOfWork || []).find(
+        (r) => r.id === navigationTarget.entityId
+      );
+      if (matchedRow) {
+        setInspectRecordOfWork(matchedRow);
+      }
+    }
+  }, [
+    navigationTarget,
+    isParentOrStudent,
+    workspace.schemesOfWork,
+    workspace.lessonPlans,
+    workspace.recordsOfWork,
+  ]);
 
   // Scheme Create/Edit Modal state
   const [schemeModalOpen, setSchemeModalOpen] = useState(false);

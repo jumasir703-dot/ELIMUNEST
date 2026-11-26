@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import {
   ALL_TENANT_MODULES,
   getDefaultModuleAccessForTenantRole,
@@ -43,6 +44,7 @@ interface SettingsModuleProps {
   currentRole: UserRole;
   currentUserId?: string;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onSwitchTenant: (tenantId: string) => void;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
@@ -163,6 +165,7 @@ export function SettingsModule({
   currentRole,
   currentUserId,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onSwitchTenant,
   onNotify,
@@ -237,6 +240,24 @@ export function SettingsModule({
     contactPhone: tenant.contactPhone || '',
     postalAddress: tenant.postalAddress || '',
   });
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'settings') return;
+    const sec = navigationTarget.subSection;
+    const targetId =
+      sec === 'staff'
+        ? 'settings-staff-section'
+        : sec === 'calendar'
+        ? 'settings-calendar-section'
+        : sec === 'general'
+        ? 'settings-general-section'
+        : '';
+    if (targetId) {
+      window.setTimeout(() => {
+        document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 60);
+    }
+  }, [navigationTarget]);
 
   useEffect(() => {
     setTenantForm({
@@ -842,6 +863,7 @@ export function SettingsModule({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Current Tenant Settings */}
         <form
+          id="settings-general-section"
           onSubmit={handleSaveTenant}
           className="rounded-xl border border-slate-200 bg-white p-6 lg:col-span-6 dark:border-slate-800 dark:bg-slate-900"
         >
@@ -1069,7 +1091,10 @@ export function SettingsModule({
 
         {/* School Staff Accounts & Granular Access Rights */}
         <div className="space-y-6 lg:col-span-6">
-          <div className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+          <div
+            id="settings-staff-section"
+            className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"
+          >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Users className="h-4 w-4 text-blue-600 dark:text-blue-400" />
@@ -1890,7 +1915,7 @@ export function SettingsModule({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Academic Calendar & Term Lock Controls */}
         <div className="rounded-xl border border-slate-200 bg-white p-6 lg:col-span-8 dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+          <div id="settings-calendar-section" className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
                 <Calendar className="h-4 w-4 text-blue-600 dark:text-blue-400" />

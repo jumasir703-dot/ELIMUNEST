@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import { DaySchedulePanel } from './timetable/DaySchedulePanel';
 import { LessonCardsPanel } from './timetable/LessonCardsPanel';
 import { SolveDialog } from './timetable/SolveDialog';
@@ -53,6 +54,7 @@ interface TimetableModuleProps {
   workspace: TenantWorkspaceData;
   currentRole?: UserRole;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -69,6 +71,7 @@ export function TimetableModule({
   workspace,
   currentRole = 'Admin',
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: TimetableModuleProps) {
@@ -98,6 +101,34 @@ export function TimetableModule({
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSlotId, setEditingSlotId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'timetable') return;
+    if (
+      navigationTarget.subTab === 'grid' ||
+      navigationTarget.subTab === 'lessons' ||
+      navigationTarget.subTab === 'constraints' ||
+      navigationTarget.subTab === 'teachers'
+    ) {
+      setActiveTab(navigationTarget.subTab);
+    }
+    if (navigationTarget.subSection === 'teacher' && navigationTarget.entityId) {
+      setViewMode('teacher');
+      setSelectedTeacherId(navigationTarget.entityId);
+    } else if (navigationTarget.subSection === 'room' && navigationTarget.searchQuery) {
+      setViewMode('room');
+      setSelectedRoom(navigationTarget.searchQuery);
+    } else if (navigationTarget.grade) {
+      setViewMode('grade');
+      setSelectedGrade(navigationTarget.grade);
+      const streams = getStreamsForGrade(tenant, navigationTarget.grade);
+      if (navigationTarget.section && streams.includes(navigationTarget.section)) {
+        setSelectedSection(navigationTarget.section);
+      } else if (streams[0]) {
+        setSelectedSection(streams[0]);
+      }
+    }
+  }, [navigationTarget, tenant]);
 
   const [slotForm, setSlotForm] = useState({
     day: 'Monday' as DayOfWeek,

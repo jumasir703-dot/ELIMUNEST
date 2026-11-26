@@ -26,6 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
 import { formatCurrency, formatDateShort } from '../lib/format';
 import {
@@ -54,6 +55,7 @@ interface FinanceModuleProps {
   workspace: TenantWorkspaceData;
   currentRole: UserRole;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -114,6 +116,7 @@ export function FinanceModule({
   workspace,
   currentRole,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: FinanceModuleProps) {
@@ -180,6 +183,31 @@ export function FinanceModule({
     () => expenses.filter((e) => !e.voided),
     [expenses]
   );
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'fees') return;
+    const validSubs: FinanceSubModule[] = [
+      'fees',
+      'expensing',
+      'etims',
+      'reconciliation',
+      'payroll',
+      'budgets',
+      'books',
+      'audit',
+    ];
+    if (navigationTarget.subTab && validSubs.includes(navigationTarget.subTab as FinanceSubModule)) {
+      if (navigationTarget.subTab === 'audit' && !canViewAudit) return;
+      setSubModule(navigationTarget.subTab as FinanceSubModule);
+    }
+    if (navigationTarget.subTab === 'expensing' && navigationTarget.searchQuery !== undefined) {
+      setSearchQuery(navigationTarget.searchQuery);
+      setCategoryFilter('All');
+      setStatusFilter('All');
+    } else if (navigationTarget.subTab === 'audit' && navigationTarget.searchQuery !== undefined) {
+      setAuditSearch(navigationTarget.searchQuery);
+    }
+  }, [navigationTarget, canViewAudit]);
 
   useEffect(() => {
     if (subModule !== 'audit' || !canViewAudit) return;
@@ -747,6 +775,7 @@ export function FinanceModule({
           currentRole={currentRole}
           embeddedInHub
           readOnly={readOnly}
+          navigationTarget={navigationTarget}
           onRefresh={onRefresh}
           onNotify={onNotify}
         />

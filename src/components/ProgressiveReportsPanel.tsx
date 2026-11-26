@@ -15,6 +15,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import {
   createBrandedWorksheetFromObjects,
   parseExcelSheetRowsSmart,
@@ -42,6 +43,7 @@ interface ProgressiveReportsPanelProps {
   currentUserId?: string;
   currentUserEmail?: string;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -128,6 +130,7 @@ export function ProgressiveReportsPanel({
   currentUserId,
   currentUserEmail,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: ProgressiveReportsPanelProps) {
@@ -174,6 +177,23 @@ export function ProgressiveReportsPanel({
     activeStudents[0]?.id || ''
   );
   const [expandedCheckpointId, setExpandedCheckpointId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'exams' || navigationTarget.subTab !== 'progressive') return;
+    setMode('viewer');
+    if (navigationTarget.grade) {
+      setSelectedGrade(navigationTarget.grade);
+      setSelectedStream(navigationTarget.section || 'All');
+    }
+    if (navigationTarget.entityId && activeStudents.some((s) => s.id === navigationTarget.entityId)) {
+      const targetStu = activeStudents.find((s) => s.id === navigationTarget.entityId);
+      if (targetStu) {
+        setSelectedGrade(targetStu.grade);
+        setSelectedStream(targetStu.section);
+        setSelectedStudentId(targetStu.id);
+      }
+    }
+  }, [navigationTarget, activeStudents]);
 
   // Manual Entry State
   const [manualEditingId, setManualEditingId] = useState<string | undefined>(undefined);

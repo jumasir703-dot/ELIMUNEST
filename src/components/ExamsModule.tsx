@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   AlertTriangle,
@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { saasApi } from '../lib/api';
+import type { SystemNavigationTarget } from '../lib/globalSearch';
 import { createBrandedWorksheetFromObjects } from '../lib/documentBranding';
 import {
   downloadAcademicReportCardPdf,
@@ -69,6 +70,7 @@ interface ExamsModuleProps {
   currentUserId?: string;
   currentUserEmail?: string;
   readOnly?: boolean;
+  navigationTarget?: SystemNavigationTarget | null;
   onRefresh: () => Promise<void>;
   onNotify: (title: string, tone?: 'success' | 'error') => void;
 }
@@ -107,6 +109,7 @@ export function ExamsModule({
   currentUserId,
   currentUserEmail,
   readOnly = false,
+  navigationTarget,
   onRefresh,
   onNotify,
 }: ExamsModuleProps) {
@@ -150,6 +153,37 @@ export function ExamsModule({
   const [showUnlockModal, setShowUnlockModal] = useState(false);
   const [unlockReason, setUnlockReason] = useState('');
   const [unlockingCycle, setUnlockingCycle] = useState(false);
+
+  useEffect(() => {
+    if (!navigationTarget || navigationTarget.module !== 'exams') return;
+    if (
+      navigationTarget.subTab === 'results' ||
+      navigationTarget.subTab === 'analytics' ||
+      navigationTarget.subTab === 'progressive' ||
+      navigationTarget.subTab === 'entry'
+    ) {
+      setActiveTab(navigationTarget.subTab);
+    }
+    if (navigationTarget.grade && tenant.grades.includes(navigationTarget.grade)) {
+      setSelectedGrade(navigationTarget.grade);
+      setSelectedStream(navigationTarget.section || 'All');
+      setSelectedSubject(ALL_REGISTERED_SUBJECTS_OPTION);
+    }
+    if (
+      navigationTarget.entityId &&
+      orderedCycles.some((c) => c.id === navigationTarget.entityId)
+    ) {
+      setSelectedCycleId(navigationTarget.entityId);
+    }
+    if (
+      navigationTarget.action === 'open-report-card' &&
+      navigationTarget.entityId &&
+      students.some((s) => s.id === navigationTarget.entityId)
+    ) {
+      setReportCardStudentId(navigationTarget.entityId);
+      setReportCardWhatsAppOpen(false);
+    }
+  }, [navigationTarget, tenant.grades, orderedCycles, students]);
 
   const availableStreams = useMemo(
     () => getStreamsForGrade(tenant, selectedGrade),
@@ -1191,6 +1225,7 @@ export function ExamsModule({
           currentUserId={currentUserId}
           currentUserEmail={currentUserEmail}
           readOnly={readOnly}
+          navigationTarget={navigationTarget}
           onRefresh={onRefresh}
           onNotify={onNotify}
         />
